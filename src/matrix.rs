@@ -1,19 +1,19 @@
 use std::ops::{Add, AddAssign, Sub, SubAssign};
-use std::fmt::{Debug, Display, Formatter};
+use std::fmt::{Debug, Formatter};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Dimensions {
-    pub n: usize,
-    pub m: usize
+    pub m: usize,
+    pub n: usize
 }
 
 impl Debug for Dimensions {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write![f, "{}x{}", self.n, self.m]
+        write![f, "{}x{}", self.m, self.n]
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Matrix {
     data: Vec<f64>,
     dimensions: Dimensions
@@ -22,14 +22,14 @@ pub struct Matrix {
 impl Matrix {
     pub fn null(dimensions: Dimensions) -> Self {
         let mut data = Vec::new();
-        data.resize(dimensions.n * dimensions.m, 0f64);
+        data.resize(dimensions.m * dimensions.n, 0f64);
         Self { data, dimensions }
     }
 
     pub fn new(dimensions: Dimensions, mut fill: impl FnMut(usize) -> f64) -> Self {
         let mut data = Vec::new();
         let mut i = 0;
-        data.resize_with(dimensions.n * dimensions.m, || {
+        data.resize_with(dimensions.m * dimensions.n, || {
             let res = fill(i);
             i += 1;
             res
@@ -38,13 +38,25 @@ impl Matrix {
     }
 
     pub fn identity(n: usize) -> Self {
-        Self::new(Dimensions { n, m: n }, |i| {
+        Self::new(Dimensions { m: n, n }, |i| {
             if i % (n + 1) == 0 {
                 1f64
             } else {
                 0f64
             }
         })
+    }
+
+    pub fn transpose(self) -> Self {
+        let mut new = Self::null(Dimensions { m: self.dimensions.n, n: self.dimensions.m });
+        let mut data = Vec::new();
+        data.resize(self.data.len(), 0f64);
+        for i in 0..new.dimensions.m {
+            for j in 0..new.dimensions.n {
+                new.set(i, j, self.get(j, i));
+            }
+        }
+        new
     }
 
     pub fn inc(dimensions: Dimensions) -> Self {
@@ -77,23 +89,23 @@ impl Matrix {
 
     fn assert_equal_dimensions(&self, other: &Self) {
         if self.dimensions != other.dimensions {
-            panic!("dimension mismatch for addition: {:?} != {:?}", self.dimensions.n, self.dimensions.m);
+            panic!("dimension mismatch for addition: {:?} != {:?}", self.dimensions.m, self.dimensions.n);
         }
     }
 }
 
 impl Debug for Matrix {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        for i in 0..self.dimensions.n {
+        for i in 0..self.dimensions.m {
             write![f, "["]?;
-            for j in 0..self.dimensions.m {
+            for j in 0..self.dimensions.n {
                 write![f, "{}", self.get(i, j)]?;
-                if j < self.dimensions.m - 1 {
+                if j < self.dimensions.n - 1 {
                     write![f, " "]?;
                 }
             }
             write![f, "]"]?;
-            if i < self.dimensions.n - 1 {
+            if i < self.dimensions.m - 1 {
                 write![f, "\n"]?;
             }
         }
