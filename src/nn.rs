@@ -38,6 +38,9 @@ impl <F: ActivationFunction> NeuralNetwork<F> {
             unsafe {
                 current.mul_assign_unchecked(&layer.weights);
                 current.add_assign_unchecked(&layer.biases);
+                current.apply(|n| {
+                    1f64 / (1f64 + f64::exp(-n))
+                });
                 F::invoke(&mut current);
             }
         }

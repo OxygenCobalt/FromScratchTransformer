@@ -113,6 +113,12 @@ impl Matrix {
         new
     }
 
+    pub fn apply(&mut self, transform: impl Fn(f64) -> f64) {
+        for v in &mut self.data {
+            *v = transform(*v);
+        }
+    }
+
     fn assert_equal_shape(&self, other: &Self) {
         if self.shape != other.shape {
             panic!("shape mismatch for addition: {:?} != {:?}", self.shape.m, self.shape.n);
