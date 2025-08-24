@@ -1,4 +1,5 @@
-use std::ops::{Add, AddAssign, Sub, SubAssign, Mul, MulAssign};
+use std::ops::Range;
+use std::ops::{Add, AddAssign, Mul, MulAssign, RangeBounds, RangeTo, Sub, SubAssign};
 use std::fmt::{Debug, Formatter};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,12 +54,16 @@ impl Matrix {
         })
     }
 
-    pub fn noisy(shape: Shape) -> Self {
-        Self::new(shape, |i| rand::random_range(0.0..1.0))
+    pub fn noisy(shape: Shape, range: Range<f64>) -> Self {
+        Self::new(shape, |i| rand::random_range(range.clone()))
     }
 
     pub fn shape(&self) -> Shape {
         self.shape
+    }
+
+    pub fn sum(&self) -> f64 {
+        self.data.iter().sum()
     }
 
     pub fn get(&self, i: usize, j: usize) -> f64 {

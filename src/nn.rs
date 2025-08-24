@@ -2,13 +2,14 @@ use std::marker::PhantomData;
 
 use crate::matrix::{Shape, Matrix};
 
-pub struct NeuralNetwork<F: ActivationFunction> {
+pub struct NeuralNetwork<F: ActivationFn, C: CostFn> {
     input_shape: Shape,
     layers: Vec<HiddenLayer>,
     _activation: PhantomData<F>,
+    _cost: PhantomData<C>
 }
 
-impl <F: ActivationFunction> NeuralNetwork<F> {
+impl <F: ActivationFn, C: CostFn> NeuralNetwork<F, C> {
     pub fn new(io_shape: IOShape, layers: &[usize]) -> Self {
         Self { 
             input_shape: Shape { m: 1, n: io_shape.input_size },
@@ -23,9 +24,10 @@ impl <F: ActivationFunction> NeuralNetwork<F> {
                     n: weight_shape.n  
                 };
                 
-                HiddenLayer { weights: Matrix::noisy(weight_shape), biases: Matrix::noisy(bias_shape) }
+                HiddenLayer { weights: Matrix::noisy(weight_shape, 0.0..1.0), biases: Matrix::null(bias_shape) }
             }).collect(),
             _activation: PhantomData,
+            _cost: PhantomData
         }
     }
 
@@ -53,14 +55,38 @@ pub struct IOShape {
     pub output_size: usize
 }
 
-pub trait ActivationFunction {
+pub trait ActivationFn {
     fn invoke(input: &mut Matrix);
 }
 
 pub struct Identity;
 
-impl ActivationFunction for Identity {
+impl ActivationFn for Identity {
     fn invoke(_: &mut Matrix) {}
+}
+
+pub struct Result {
+    input: Matrix,
+    output: Matrix,
+    expected_output: Matrix,
+
+}
+
+pub trait CostFn {
+    fn invoke(results: Vec<Result>) -> f64;
+}
+
+pub struct MSE;
+
+impl CostFn for MSE {
+    fn invoke(results: Vec<Result>) -> f64 {
+        let mut sum = 0.0;
+        let n = results.len() as f64;
+        for result in results {
+            sum += (result.expected_output - result.output).sum();
+        }
+        sum / (2.0 * n as f64)
+    }
 }
 
 struct HiddenLayer {
