@@ -1,15 +1,18 @@
+use std::fs::File;
+
+use parquet::arrow::arrow_reader::ArrowReaderBuilder;
+
 use crate::{matrix::{Matrix, Shape}, nn::{IOShape, Identity, NeuralNetwork, MSE}};
 
 mod matrix;
 mod nn;
 
 fn main() {
+    let train = File::open("./mnist/mnist/train-00000-of-00001.parquet").unwrap();
+    let parquet = ArrowReaderBuilder::try_new(train).unwrap().build();
     let shape = IOShape {
-        input_size: 4,
-        output_size: 3
+        input_size: 784,
+        output_size: 10
     };
-    let nn = NeuralNetwork::<Identity, MSE>::new(shape, &[3, 100, 3]);
-
-    let inputs = Matrix::noisy(Shape { m: 1, n: 4 }, 0.0..1.0);
-    println!("{:?}", nn.evaluate(inputs));
+    let nn = NeuralNetwork::<Identity, MSE>::new(shape, &[15]);
 }
