@@ -1,10 +1,16 @@
-use std::ops::{Add, AddAssign, Sub, SubAssign};
+use std::ops::{Add, AddAssign, Sub, SubAssign, Mul, MulAssign};
 use std::fmt::{Debug, Formatter};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Dimensions {
     pub m: usize,
     pub n: usize
+}
+
+impl Dimensions {
+    pub fn square(n: usize) -> Self {
+        Self { m: n, n }
+    }
 }
 
 impl Debug for Dimensions {
@@ -38,7 +44,7 @@ impl Matrix {
     }
 
     pub fn identity(n: usize) -> Self {
-        Self::new(Dimensions { m: n, n }, |i| {
+        Self::new(Dimensions::square(n), |i| {
             if i % (n + 1) == 0 {
                 1f64
             } else {
@@ -87,9 +93,31 @@ impl Matrix {
         }
     }
 
+    pub unsafe fn mul_assign_unchecked(&mut self, rhs: Self) {
+        let old = self.clone();
+        self.dimensions.n = rhs.dimensions.n;
+        self.data.resize(self.dimensions.m * self.dimensions.n, 0f64);
+        for i in 0..self.dimensions.m {
+            for j in 0..self.dimensions.n {
+                let mut sum = 0f64;
+                for k in 0..old.dimensions.n {
+                    sum += old.get(i, k) * rhs.get(k, j)
+                }
+                self.set(i, j, sum);
+            }
+        }
+    }
+
     fn assert_equal_dimensions(&self, other: &Self) {
         if self.dimensions != other.dimensions {
             panic!("dimension mismatch for addition: {:?} != {:?}", self.dimensions.m, self.dimensions.n);
+        }
+    }
+
+    fn assert_equal_n_m(&self, rhs: &Self) {
+        if self.dimensions.n != rhs.dimensions.m {
+            panic!("dimension mismatch: {:?} is incompatible with {:?}, {} != {}", 
+            self.dimensions, rhs.dimensions, self.dimensions.n, rhs.dimensions.m);
         }
     }
 }
@@ -140,5 +168,20 @@ impl SubAssign for Matrix {
     fn sub_assign(&mut self, rhs: Self) {
         self.assert_equal_dimensions(&rhs);
         unsafe { self.sub_assign_unchecked(rhs) }
+    }
+}
+
+impl Mul for Matrix {
+    type Output = Self;
+    fn mul(mut self, rhs: Self) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl MulAssign for Matrix {
+    fn mul_assign(&mut self, rhs: Self) {
+        self.assert_equal_n_m(&rhs);
+        unsafe { self.mul_assign_unchecked(rhs) }
     }
 }
