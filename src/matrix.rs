@@ -53,20 +53,12 @@ impl Matrix {
         })
     }
 
-    pub fn transpose(self) -> Self {
-        let mut new = Self::null(Dimensions { m: self.dimensions.n, n: self.dimensions.m });
-        let mut data = Vec::new();
-        data.resize(self.data.len(), 0f64);
-        for i in 0..new.dimensions.m {
-            for j in 0..new.dimensions.n {
-                new.set(i, j, self.get(j, i));
-            }
-        }
-        new
+    pub fn noisy(dimensions: Dimensions) -> Self {
+        Self::new(dimensions, |i| rand::random_range(0.0..1.0))
     }
 
-    pub fn inc(dimensions: Dimensions) -> Self {
-        Self::new(dimensions, |i| i as f64)
+    pub fn dimensions(&self) -> Dimensions {
+        self.dimensions
     }
 
     pub fn get(&self, i: usize, j: usize) -> f64 {
@@ -76,6 +68,7 @@ impl Matrix {
     pub fn set(&mut self, i: usize, j: usize, value: f64) {
         self.data[i * self.dimensions.n + j] = value;
     }
+
 
     pub unsafe fn add_assign_unchecked(&mut self, rhs: Self) {
         for i in 0..self.data.len() {
@@ -105,6 +98,24 @@ impl Matrix {
                 }
                 self.set(i, j, sum);
             }
+        }
+    }
+
+    pub fn transpose(self) -> Self {
+        let mut new = Self::null(Dimensions { m: self.dimensions.n, n: self.dimensions.m });
+        let mut data = Vec::new();
+        data.resize(self.data.len(), 0f64);
+        for i in 0..new.dimensions.m {
+            for j in 0..new.dimensions.n {
+                new.set(i, j, self.get(j, i));
+            }
+        }
+        new
+    }
+
+    pub fn apply(&mut self, a: impl Fn(f64) -> f64) {
+        for v in &mut self.data {
+            *v = a(*v)
         }
     }
 

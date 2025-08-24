@@ -1,19 +1,10 @@
-use crate::matrix::{Dimensions, Matrix};
+use crate::{matrix::{Dimensions, Matrix}, nn::NeuralNetwork};
 
 mod matrix;
+mod nn;
 
 fn main() {
-    let mut a = Matrix::inc(Dimensions::square(10000));
-    let mut b = Matrix::inc(Dimensions::square(10000));
-    // println!("then");
-
-    // for i in 0..=100 {
-    //     let mut mat = Matrix::inc(Dimensions { n: 10, m: 10 });
-    //     let transposed = mat.clone().transpose();
-    //     mat.transpose_assign(i);
-    //     println!("i={}, correct? {:?}", i, mat == transposed);
-    // }
-    // println!("transpose");
-    // println!("{:?}", mat);
-    // mat += Matrix::identity(10000);
+    let inputs = Matrix::noisy(Dimensions { m: 1, n: 4 });
+    let nn = NeuralNetwork::new(4, &[10, 100, 1000, 10000, 100, 10], 3);
+    println!("{:?}", nn.evaluate(inputs));
 }
