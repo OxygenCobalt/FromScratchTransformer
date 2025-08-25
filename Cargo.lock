@@ -694,6 +694,7 @@ name = "nn"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "log",
  "parquet",
  "png",
  "rand",

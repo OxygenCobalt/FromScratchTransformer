@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 arrow = "56.0.0"
+log = "0.4.27"
 parquet = "56.0.0"
 png = "0.17.16"
 rand = "0.9.2"

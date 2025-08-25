@@ -1,14 +1,17 @@
+use std::fmt::{Debug, Formatter};
 use std::ops::Range;
 use std::ops::{Add, AddAssign, Mul, MulAssign, RangeBounds, RangeTo, Sub, SubAssign};
-use std::fmt::{Debug, Formatter};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Shape {
     pub m: usize,
-    pub n: usize
+    pub n: usize,
 }
 
 impl Shape {
+    pub fn vector(n: usize) -> Self {
+        Self { m: n, n: 1 }
+    }
     pub fn square(n: usize) -> Self {
         Self { m: n, n }
     }
@@ -23,7 +26,7 @@ impl Debug for Shape {
 #[derive(Clone, PartialEq)]
 pub struct Matrix {
     data: Vec<f64>,
-    shape: Shape
+    shape: Shape,
 }
 
 impl Matrix {
@@ -45,24 +48,22 @@ impl Matrix {
     }
 
     pub fn identity(n: usize) -> Self {
-        Self::new(Shape::square(n), |i| {
-            if i % (n + 1) == 0 {
-                1f64
-            } else {
-                0f64
-            }
-        })
+        Self::new(
+            Shape::square(n),
+            |i| {
+                if i % (n + 1) == 0 { 1f64 } else { 0f64 }
+            },
+        )
     }
 
     pub fn noisy(shape: Shape, range: Range<f64>) -> Self {
         Self::new(shape, |_i| rand::random_range(range.clone()))
     }
 
-    pub fn from_vec(m: usize, n: usize, data: Vec<f64>) -> Self {
-        assert_eq!(data.len(), m * n, "Data size must match shape dimensions");
+    pub fn vector(data: Vec<f64>) -> Self {
         Self {
+            shape: Shape::vector(data.len()),
             data,
-            shape: Shape { m, n }
         }
     }
 
@@ -82,20 +83,15 @@ impl Matrix {
         self.data[i * self.shape.n + j] = value;
     }
 
-
     pub unsafe fn add_assign_unchecked(&mut self, rhs: &Self) {
         for i in 0..self.data.len() {
-            unsafe {
-                *self.data.get_unchecked_mut(i) += rhs.data.get_unchecked(i)
-            }
+            unsafe { *self.data.get_unchecked_mut(i) += rhs.data.get_unchecked(i) }
         }
     }
 
     pub unsafe fn sub_assign_unchecked(&mut self, rhs: &Self) {
         for i in 0..self.data.len() {
-            unsafe {
-                *self.data.get_unchecked_mut(i) -= rhs.data.get_unchecked(i)
-            }
+            unsafe { *self.data.get_unchecked_mut(i) -= rhs.data.get_unchecked(i) }
         }
     }
 
@@ -115,7 +111,10 @@ impl Matrix {
     }
 
     pub fn transpose(self) -> Self {
-        let mut new = Self::null(Shape { m: self.shape.n, n: self.shape.m });
+        let mut new = Self::null(Shape {
+            m: self.shape.n,
+            n: self.shape.m,
+        });
         let mut data = Vec::new();
         data.resize(self.data.len(), 0f64);
         for i in 0..new.shape.m {
@@ -138,14 +137,19 @@ impl Matrix {
 
     fn assert_equal_shape(&self, other: &Self) {
         if self.shape != other.shape {
-            panic!("shape mismatch for addition: {:?} != {:?}", self.shape.m, self.shape.n);
+            panic!(
+                "shape mismatch for addition: {:?} != {:?}",
+                self.shape.m, self.shape.n
+            );
         }
     }
 
     fn assert_equal_n_m(&self, rhs: &Self) {
         if self.shape.n != rhs.shape.m {
-            panic!("shape mismatch: {:?} is incompatible with {:?}, {} != {}", 
-            self.shape, rhs.shape, self.shape.n, rhs.shape.m);
+            panic!(
+                "shape mismatch: {:?} is incompatible with {:?}, {} != {}",
+                self.shape, rhs.shape, self.shape.n, rhs.shape.m
+            );
         }
     }
 }
@@ -180,7 +184,9 @@ impl Add for Matrix {
 impl AddAssign for Matrix {
     fn add_assign(&mut self, rhs: Self) {
         self.assert_equal_shape(&rhs);
-        unsafe { self.add_assign_unchecked(&rhs); }
+        unsafe {
+            self.add_assign_unchecked(&rhs);
+        }
     }
 }
 
