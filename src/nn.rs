@@ -31,6 +31,36 @@ impl <F: ActivationFn, C: CostFn> NeuralNetwork<F, C> {
         }
     }
 
+    pub fn train(&mut self, mut train: Vec<(Matrix, Matrix)>, learning_rate: f64) {
+        let batch_size = 10;
+        while !train.is_empty() {
+            // TODO: Switch to matrix slicing across a 3d matrix, requires tensors :(
+            let mut sum_delta_weights: Vec<Matrix> = Vec::new();
+            let mut sum_delta_biases: Vec<Matrix> =  Vec::new();
+            for _ in 0..batch_size {
+                let (input, expected_output) = train.swap_remove(rand::random_range(0..train.len()));
+                let (delta_weights, delta_biases) = self.backprop(input, expected_output);
+                for (a, b) in sum_delta_weights.iter_mut().zip(delta_weights.into_iter()) {
+                    *a += b;
+                }
+                for (a, b) in sum_delta_biases.iter_mut().zip(delta_biases.into_iter()) {
+                    *a += b;
+                }
+            }
+            let scale_by = learning_rate / batch_size as f64;
+            for ((layer, mut delta_weights), mut delta_biases) in self.layers.iter_mut().zip(sum_delta_weights.into_iter()).zip(sum_delta_biases) {
+                delta_weights.scale(scale_by);
+                delta_biases.scale(scale_by);
+                layer.weights += delta_weights;
+                layer.biases += delta_biases;   
+            }
+        }
+    }
+
+    fn backprop(&self, input: Matrix, expected_output: Matrix) -> (Vec<Matrix>, Vec<Matrix>) {
+        todo!();
+    }
+
     pub fn evaluate(&self, input: Matrix) -> Matrix {
         if self.input_shape != input.shape() {
             panic!("malformed input: need {:?}, got {:?}", self.input_shape, input.shape())
@@ -83,7 +113,7 @@ impl CostFn for MSE {
         let mut sum = 0.0;
         let n = results.len() as f64;
         for result in results {
-            sum += (result.expected_output - result.output).sum();
+            sum += (result.expected_output - result.output).length();
         }
         sum / (2.0 * n as f64)
     }

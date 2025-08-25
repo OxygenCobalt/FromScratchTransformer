@@ -62,8 +62,8 @@ impl Matrix {
         self.shape
     }
 
-    pub fn sum(&self) -> f64 {
-        self.data.iter().sum()
+    pub fn length(&self) -> f64 {
+        self.data.iter().map(|n| n * n).sum()
     }
 
     pub fn get(&self, i: usize, j: usize) -> f64 {
@@ -116,6 +116,10 @@ impl Matrix {
             }
         }
         new
+    }
+
+    pub fn scale(&mut self, c: f64) {
+        self.apply(|n| c * n);
     }
 
     pub fn apply(&mut self, transform: impl Fn(f64) -> f64) {
