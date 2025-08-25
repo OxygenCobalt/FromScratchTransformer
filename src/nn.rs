@@ -51,8 +51,8 @@ impl <F: ActivationFn, C: CostFn> NeuralNetwork<F, C> {
             for ((layer, mut delta_weights), mut delta_biases) in self.layers.iter_mut().zip(sum_delta_weights.into_iter()).zip(sum_delta_biases) {
                 delta_weights.scale(scale_by);
                 delta_biases.scale(scale_by);
-                layer.weights += delta_weights;
-                layer.biases += delta_biases;   
+                layer.weights -= delta_weights;
+                layer.biases -= delta_biases;   
             }
         }
     }

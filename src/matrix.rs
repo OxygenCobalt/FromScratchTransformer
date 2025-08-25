@@ -55,7 +55,15 @@ impl Matrix {
     }
 
     pub fn noisy(shape: Shape, range: Range<f64>) -> Self {
-        Self::new(shape, |i| rand::random_range(range.clone()))
+        Self::new(shape, |_i| rand::random_range(range.clone()))
+    }
+
+    pub fn from_vec(m: usize, n: usize, data: Vec<f64>) -> Self {
+        assert_eq!(data.len(), m * n, "Data size must match shape dimensions");
+        Self {
+            data,
+            shape: Shape { m, n }
+        }
     }
 
     pub fn shape(&self) -> Shape {
