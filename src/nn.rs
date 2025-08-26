@@ -15,16 +15,16 @@ pub struct NeuralNetwork<F: ActivationFn, C: CostFn> {
 impl<F: ActivationFn, C: CostFn> NeuralNetwork<F, C> {
     pub fn new(io_shape: IOShape, hidden_layers: &[usize]) -> Self {
         let input_layer = HiddenLayer { 
-            weights: Matrix::null(Shape { m: hidden_layers[0],  n: io_shape.input_size }),
-            biases: Matrix::null(Shape::vector(hidden_layers[0]))
+            weights: Matrix::noisy(Shape { m: hidden_layers[0],  n: io_shape.input_size }),
+            biases: Matrix::noisy(Shape::vector(hidden_layers[0]))
         };
         let mut layers = vec![input_layer];
         for (i, _) in hidden_layers.iter().enumerate() {
             let in_shape = layers.last().unwrap().biases.shape();
             let out_size = hidden_layers.get(i + 1).cloned().unwrap_or_else(|| io_shape.output_size);
             let layer= HiddenLayer {
-                weights: Matrix::null(Shape { m: out_size, n: in_shape.m,  }),
-                biases: Matrix::null(Shape::vector(out_size))
+                weights: Matrix::noisy(Shape { m: out_size, n: in_shape.m,  }),
+                biases: Matrix::noisy(Shape::vector(out_size))
             };
             layers.push(layer);
         }
@@ -39,13 +39,12 @@ impl<F: ActivationFn, C: CostFn> NeuralNetwork<F, C> {
 
     pub fn train(&mut self, train: &mut Train, learning_rate: f64) {
         let batch_size = 10;
-        for (i, batch) in train.batch(batch_size).enumerate() {
+        for batch in train.batch(batch_size) {
             // TODO: Switch to matrix slicing across a 3d matrix, requires tensors :(
             let mut sum_delta_weights: Vec<Matrix> = self.layers.iter().map(|l| Matrix::null(l.weights.shape())).collect();
             let mut sum_delta_biases: Vec<Matrix> = self.layers.iter().map(|l| Matrix::null(l.biases.shape())).collect();
             for example in batch {
                 let delta = self.backprop(example);
-                // println!("{:?}", delta.biases.iter().map(|l| l.shape()).collect::<Vec<_>>());
                 for (a, b) in sum_delta_weights.iter_mut().zip(delta.weights.into_iter()) {
                     *a += b;
                 }
@@ -60,16 +59,10 @@ impl<F: ActivationFn, C: CostFn> NeuralNetwork<F, C> {
                 .zip(sum_delta_weights.into_iter())
                 .zip(sum_delta_biases)
             {
-                // println!("{:?}", layer.biases);
-                // println!("{:?}", delta_weights.clone());
-
                 layer.weights -= delta_weights.scale(scale_by);
                 layer.biases -= delta_biases.scale(scale_by);
-
-                // println!("{:?}", layer.biases);
             }
         }
-        println!()
     }
 
     fn backprop(&self, example: &Example) -> Delta {
@@ -118,12 +111,10 @@ impl<F: ActivationFn, C: CostFn> NeuralNetwork<F, C> {
             activations_in.get(j, 0) * error.error.get(i, 0)
         }));
         delta.biases.push(error.error.clone());
-        // println!("{:?}", error.error);
 
         while let Some(calculated_layer) = calculated_layers.pop() {
             let activations_in = calculated_layers.last().map(|v| v.activation.clone()).unwrap_or(example.input.clone());
             let this_error = (error.weights.transpose() * error.error).hmul(F::activation_prime(calculated_layer.weighted_input));
-            // println!("{:?}", this_error);
             let weights = calculated_layer.weights.clone();
             delta.weights.push(weights.clone().apply_indexed(|i, j, _| {
                 activations_in.get(j, 0) * this_error.get(i, 0)
@@ -157,9 +148,7 @@ impl<F: ActivationFn, C: CostFn> NeuralNetwork<F, C> {
             )
         }
         let mut current = input.clone();
-        for (i, layer) in self.layers.iter().enumerate() {
-            let current_shape =current.shape();
-            // println!("layer {}: {:?} x {:?} + {:?}", i, layer.weights.shape(), current_shape, layer.biases.shape());
+        for layer in &self.layers {
             let weighted = layer.weights.clone() * current + layer.biases.clone();
             let activation = F::activation(weighted);
             current = activation;
@@ -187,9 +176,9 @@ impl ActivationFn for Sigmoid {
 
     fn activation_prime(input: Matrix) -> Matrix {
         input.apply(|n| {
-            let x = 1f64 + f64::exp(-n);
-            let x_prime = -f64::exp(-n);
-            -(x_prime / (x*x))
+            // let x = 1f64 + f64::exp(-n);
+            // let x_prime = -f64::exp(-n);
+            (1f64 / (1f64 + f64::exp(-n))) * (1.0 - (1f64 / (1f64 + f64::exp(-n))))
         })
     }
 }

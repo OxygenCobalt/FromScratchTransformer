@@ -1,6 +1,11 @@
 use std::fmt::{Debug, Formatter};
 use std::ops::Range;
 use std::ops::{Add, AddAssign, Mul, MulAssign, RangeBounds, RangeTo, Sub, SubAssign};
+use std::sync::LazyLock;
+
+use rand_distr::{Distribution, Normal};
+
+static NORMAL: LazyLock<Normal<f64>> = std::sync::LazyLock::new(|| Normal::new(0.0, 1.0).unwrap());
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Shape {
@@ -56,8 +61,20 @@ impl Matrix {
         )
     }
 
-    pub fn noisy(shape: Shape, range: Range<f64>) -> Self {
-        Self::new(shape, |_i| rand::random_range(range.clone()))
+    pub fn noisy(shape: Shape) -> Self {
+        Self::new(shape, |_i| NORMAL.sample(&mut rand::rng()))
+    }
+
+    pub fn top(&self) -> usize {
+        let mut max= 0.0;
+        let mut maxi = 0;
+        for (i, v) in self.data.iter().enumerate() {
+            if *v > max {
+                max = *v;
+                maxi = i;
+            }
+        }
+        return maxi;
     }
 
     pub fn vector(data: Vec<f64>) -> Self {
