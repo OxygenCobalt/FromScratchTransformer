@@ -10,7 +10,7 @@ pub struct Shape {
 
 impl Shape {
     pub fn vector(n: usize) -> Self {
-        Self { m: n, n: 1 }
+        Self { m: 1, n }
     }
     pub fn square(n: usize) -> Self {
         Self { m: n, n }
@@ -110,6 +110,27 @@ impl Matrix {
         }
     }
 
+    pub fn hmul(mut self, rhs: Self) -> Self {
+        self.hmul_assign(&rhs);
+        self
+    }
+
+    pub fn hmul_assign(&mut self, rhs: &Self) {
+        if self.shape != rhs.shape {
+            panic!("shape mismatch for hadamard multiplicataion: {:?} != {:?}", self.shape, rhs.shape);
+        }
+        unsafe { self.hmul_assign_unchecked(rhs); }
+    }
+
+    pub unsafe fn hmul_assign_unchecked(&mut self, rhs: &Self) {
+        if self.shape != rhs.shape {
+            panic!("shape mismatch for hadamard multiplicataion: {:?} != {:?}", self.shape, rhs.shape);
+        }
+        for i in 0..self.data.len() {
+            unsafe { *self.data.get_unchecked_mut(i) *= rhs.data.get_unchecked(i) }
+        }
+    }
+
     pub fn transpose(self) -> Self {
         let mut new = Self::null(Shape {
             m: self.shape.n,
@@ -125,21 +146,22 @@ impl Matrix {
         new
     }
 
-    pub fn scale(&mut self, c: f64) {
-        self.apply(|n| c * n);
+    pub fn scale(self, c: f64) -> Self {
+        self.apply(|n| c * n)
     }
 
-    pub fn apply(&mut self, transform: impl Fn(f64) -> f64) {
+    pub fn apply(mut self, transform: impl Fn(f64) -> f64) -> Self {
         for v in &mut self.data {
             *v = transform(*v);
         }
+        self
     }
 
     fn assert_equal_shape(&self, other: &Self) {
         if self.shape != other.shape {
             panic!(
                 "shape mismatch for addition: {:?} != {:?}",
-                self.shape.m, self.shape.n
+                self.shape, other.shape
             );
         }
     }
