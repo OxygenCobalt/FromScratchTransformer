@@ -10,7 +10,7 @@ pub struct Shape {
 
 impl Shape {
     pub fn vector(n: usize) -> Self {
-        Self { m: 1, n }
+        Self { m: n, n: 1 }
     }
     pub fn square(n: usize) -> Self {
         Self { m: n, n }
@@ -153,6 +153,20 @@ impl Matrix {
     pub fn apply(mut self, transform: impl Fn(f64) -> f64) -> Self {
         for v in &mut self.data {
             *v = transform(*v);
+        }
+        self
+    }
+
+    pub fn apply_indexed(mut self, transform: impl Fn(usize, usize, f64) -> f64) -> Self {
+        let mut i = 0;
+        let mut j = 0;
+        for v in &mut self.data {
+            *v = transform(i, j, *v);
+            j += 1;
+            if j >= self.shape.n {
+                i += 1;
+                j = 0;
+            } 
         }
         self
     }

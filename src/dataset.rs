@@ -55,7 +55,7 @@ fn load_mnist(path: &str) -> Result<Vec<Example>, parquet::errors::ParquetError>
     let parquet = ArrowReaderBuilder::try_new(train)?.build()?;
     let mut images: Vec<Matrix> = Vec::new();
     let mut labels: Vec<Matrix> = Vec::new();
-    for item in parquet.take(5) {
+    for item in parquet {
         let record_batch = item.unwrap();
         let image_column = record_batch
             .column_by_name("image")
