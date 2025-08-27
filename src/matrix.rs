@@ -1,6 +1,5 @@
 use std::fmt::{Debug, Formatter};
-use std::ops::Range;
-use std::ops::{Add, AddAssign, Mul, MulAssign, RangeBounds, RangeTo, Sub, SubAssign};
+use std::ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign};
 use std::sync::LazyLock;
 
 use rand_distr::{Distribution, Normal};
@@ -16,9 +15,6 @@ pub struct Shape {
 impl Shape {
     pub fn vector(n: usize) -> Self {
         Self { m: n, n: 1 }
-    }
-    pub fn square(n: usize) -> Self {
-        Self { m: n, n }
     }
 }
 
@@ -52,25 +48,14 @@ impl Matrix {
         Self { shape, data }
     }
 
-    pub fn identity(n: usize) -> Self {
-        Self::new(
-            Shape::square(n),
-            |i| {
-                if i % (n + 1) == 0 { 1f64 } else { 0f64 }
-            },
-        )
-    }
-
     pub fn noisy(shape: Shape) -> Self {
         Self::new(shape, |_i| NORMAL.sample(&mut rand::rng()))
     }
 
-    pub fn top(&self) -> usize {
-        let mut max= 0.0;
+    pub fn argmax(&self) -> usize {
         let mut maxi = 0;
         for (i, v) in self.data.iter().enumerate() {
-            if *v > max {
-                max = *v;
+            if *v > self.data[maxi] {
                 maxi = i;
             }
         }

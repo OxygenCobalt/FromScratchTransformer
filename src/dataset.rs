@@ -2,7 +2,7 @@ use std::slice::Chunks;
 
 use rand::seq::SliceRandom;
 
-use crate::{matrix::Matrix, nn::IOShape};
+use crate::{matrix::Matrix};
 use std::fs::File;
 
 use arrow::array::{Array, BinaryArray, Int64Array, StructArray};
@@ -10,7 +10,7 @@ use parquet::arrow::arrow_reader::ArrowReaderBuilder;
 
 #[derive(Clone)]
 pub struct Train {
-    examples: Vec<Example>,
+    pub examples: Vec<Example>,
 }
 
 impl Train {
@@ -30,6 +30,11 @@ pub struct Test {
     pub examples: Vec<Example>,
 }
 
+pub struct IOShape {
+    pub in_size: usize,
+    pub out_size: usize
+}
+
 pub struct Dataset {
     pub train: Train,
     pub test: Test,
@@ -43,8 +48,8 @@ pub fn mnist() -> Result<Dataset, parquet::errors::ParquetError> {
         train: Train { examples: train },
         test: Test { examples: test },
         io_shape: IOShape {
-            input_size: 784,
-            output_size: 10,
+            in_size: 784,
+            out_size: 10,
         },
     };
     Ok(dataset)

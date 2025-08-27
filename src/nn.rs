@@ -1,66 +1,71 @@
-use std::{f32::consts::E, io, marker::PhantomData, thread::current};
+use std::marker::PhantomData;
 
 use crate::{
     dataset::{Example, Test, Train},
     matrix::{Matrix, Shape},
 };
 
-pub struct NeuralNetwork<F: ActivationFn, C: CostFn> {
-    input_shape: Shape,
+pub struct NeuralNetwork<L: Loss> {
     layers: Vec<HiddenLayer>,
-    _activation: PhantomData<F>,
-    _cost: PhantomData<C>,
+    _cost: PhantomData<L>,
 }
 
-impl<F: ActivationFn, C: CostFn> NeuralNetwork<F, C> {
-    pub fn new(io_shape: IOShape, hidden_layers: &[usize]) -> Self {
-        let input_layer = HiddenLayer { 
-            weights: Matrix::noisy(Shape { m: hidden_layers[0],  n: io_shape.input_size }),
-            biases: Matrix::noisy(Shape::vector(hidden_layers[0]))
-        };
-        let mut layers = vec![input_layer];
-        for (i, _) in hidden_layers.iter().enumerate() {
-            let in_shape = layers.last().unwrap().biases.shape();
-            let out_size = hidden_layers.get(i + 1).cloned().unwrap_or_else(|| io_shape.output_size);
+impl<L: Loss> NeuralNetwork<L> {
+    pub fn new(layers: &[Layer]) -> Self {
+        if layers.len() < 2 {
+            panic!("not enough layers");
+        }
+        let mut hidden_layers = vec![];
+        for i in 0..(layers.len() - 1) {
+            let layer = &layers[i];
+            let next_layer = &layers[i + 1];
+            let in_size = layer.neurons;
+            let out_size = next_layer.neurons;
             let layer= HiddenLayer {
-                weights: Matrix::noisy(Shape { m: out_size, n: in_shape.m,  }),
-                biases: Matrix::noisy(Shape::vector(out_size))
+                weights: Matrix::noisy(Shape { m: out_size, n: in_size,  }),
+                biases: Matrix::noisy(Shape::vector(out_size)),
+                activation_fn: layer.activation_fn
             };
-            layers.push(layer);
+            hidden_layers.push(layer);
         }
 
         Self {
-            input_shape: Shape::vector(io_shape.input_size),
-            layers: layers,
-            _activation: PhantomData,
+            layers: hidden_layers,
             _cost: PhantomData,
         }
     }
 
-    pub fn train(&mut self, train: &mut Train, learning_rate: f64) {
-        let batch_size = 10;
-        for batch in train.batch(batch_size) {
-            // TODO: Switch to matrix slicing across a 3d matrix, requires tensors :(
-            let mut sum_delta_weights: Vec<Matrix> = self.layers.iter().map(|l| Matrix::null(l.weights.shape())).collect();
-            let mut sum_delta_biases: Vec<Matrix> = self.layers.iter().map(|l| Matrix::null(l.biases.shape())).collect();
-            for example in batch {
-                let delta = self.backprop(example);
-                for (a, b) in sum_delta_weights.iter_mut().zip(delta.weights.into_iter()) {
-                    *a += b;
+    pub fn train(&mut self, train: &mut Train, epochs: u64, batch_size: usize, learning_rate: f64, reporting: Option<impl Reporting>) {
+            if let Some(ref rep) = reporting {
+                rep.report(None, self.test(rep.data(), rep));
+            }
+        for epoch in 0..epochs {
+            for batch in train.batch(batch_size) {
+                // TODO: Switch to matrix slicing across a 3d matrix, requires tensors :(
+                let mut sum_delta_weights: Vec<Matrix> = self.layers.iter().map(|l| Matrix::null(l.weights.shape())).collect();
+                let mut sum_delta_biases: Vec<Matrix> = self.layers.iter().map(|l| Matrix::null(l.biases.shape())).collect();
+                for example in batch {
+                    let delta = self.backprop(example);
+                    for (a, b) in sum_delta_weights.iter_mut().zip(delta.weights.into_iter()) {
+                        *a += b;
+                    }
+                    for (a, b) in sum_delta_biases.iter_mut().zip(delta.biases.into_iter()) {
+                        *a += b;
+                    }
                 }
-                for (a, b) in sum_delta_biases.iter_mut().zip(delta.biases.into_iter()) {
-                    *a += b;
+                let scale_by = learning_rate / batch_size as f64;
+                for ((layer, delta_weights), delta_biases) in self
+                    .layers
+                    .iter_mut()
+                    .zip(sum_delta_weights.into_iter())
+                    .zip(sum_delta_biases)
+                {
+                    layer.weights -= delta_weights.scale(scale_by);
+                    layer.biases -= delta_biases.scale(scale_by);
                 }
             }
-            let scale_by = learning_rate / batch_size as f64;
-            for ((layer, delta_weights), delta_biases) in self
-                .layers
-                .iter_mut()
-                .zip(sum_delta_weights.into_iter())
-                .zip(sum_delta_biases)
-            {
-                layer.weights -= delta_weights.scale(scale_by);
-                layer.biases -= delta_biases.scale(scale_by);
+            if let Some(ref rep) = reporting {
+                rep.report(Some(epoch), self.test(rep.data(), rep));
             }
         }
     }
@@ -73,21 +78,21 @@ impl<F: ActivationFn, C: CostFn> NeuralNetwork<F, C> {
         // 2. the cost must be written as a fn of the neural networks outputs
         pub struct CalculatedLayer {
             weights: Matrix,
-            biases: Matrix,
             weighted_input: Matrix,
-            activation: Matrix 
+            activation: Matrix,
+            activation_fn: ActivationFn 
         }
         let mut calculated_layers: Vec<CalculatedLayer> = Vec::new();
         let mut current = example.input.clone();
         for layer in &self.layers {
             let weighted_input = (layer.weights.clone() * current) + layer.biases.clone();
-            let activation = F::activation(weighted_input.clone());
+            let activation = layer.activation_fn.activation(weighted_input.clone());
             current = activation.clone();
             calculated_layers.push(CalculatedLayer {
                 weights: layer.weights.clone(),
-                biases: layer.biases.clone(),
                 weighted_input,
-                activation
+                activation,
+                activation_fn: layer.activation_fn
             });
         }
         let mut delta = Delta {
@@ -103,8 +108,7 @@ impl<F: ActivationFn, C: CostFn> NeuralNetwork<F, C> {
         let last: CalculatedLayer = calculated_layers.pop().unwrap();
         let mut error = Error {
             weights: last.weights.clone(),
-            error: (last.activation.clone() - example.output.clone())
-            .hmul(F::activation_prime(last.weighted_input.clone()))
+            error: L::loss_prime(example.output.clone(), last.activation.clone()).hmul(last.activation_fn.activation_prime(last.weighted_input.clone()))
         };
         let activations_in = calculated_layers.last().map(|v| v.activation.clone()).unwrap_or(example.input.clone());
         delta.weights.push(error.weights.clone().apply_indexed(|i, j, _| {
@@ -114,7 +118,7 @@ impl<F: ActivationFn, C: CostFn> NeuralNetwork<F, C> {
 
         while let Some(calculated_layer) = calculated_layers.pop() {
             let activations_in = calculated_layers.last().map(|v| v.activation.clone()).unwrap_or(example.input.clone());
-            let this_error = (error.weights.transpose() * error.error).hmul(F::activation_prime(calculated_layer.weighted_input));
+            let this_error = (error.weights.transpose() * error.error).hmul(calculated_layer.activation_fn.activation_prime(calculated_layer.weighted_input));
             let weights = calculated_layer.weights.clone();
             delta.weights.push(weights.clone().apply_indexed(|i, j, _| {
                 activations_in.get(j, 0) * this_error.get(i, 0)
@@ -131,87 +135,95 @@ impl<F: ActivationFn, C: CostFn> NeuralNetwork<F, C> {
         delta
     }
 
-    pub fn test(&self, test: &Test) -> f64 {
+    pub fn test(&self, test: &Test, success_criteria: &impl SuccessCriteria) -> TestResult {
         let mut sum = 0.0;
-        for (i, example) in test.examples.iter().enumerate() {
-            sum += C::cost(example.output.clone(), self.evaluate(&example.input));
+        let mut successes = 0;
+        for example in &test.examples {
+            let result = self.evaluate(&example.input);
+            if success_criteria.is_success(example, &result) {
+                successes += 1;
+            }
+            sum += L::loss(example.output.clone(), result);
         }
-        return sum / test.examples.len() as f64;
+        return TestResult {
+            avg_cost: sum / test.examples.len() as f64,
+            successes
+        }
     }
 
     pub fn evaluate(&self, input: &Matrix) -> Matrix {
-        if self.input_shape != input.shape() {
-            panic!(
-                "malformed input: need {:?}, got {:?}",
-                self.input_shape,
-                input.shape()
-            )
-        }
         let mut current = input.clone();
         for layer in &self.layers {
             let weighted = layer.weights.clone() * current + layer.biases.clone();
-            let activation = F::activation(weighted);
+            let activation = layer.activation_fn.activation(weighted);
             current = activation;
         }
         current
     }
 }
 
-pub struct IOShape {
-    pub input_size: usize,
-    pub output_size: usize,
+#[derive(Clone, Copy)]
+pub enum ActivationFn {
+    Sigmoid,
 }
 
-pub trait ActivationFn {
-    fn activation(input: Matrix) -> Matrix;
-    fn activation_prime(input: Matrix) -> Matrix;
-}
-
-pub struct Sigmoid;
-
-impl ActivationFn for Sigmoid {
-    fn activation(input: Matrix) -> Matrix {
-        input.apply(|n| 1f64 / (1f64 + f64::exp(-n)))
+impl ActivationFn {
+    fn activation(&self, input: Matrix) -> Matrix {
+        match self {
+            Self::Sigmoid => input.apply(|n| 1f64 / (1f64 + f64::exp(-n)))
+        }
     }
 
-    fn activation_prime(input: Matrix) -> Matrix {
-        input.apply(|n| {
-            // let x = 1f64 + f64::exp(-n);
-            // let x_prime = -f64::exp(-n);
-            (1f64 / (1f64 + f64::exp(-n))) * (1.0 - (1f64 / (1f64 + f64::exp(-n))))
-        })
+    fn activation_prime(&self, input: Matrix) -> Matrix {
+        match self {
+            Self::Sigmoid => input.apply(|n| (1f64 / (1f64 + f64::exp(-n))) * (1.0 - (1f64 / (1f64 + f64::exp(-n)))))
+        }
     }
 }
 
-pub struct Result {
-    input: Matrix,
-    output: Matrix,
-    expected_output: Matrix,
-}
-
-pub trait CostFn {
-    fn cost(expected: Matrix, got: Matrix) -> f64;
-    fn cost_prime(expected: Matrix, got: Matrix) -> Matrix;
+pub trait Loss {
+    fn loss(expected: Matrix, got: Matrix) -> f64;
+    fn loss_prime(expected: Matrix, got: Matrix) -> Matrix;
 }
 
 pub struct MSE;
 
-impl CostFn for MSE {
-    fn cost(expected: Matrix, got: Matrix) -> f64 {
-        return (expected - got).length() / 2.0;
+impl Loss for MSE {
+    fn loss(expected: Matrix, got: Matrix) -> f64 {
+        return (got - expected).length() / 2.0;
     }
 
-    fn cost_prime(expected: Matrix, got: Matrix) -> Matrix {
-        return expected - got;
+    fn loss_prime(expected: Matrix, got: Matrix) -> Matrix {
+        return got - expected;
     }
+}
+
+pub struct TestResult {
+    pub avg_cost: f64,
+    pub successes: u64,
+}
+
+pub trait SuccessCriteria {
+    fn is_success(&self, example: &Example, output: &Matrix) -> bool;
+}
+
+pub trait Reporting: SuccessCriteria {
+    fn data(&self) -> &Test;
+    fn report(&self, epoch: Option<u64>, result: TestResult);
 }
 
 struct HiddenLayer {
     weights: Matrix,
     biases: Matrix,
+    activation_fn: ActivationFn
 }
 
 struct Delta {
     weights: Vec<Matrix>,
     biases: Vec<Matrix>
+}
+
+pub struct Layer {
+    pub neurons: usize,
+    pub activation_fn: ActivationFn
 }
