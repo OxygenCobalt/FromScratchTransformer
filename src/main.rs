@@ -4,6 +4,9 @@ mod dataset;
 mod matrix;
 mod nn;
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 struct MnistReporting {
     test: Test
 }

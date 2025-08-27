@@ -77,11 +77,27 @@ impl Matrix {
     }
 
     pub fn get(&self, i: usize, j: usize) -> f64 {
-        self.data[i * self.shape.n + j]
+        let idx = self.index_of(i, j);
+        self.data[idx]
+    }
+
+    pub unsafe fn get_unchecked(&self, i: usize, j: usize) -> f64 {
+        let idx = self.index_of(i, j);
+        unsafe { *self.data.get_unchecked(idx) }
     }
 
     pub fn set(&mut self, i: usize, j: usize, value: f64) {
-        self.data[i * self.shape.n + j] = value;
+        let idx = self.index_of(i, j);
+        self.data[idx] = value;
+    }
+
+    pub unsafe fn set_unchecked(&mut self, i: usize, j: usize, value: f64) {
+        let idx = self.index_of(i, j);
+        unsafe { *self.data.get_unchecked_mut(idx) = value }
+    }
+
+    fn index_of(&self, i: usize, j: usize) -> usize {
+        i * self.shape.n + j
     }
 
     pub fn add(mut self, rhs: &Self) -> Self {
@@ -157,9 +173,9 @@ impl Matrix {
             for j in 0..self.shape.n {
                 let mut sum = 0f64;
                 for k in 0..old.shape.n {
-                    sum += old.get(i, k) * rhs.get(k, j)
+                    sum += unsafe { old.get_unchecked(i, k) } * unsafe { rhs.get_unchecked(k, j) }
                 }
-                self.set(i, j, sum);
+                unsafe { self.set_unchecked(i, j, sum) };
             }
         }
     }
@@ -173,7 +189,7 @@ impl Matrix {
         data.resize(self.data.len(), 0f64);
         for i in 0..new.shape.m {
             for j in 0..new.shape.n {
-                new.set(i, j, self.get(j, i));
+                unsafe { new.set_unchecked(i, j, self.get_unchecked(j, i)); }
             }
         }
         new
