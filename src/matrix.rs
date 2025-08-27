@@ -1,5 +1,4 @@
 use std::fmt::{Debug, Formatter};
-use std::ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign};
 use std::sync::LazyLock;
 
 use rand_distr::{Distribution, Normal};
@@ -85,10 +84,34 @@ impl Matrix {
         self.data[i * self.shape.n + j] = value;
     }
 
+    pub fn add(mut self, rhs: &Self) -> Self {
+        self.add_assign(rhs);
+        self
+    }
+
+    pub fn add_assign(&mut self, rhs: &Self) {
+        if self.shape != rhs.shape {
+            panic!("shape mismatch for element-wise addition: {:?} != {:?}", self.shape, rhs.shape);
+        }
+        unsafe { self.add_assign_unchecked(rhs) }
+    }
+
     pub unsafe fn add_assign_unchecked(&mut self, rhs: &Self) {
         for i in 0..self.data.len() {
             unsafe { *self.data.get_unchecked_mut(i) += rhs.data.get_unchecked(i) }
         }
+    }
+
+    pub fn sub(mut self, rhs: &Self) -> Self {
+        self.sub_assign(rhs);
+        self
+    }
+
+    pub fn sub_assign(&mut self, rhs: &Self) {
+        if self.shape != rhs.shape {
+            panic!("shape mismatch for element-wise subtraction: {:?} != {:?}", self.shape, rhs.shape);
+        }
+        unsafe { self.sub_assign_unchecked(rhs); }
     }
 
     pub unsafe fn sub_assign_unchecked(&mut self, rhs: &Self) {
@@ -97,7 +120,36 @@ impl Matrix {
         }
     }
 
+    pub fn mul(mut self, rhs: &Self) -> Self {
+        if self.shape != rhs.shape {
+            panic!("shape mismatch for element-wise multiplication: {:?} != {:?}", self.shape, rhs.shape);
+        }
+        unsafe { self.mul_assign_unchecked(&rhs) };
+        self
+    }
+
     pub unsafe fn mul_assign_unchecked(&mut self, rhs: &Self) {
+        for i in 0..self.data.len() {
+            unsafe { *self.data.get_unchecked_mut(i) *= rhs.data.get_unchecked(i) }
+        }
+    }
+
+    pub fn dot(mut self, rhs: &Self) -> Self {
+        self.dot_assign(rhs);
+        self
+    }
+
+    pub fn dot_assign(&mut self, rhs: &Self) {
+        if self.shape.n != rhs.shape.m {
+            panic!(
+                "shape mismatch for matrix multiplication: {:?} is incompatible with {:?}, {} != {}",
+                self.shape, rhs.shape, self.shape.n, rhs.shape.m
+            );
+        }
+        unsafe { self.dot_assign_unchecked(rhs); }
+    }
+
+    pub unsafe fn dot_assign_unchecked(&mut self, rhs: &Self) {
         let old = self.clone();
         self.shape.n = rhs.shape.n;
         self.data.resize(self.shape.m * self.shape.n, 0f64);
@@ -109,27 +161,6 @@ impl Matrix {
                 }
                 self.set(i, j, sum);
             }
-        }
-    }
-
-    pub fn hmul(mut self, rhs: Self) -> Self {
-        self.hmul_assign(&rhs);
-        self
-    }
-
-    pub fn hmul_assign(&mut self, rhs: &Self) {
-        if self.shape != rhs.shape {
-            panic!("shape mismatch for hadamard multiplicataion: {:?} != {:?}", self.shape, rhs.shape);
-        }
-        unsafe { self.hmul_assign_unchecked(rhs); }
-    }
-
-    pub unsafe fn hmul_assign_unchecked(&mut self, rhs: &Self) {
-        if self.shape != rhs.shape {
-            panic!("shape mismatch for hadamard multiplicataion: {:?} != {:?}", self.shape, rhs.shape);
-        }
-        for i in 0..self.data.len() {
-            unsafe { *self.data.get_unchecked_mut(i) *= rhs.data.get_unchecked(i) }
         }
     }
 
@@ -172,24 +203,6 @@ impl Matrix {
         }
         self
     }
-
-    fn assert_equal_shape(&self, other: &Self) {
-        if self.shape != other.shape {
-            panic!(
-                "shape mismatch for addition: {:?} != {:?}",
-                self.shape, other.shape
-            );
-        }
-    }
-
-    fn assert_equal_n_m(&self, rhs: &Self) {
-        if self.shape.n != rhs.shape.m {
-            panic!(
-                "shape mismatch: {:?} is incompatible with {:?}, {} != {}",
-                self.shape, rhs.shape, self.shape.n, rhs.shape.m
-            );
-        }
-    }
 }
 
 impl Debug for Matrix {
@@ -211,49 +224,3 @@ impl Debug for Matrix {
     }
 }
 
-impl Add for Matrix {
-    type Output = Self;
-    fn add(mut self, rhs: Self) -> Self::Output {
-        self += rhs;
-        self
-    }
-}
-
-impl AddAssign for Matrix {
-    fn add_assign(&mut self, rhs: Self) {
-        self.assert_equal_shape(&rhs);
-        unsafe {
-            self.add_assign_unchecked(&rhs);
-        }
-    }
-}
-
-impl Sub for Matrix {
-    type Output = Self;
-    fn sub(mut self, rhs: Self) -> Self::Output {
-        self -= rhs;
-        self
-    }
-}
-
-impl SubAssign for Matrix {
-    fn sub_assign(&mut self, rhs: Self) {
-        self.assert_equal_shape(&rhs);
-        unsafe { self.sub_assign_unchecked(&rhs) }
-    }
-}
-
-impl Mul for Matrix {
-    type Output = Self;
-    fn mul(mut self, rhs: Self) -> Self::Output {
-        self *= rhs;
-        self
-    }
-}
-
-impl MulAssign for Matrix {
-    fn mul_assign(&mut self, rhs: Self) {
-        self.assert_equal_n_m(&rhs);
-        unsafe { self.mul_assign_unchecked(&rhs) }
-    }
-}

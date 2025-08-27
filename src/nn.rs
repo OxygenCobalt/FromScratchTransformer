@@ -36,32 +36,28 @@ impl<L: Loss> NeuralNetwork<L> {
     }
 
     pub fn train(&mut self, train: &mut Train, epochs: u64, batch_size: usize, learning_rate: f64, reporting: Option<impl Reporting>) {
-            if let Some(ref rep) = reporting {
-                rep.report(None, self.test(rep.data(), rep));
-            }
+        if let Some(ref rep) = reporting {
+            rep.report(None, self.test(rep.data(), rep));
+        }
         for epoch in 0..epochs {
             for batch in train.batch(batch_size) {
                 // TODO: Switch to matrix slicing across a 3d matrix, requires tensors :(
-                let mut sum_delta_weights: Vec<Matrix> = self.layers.iter().map(|l| Matrix::null(l.weights.shape())).collect();
-                let mut sum_delta_biases: Vec<Matrix> = self.layers.iter().map(|l| Matrix::null(l.biases.shape())).collect();
+                let mut sum_nablas: Vec<NablaCost> = Vec::with_capacity(self.layers.len());
                 for example in batch {
-                    let delta = self.backprop(example);
-                    for (a, b) in sum_delta_weights.iter_mut().zip(delta.weights.into_iter()) {
-                        *a += b;
+                    let mut nablas = self.backprop(example);
+                    if sum_nablas.is_empty() {
+                        sum_nablas.append(&mut nablas);
+                        continue;
                     }
-                    for (a, b) in sum_delta_biases.iter_mut().zip(delta.biases.into_iter()) {
-                        *a += b;
+                    for (sum_nabla, nabla) in sum_nablas.iter_mut().zip(nablas) {
+                        sum_nabla.weights.add_assign(&nabla.weights);
+                        sum_nabla.biases.add_assign(&nabla.biases);
                     }
                 }
                 let scale_by = learning_rate / batch_size as f64;
-                for ((layer, delta_weights), delta_biases) in self
-                    .layers
-                    .iter_mut()
-                    .zip(sum_delta_weights.into_iter())
-                    .zip(sum_delta_biases)
-                {
-                    layer.weights -= delta_weights.scale(scale_by);
-                    layer.biases -= delta_biases.scale(scale_by);
+                for (layer, sum_nabla) in self.layers.iter_mut().zip(sum_nablas) {
+                    layer.weights.sub_assign(&sum_nabla.weights.scale(scale_by));
+                    layer.biases.sub_assign(&sum_nabla.biases.scale(scale_by));
                 }
             }
             if let Some(ref rep) = reporting {
@@ -70,69 +66,70 @@ impl<L: Loss> NeuralNetwork<L> {
         }
     }
 
-    fn backprop(&self, example: &Example) -> Delta {
+    fn backprop(&self, example: &Example) -> Vec<NablaCost> {
         // backprop assumes that
         // 1. the cost function can be written as the avg of several training examples
         //    this is bc backprop allows us to compute delta(w,b) for a specific example only
         //    so we gotta have avg it out if we want to perform sgd
         // 2. the cost must be written as a fn of the neural networks outputs
-        pub struct CalculatedLayer {
-            weights: Matrix,
+        pub struct CalculatedLayer<'a> {
+            weights: &'a Matrix,
             weighted_input: Matrix,
             activation: Matrix,
             activation_fn: ActivationFn 
         }
-        let mut calculated_layers: Vec<CalculatedLayer> = Vec::new();
+        let mut calculated_layers: Vec<CalculatedLayer> = Vec::with_capacity(self.layers.len());
         let mut current = example.input.clone();
         for layer in &self.layers {
-            let weighted_input = (layer.weights.clone() * current) + layer.biases.clone();
+            let weighted_input = (layer.weights.clone().dot(&current)).add(&layer.biases);
             let activation = layer.activation_fn.activation(weighted_input.clone());
             current = activation.clone();
             calculated_layers.push(CalculatedLayer {
-                weights: layer.weights.clone(),
+                weights: &layer.weights,
                 weighted_input,
                 activation,
                 activation_fn: layer.activation_fn
             });
         }
-        let mut delta = Delta {
-            weights: Vec::new(),
-            biases: Vec::new()
-        };
-
-        pub struct Error {
-            weights: Matrix,
+        
+        pub struct Error<'a> {
+            weights: &'a Matrix,
             error: Matrix
         }
 
         let last: CalculatedLayer = calculated_layers.pop().unwrap();
         let mut error = Error {
-            weights: last.weights.clone(),
-            error: L::loss_prime(example.output.clone(), last.activation.clone()).hmul(last.activation_fn.activation_prime(last.weighted_input.clone()))
+            weights: last.weights,
+            error: L::loss_prime(&example.output, &last.activation).mul(&last.activation_fn.activation_prime(last.weighted_input))
         };
-        let activations_in = calculated_layers.last().map(|v| v.activation.clone()).unwrap_or(example.input.clone());
-        delta.weights.push(error.weights.clone().apply_indexed(|i, j, _| {
-            activations_in.get(j, 0) * error.error.get(i, 0)
-        }));
-        delta.biases.push(error.error.clone());
+
+        let mut nablas = Vec::with_capacity(self.layers.len());
+        let activations_in = calculated_layers.last().map(|v| v.activation.clone()).unwrap_or_else(|| example.input.clone());
+        nablas.push(NablaCost {
+            weights: error.weights.clone().apply_indexed(|i, j, _| {
+                activations_in.get(j, 0) * error.error.get(i, 0)
+            }),
+            biases: error.error.clone()
+        });
 
         while let Some(calculated_layer) = calculated_layers.pop() {
-            let activations_in = calculated_layers.last().map(|v| v.activation.clone()).unwrap_or(example.input.clone());
-            let this_error = (error.weights.transpose() * error.error).hmul(calculated_layer.activation_fn.activation_prime(calculated_layer.weighted_input));
-            let weights = calculated_layer.weights.clone();
-            delta.weights.push(weights.clone().apply_indexed(|i, j, _| {
-                activations_in.get(j, 0) * this_error.get(i, 0)
-            }));
-            delta.biases.push(this_error.clone());
             error = Error {
                 weights: calculated_layer.weights,
-                error: this_error
+                error: (error.weights.clone().transpose().dot(&error.error))
+                    .mul(&calculated_layer.activation_fn.activation_prime(calculated_layer.weighted_input))
             };
+            let activations_in = calculated_layers.last().map(|v| v.activation.clone()).unwrap_or_else(|| example.input.clone());
+            let weights = calculated_layer.weights.clone();
+            nablas.push(NablaCost {
+                weights: weights.apply_indexed(|i, j, _| {
+                    activations_in.get(j, 0) * error.error.get(i, 0)
+                }),
+                biases: error.error.clone()
+            });
         }
 
-        delta.weights.reverse();
-        delta.biases.reverse();
-        delta
+        nablas.reverse();
+        nablas
     }
 
     pub fn test(&self, test: &Test, success_criteria: &impl SuccessCriteria) -> TestResult {
@@ -143,7 +140,7 @@ impl<L: Loss> NeuralNetwork<L> {
             if success_criteria.is_success(example, &result) {
                 successes += 1;
             }
-            sum += L::loss(example.output.clone(), result);
+            sum += L::loss(&example.output, &result);
         }
         return TestResult {
             avg_cost: sum / test.examples.len() as f64,
@@ -154,7 +151,7 @@ impl<L: Loss> NeuralNetwork<L> {
     pub fn evaluate(&self, input: &Matrix) -> Matrix {
         let mut current = input.clone();
         for layer in &self.layers {
-            let weighted = layer.weights.clone() * current + layer.biases.clone();
+            let weighted = layer.weights.clone().dot(&current).add(&layer.biases);
             let activation = layer.activation_fn.activation(weighted);
             current = activation;
         }
@@ -201,19 +198,19 @@ impl ActivationFn {
 }
 
 pub trait Loss {
-    fn loss(expected: Matrix, got: Matrix) -> f64;
-    fn loss_prime(expected: Matrix, got: Matrix) -> Matrix;
+    fn loss(expected: &Matrix, got: &Matrix) -> f64;
+    fn loss_prime(expected: &Matrix, got: &Matrix) -> Matrix;
 }
 
 pub struct MSE;
 
 impl Loss for MSE {
-    fn loss(expected: Matrix, got: Matrix) -> f64 {
-        return (got - expected).length() / 2.0;
+    fn loss(expected: &Matrix, got: &Matrix) -> f64 {
+        return (got.clone().sub(expected)).length() / 2.0;
     }
 
-    fn loss_prime(expected: Matrix, got: Matrix) -> Matrix {
-        return got - expected;
+    fn loss_prime(expected: &Matrix, got: &Matrix) -> Matrix {
+        return got.clone().sub(expected);
     }
 }
 
@@ -237,9 +234,9 @@ struct HiddenLayer {
     activation_fn: ActivationFn
 }
 
-struct Delta {
-    weights: Vec<Matrix>,
-    biases: Vec<Matrix>
+struct NablaCost {
+    weights: Matrix,
+    biases: Matrix
 }
 
 pub struct Layer {

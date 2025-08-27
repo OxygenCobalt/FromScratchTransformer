@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use crate::{dataset::{Example, Test}, matrix::Matrix, nn::{ActivationFn, Layer, NeuralNetwork, Reporting, SuccessCriteria, MSE}};
 
 mod dataset;
@@ -30,7 +28,6 @@ impl SuccessCriteria for MnistReporting {
 }
 
 fn main() {
-    std::thread::sleep(Duration::from_millis(1000));
     println!("loading data...");
     let mut mnist = dataset::mnist().unwrap();
     println!("loading done: {} train examples, {} test examples.", mnist.train.examples.len(), mnist.test.examples.len());
