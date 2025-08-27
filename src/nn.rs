@@ -165,19 +165,38 @@ impl<L: Loss> NeuralNetwork<L> {
 #[derive(Clone, Copy)]
 pub enum ActivationFn {
     Sigmoid,
+    ReLU
 }
 
 impl ActivationFn {
     fn activation(&self, input: Matrix) -> Matrix {
         match self {
-            Self::Sigmoid => input.apply(|n| 1f64 / (1f64 + f64::exp(-n)))
+            Self::Sigmoid => input.apply(Self::sigmoid),
+            Self::ReLU => input.apply(Self::relu)
         }
     }
 
     fn activation_prime(&self, input: Matrix) -> Matrix {
         match self {
-            Self::Sigmoid => input.apply(|n| (1f64 / (1f64 + f64::exp(-n))) * (1.0 - (1f64 / (1f64 + f64::exp(-n)))))
+            Self::Sigmoid => input.apply(Self::sigmoid_prime),
+            Self::ReLU => input.apply(Self::relu_prime),
         }
+    }
+
+    fn sigmoid(n: f64) -> f64 {
+        1f64 / (1f64 + f64::exp(-n))
+    }
+    
+    fn sigmoid_prime(n: f64) -> f64 {
+        Self::sigmoid(n) * (1.0 - Self::sigmoid(n))
+    }
+
+    fn relu(n: f64) -> f64 {
+        if n > 0.0 { n } else { 0.0 }
+    }
+
+    fn relu_prime(n: f64) -> f64 {
+        if n > 0.0 { 1.0 } else { 0.0 }
     }
 }
 
