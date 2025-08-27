@@ -86,11 +86,10 @@ impl<L: Loss> NeuralNetwork<L> {
         }
 
         let mut calculated_layers: Vec<CalculatedLayer> = Vec::with_capacity(self.layers.len());
-        let mut current = example.input.clone();
         for layer in &self.layers {
-            let weighted_input = (layer.weights.clone().dot(&current)).add(&layer.biases);
+            let current = calculated_layers.last().map(|l| &l.activation).unwrap_or_else(|| &example.input);
+            let weighted_input = (layer.weights.clone().dot(current)).add(&layer.biases);
             let activation = layer.activation_fn.activation(weighted_input.clone());
-            current = activation.clone();
             calculated_layers.push(CalculatedLayer {
                 weights: &layer.weights,
                 biases: &layer.biases,
@@ -108,9 +107,9 @@ impl<L: Loss> NeuralNetwork<L> {
 
         let mut nablas = Vec::with_capacity(self.layers.len());
         let activations_in = calculated_layers.last()
-            .map(|v| v.activation.clone())
-            .unwrap_or_else(|| example.input.clone());
-        nablas.push(L::nabla_loss(last.weights.clone(), last.biases.clone(), activations_in, error.error.clone()));
+            .map(|v| &v.activation)
+            .unwrap_or_else(|| &example.input);
+        nablas.push(L::nabla_loss(last.weights, last.biases, activations_in, &error.error));
 
         while let Some(calculated_layer) = calculated_layers.pop() {
             error = Error {
@@ -119,9 +118,9 @@ impl<L: Loss> NeuralNetwork<L> {
                     .mul(&calculated_layer.activation_fn.activation_prime(calculated_layer.weighted_input))
             };
             let activations_in = calculated_layers.last()
-                .map(|v| v.activation.clone())
-                .unwrap_or_else(|| example.input.clone());
-            nablas.push(L::nabla_loss(calculated_layer.weights.clone(), calculated_layer.biases.clone(), activations_in, error.error.clone()));
+                .map(|v| &v.activation)
+                .unwrap_or_else(|| &example.input);
+            nablas.push(L::nabla_loss(calculated_layer.weights, calculated_layer.biases, activations_in, &error.error));
         }
 
         nablas.reverse();
@@ -196,7 +195,7 @@ impl ActivationFn {
 pub trait Loss {
     fn loss(expected: &Matrix, got: &Matrix) -> f64;
     fn delta_loss(expected: &Matrix, got: &Matrix) -> Matrix;
-    fn nabla_loss(weights: Matrix, biases: Matrix, activations_in: Matrix, error: Matrix) -> NablaLoss;
+    fn nabla_loss(weights: &Matrix, biases: &Matrix, activations_in: &Matrix, error: &Matrix) -> NablaLoss;
 }
 
 pub struct MSE;
@@ -210,12 +209,12 @@ impl Loss for MSE {
         return got.clone().sub(expected);
     }
     
-    fn nabla_loss(weights: Matrix, _: Matrix, activations_in: Matrix, error: Matrix) -> NablaLoss {
+    fn nabla_loss(weights: &Matrix, _: &Matrix, activations_in: &Matrix, error: &Matrix) -> NablaLoss {
         NablaLoss {
-            weights: weights.apply_indexed(|i, j, _| {
+            weights: weights.clone().apply_indexed(|i, j, _| {
                 activations_in.get(j, 0) * error.get(i, 0)
             }),
-            biases: error
+            biases: error.clone()
         }
     }
 }
