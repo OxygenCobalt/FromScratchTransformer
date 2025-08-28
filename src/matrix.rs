@@ -37,19 +37,21 @@ impl Matrix {
         Self { data, shape }
     }
 
-    pub fn new(shape: Shape, mut fill: impl FnMut(usize) -> f64) -> Self {
+    pub fn new(shape: Shape, mut fill: impl FnMut(usize, usize) -> f64) -> Self {
         let mut data = Vec::new();
-        let mut i = 0;
+        let mut n = 0;
         data.resize_with(shape.m * shape.n, || {
-            let res = fill(i);
-            i += 1;
+            let i = n / shape.n;
+            let j = n % shape.n;
+            let res = fill(i, j);
+            n += 1;
             res
         });
         Self { shape, data }
     }
 
     pub fn noisy(shape: Shape) -> Self {
-        Self::new(shape, |_i| NORMAL.sample(&mut rand::rng()))
+        Self::new(shape, |_, _| NORMAL.sample(&mut rand::rng()))
     }
 
     pub fn argmax(&self) -> usize {
@@ -137,6 +139,10 @@ impl Matrix {
         }
     }
 
+    pub fn scale(self, c: f64) -> Self {
+        self.apply(|n| c * n)
+    }
+
     pub fn mul(mut self, rhs: &Self) -> Self {
         if self.shape != rhs.shape {
             panic!("shape mismatch for element-wise multiplication: {:?} != {:?}", self.shape, rhs.shape);
@@ -196,10 +202,6 @@ impl Matrix {
         new
     }
 
-    pub fn scale(self, c: f64) -> Self {
-        self.apply(|n| c * n)
-    }
-
     pub fn apply(mut self, transform: impl Fn(f64) -> f64) -> Self {
         for v in &mut self.data {
             *v = transform(*v);
@@ -219,6 +221,21 @@ impl Matrix {
             } 
         }
         self
+    }
+
+    pub fn sum_with(&self, transform: impl Fn(usize, usize, f64) -> f64) -> f64 {
+        let mut i = 0;
+        let mut j = 0;
+        let mut sum = 0.0;
+        for v in &self.data {
+            sum += transform(i, j, *v);
+            j += 1;
+            if j >= self.shape.n {
+                i += 1;
+                j = 0;
+            } 
+        }
+        sum
     }
 
     pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
