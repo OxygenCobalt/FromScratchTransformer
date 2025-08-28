@@ -1,5 +1,6 @@
 use std::fmt::{Debug, Formatter};
 use std::sync::LazyLock;
+use std::io::{self, Read, Write};
 
 use rand_distr::{Distribution, Normal};
 
@@ -218,6 +219,34 @@ impl Matrix {
             } 
         }
         self
+    }
+
+    pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
+        write.write_all(&self.shape.m.to_le_bytes())?;
+        write.write(&self.shape.n.to_le_bytes())?;
+        write.write(&self.data.iter().map(|v| v.to_le_bytes()).flatten().collect::<Vec<u8>>())?;
+        Ok(())
+    }
+
+    pub fn read(read: &mut impl Read) -> io::Result<Self> {
+        let mut nb = [0u8; 8];
+        read.read(&mut nb)?;
+        let mut mb = [0u8; 8];
+        read.read_exact(&mut mb)?;
+
+        let shape = Shape { m: usize::from_le_bytes(nb), n: usize::from_le_bytes(mb) };
+
+        let mut data = Vec::new();
+        for i in 0..(shape.m * shape.n) {
+            let mut fb = [0u8; 8];
+            read.read_exact(&mut fb)?;
+            data.push(f64::from_le_bytes(fb));
+        }
+
+        Ok(Self {
+            shape,
+            data
+        })
     }
 }
 

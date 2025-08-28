@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{fs::File, io::{self, Read, Write}, marker::PhantomData};
 
 use crate::{
     dataset::{Example, Test, Train},
@@ -7,7 +7,7 @@ use crate::{
 
 pub struct NeuralNetwork<L: Loss> {
     layers: Vec<HiddenLayer>,
-    _cost: PhantomData<L>,
+    _loss: PhantomData<L>,
 }
 
 impl<L: Loss> NeuralNetwork<L> {
@@ -31,13 +31,18 @@ impl<L: Loss> NeuralNetwork<L> {
 
         Self {
             layers: hidden_layers,
-            _cost: PhantomData,
+            _loss: PhantomData,
         }
     }
 
-    pub fn train(&mut self, train: &mut Train, epochs: u64, batch_size: usize, learning_rate: f64, reporting: Option<impl Reporting>) {
+    pub fn train(&mut self, train: &mut Train, epochs: u64, batch_size: usize, learning_rate: f64, reporting: Option<impl Reporting>, checkpoint_to: Option<&str>) -> io::Result<()> {
         if let Some(ref rep) = reporting {
             rep.report(None, self.test(rep.data(), rep));
+        }
+        if let Some(path) = checkpoint_to {
+            let nn_path = path.to_owned() + "/init.nn";
+            let mut file = File::create(nn_path)?;
+            self.write(&mut file)?;
         }
         for epoch in 0..epochs {
             for batch in train.batch(batch_size) {
@@ -63,15 +68,21 @@ impl<L: Loss> NeuralNetwork<L> {
             if let Some(ref rep) = reporting {
                 rep.report(Some(epoch), self.test(rep.data(), rep));
             }
+            if let Some(path) = checkpoint_to {
+                let nn_path = path.to_owned() + &format!["/{}.nn", epoch + 1];
+                let mut file = File::create(nn_path)?;
+                self.write(&mut file)?;
+            }
         }
+        Ok(())
     }
 
     fn backprop(&self, example: &Example) -> Vec<NablaLoss> {
         // backprop assumes that
-        // 1. the cost function can be written as the avg of several training examples
+        // 1. the loss function can be written as the avg of several training examples
         //    this is bc backprop allows us to compute delta(w,b) for a specific example only
         //    so we gotta have avg it out if we want to perform sgd
-        // 2. the cost must be written as a fn of the neural networks outputs
+        // 2. the loss must be written as a fn of the neural networks outputs
         pub struct CalculatedLayer<'a> {
             weights: &'a Matrix,
             biases: &'a Matrix,
@@ -138,7 +149,7 @@ impl<L: Loss> NeuralNetwork<L> {
             sum += L::loss(&example.output, &result);
         }
         return TestResult {
-            avg_cost: sum / test.examples.len() as f64,
+            avg_loss: sum / test.examples.len() as f64,
             successes
         }
     }
@@ -151,6 +162,40 @@ impl<L: Loss> NeuralNetwork<L> {
             current = activation;
         }
         current
+    }
+
+    pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
+        write.write_all(&self.layers.len().to_le_bytes())?;
+        for layer in &self.layers {
+            write.write_all(layer.activation_fn.id().as_bytes())?;
+            layer.weights.write(write)?;
+            layer.biases.write(write)?;
+        }
+        Ok(())
+    }
+
+    pub fn read(read: &mut impl Read) -> io::Result<Self> {
+        let mut nb = [0u8; 8];
+        read.read(&mut nb)?;
+        let layer_count = usize::from_le_bytes(nb);
+        let mut layers = Vec::with_capacity(layer_count);
+        for _ in 0..layer_count {
+            let mut fnb = [0u8; 8];
+            read.read(&mut fnb)?;
+            let activation_fn = ActivationFn::from_id(&String::from_utf8_lossy(&fnb).into_owned())
+                .ok_or(io::Error::new(io::ErrorKind::Other, "invalid activation function"))?;
+            let weights = Matrix::read(read)?;
+            let biases  = Matrix::read(read)?;
+            layers.push(HiddenLayer {
+                weights,
+                biases,
+                activation_fn
+            });
+        }
+        Ok(Self {
+            layers,
+            _loss: PhantomData
+        })
     }
 }
 
@@ -172,6 +217,21 @@ impl ActivationFn {
         match self {
             Self::Sigmoid => input.apply(Self::sigmoid_prime),
             Self::ReLU => input.apply(Self::relu_prime),
+        }
+    }
+
+    fn id(&self) -> &'static str {
+        match self {
+            Self::Sigmoid => "sigmoid.",
+            Self::ReLU =>    "relu...."
+        }
+    }
+
+    fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "sigmoid." => Some(Self::Sigmoid),
+            "relu...." => Some(Self::ReLU),
+            _ => None
         }
     }
 
@@ -212,7 +272,7 @@ impl Loss for MSE {
     fn nabla_loss(weights: &Matrix, _: &Matrix, activations_in: &Matrix, error: &Matrix) -> NablaLoss {
         NablaLoss {
             weights: weights.clone().apply_indexed(|i, j, _| {
-                activations_in.get(j, 0) * error.get(i, 0)
+                unsafe { activations_in.get_unchecked(j, 0) * error.get_unchecked(i, 0) }
             }),
             biases: error.clone()
         }
@@ -220,7 +280,7 @@ impl Loss for MSE {
 }
 
 pub struct TestResult {
-    pub avg_cost: f64,
+    pub avg_loss: f64,
     pub successes: u64,
 }
 

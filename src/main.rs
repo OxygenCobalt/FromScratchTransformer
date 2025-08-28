@@ -1,3 +1,5 @@
+use std::fs::File;
+
 use crate::{dataset::{Example, Test}, matrix::Matrix, nn::{ActivationFn, Layer, NeuralNetwork, Reporting, SuccessCriteria, MSE}};
 
 mod dataset;
@@ -7,11 +9,11 @@ mod nn;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-struct MnistReporting {
-    test: Test
+struct MnistReporting<'a> {
+    test: &'a Test
 }
 
-impl Reporting for MnistReporting {
+impl <'a> Reporting for MnistReporting<'a> {
     fn data(&self) -> &Test {
         &self.test
     }
@@ -20,11 +22,11 @@ impl Reporting for MnistReporting {
     fn report(&self, epoch: Option<u64>, result: nn::TestResult) {
         let percent_successful = (result.successes as f64 / self.test.examples.len() as f64) * 100.0;
         let phase = epoch.map(|e| format!["epoch {}", e + 1]).unwrap_or("init".to_owned()) ;
-        println!("{}: loss = {}, {} / {} ({}%) successful", phase, result.avg_cost, result.successes, self.test.examples.len(), percent_successful)
+        println!("{}: loss = {}, {} / {} ({}%) successful", phase, result.avg_loss, result.successes, self.test.examples.len(), percent_successful)
     }
 }
 
-impl SuccessCriteria for MnistReporting {
+impl <'a> SuccessCriteria for MnistReporting<'a> {
     fn is_success(&self, example: &Example, output: &Matrix) -> bool {
         example.output.argmax() == output.argmax()
     }
@@ -40,5 +42,8 @@ fn main() {
         Layer { neurons: 30, activation_fn: ActivationFn::Sigmoid },
         Layer { neurons: mnist.io_shape.out_size, activation_fn: ActivationFn::Sigmoid },
     ]);
-    nn.train(&mut mnist.train,  30, 10, 3.0, Some(MnistReporting { test: mnist.test }));
+    nn.train(&mut mnist.train,  30, 10, 3.0, Some(MnistReporting { test: &mnist.test }), Some("mnist_model/")).unwrap();
+    println!("saving result to file...");
+    let mut output = File::create("mnist.nn").unwrap();
+    nn.write(&mut output).unwrap();
 }
