@@ -5,13 +5,14 @@ use crate::{
     matrix::{Matrix, Shape},
 };
 
-pub struct NeuralNetwork<L: Loss> {
+pub struct NeuralNetwork<L: Loss, R: Regularization> {
     axons: Vec<Axon>,
     _loss: PhantomData<L>,
+    regularization: R
 }
 
-impl<L: Loss> NeuralNetwork<L> {
-    pub fn new(layers: &[Layer]) -> Self {
+impl<L: Loss, R: Regularization> NeuralNetwork<L, R> {
+    pub fn new(layers: &[Layer], regularization: R) -> Self {
         if layers.len() < 2 {
             panic!("not enough layers");
         }
@@ -32,6 +33,7 @@ impl<L: Loss> NeuralNetwork<L> {
         Self {
             axons,
             _loss: PhantomData,
+            regularization
         }
     }
 
@@ -44,6 +46,7 @@ impl<L: Loss> NeuralNetwork<L> {
             let mut file = File::create(nn_path)?;
             self.write(&mut file)?;
         }
+        let train_size = train.examples.len();
         for epoch in 0..epochs {
             for batch in train.batch(batch_size) {
                 // TODO: Switch to matrix slicing across a 3d matrix, requires tensors :(
@@ -61,6 +64,10 @@ impl<L: Loss> NeuralNetwork<L> {
                 }
                 let scale_by = learning_rate / batch_size as f64;
                 for (axon, sum_nabla) in self.axons.iter_mut().zip(sum_nablas) {
+                    let regularization = self.regularization.nabla_regularization_w(train_size);
+                    if regularization > 0.0 {
+                        axon.weights.scale_assign(1.0 - (learning_rate * regularization));
+                    }
                     axon.weights.sub_assign(&sum_nabla.weights.scale(scale_by));
                     axon.biases.sub_assign(&sum_nabla.biases.scale(scale_by));
                 }
@@ -152,8 +159,10 @@ impl<L: Loss> NeuralNetwork<L> {
             }
             sum += L::for_test(&example.output, &result);
         }
+        let loss = sum / test.examples.len() as f64;
+        let regularization = self.regularization.regularization(self.axons.iter().map(|a| &a.weights), test.examples.len());
         return TestResult {
-            avg_loss: sum / test.examples.len() as f64,
+            avg_loss: loss + regularization,
             successes
         }
     }
@@ -178,7 +187,7 @@ impl<L: Loss> NeuralNetwork<L> {
         Ok(())
     }
 
-    pub fn read(read: &mut impl Read) -> io::Result<Self> {
+    pub fn read(read: &mut impl Read, regularization: R) -> io::Result<Self> {
         let mut nb = [0u8; 8];
         read.read(&mut nb)?;
         let axon_count = usize::from_le_bytes(nb);
@@ -198,7 +207,8 @@ impl<L: Loss> NeuralNetwork<L> {
         }
         Ok(Self {
             axons,
-            _loss: PhantomData
+            _loss: PhantomData,
+            regularization
         })
     }
 }
@@ -265,7 +275,7 @@ pub struct MSE;
 
 impl Loss for MSE {
     fn for_test(example_output: &Matrix, output_activations: &Matrix) -> f64 {
-        return (output_activations.clone().sub(example_output)).length() / 2.0;
+        return (output_activations.clone().sub(example_output)).norm() / 2.0;
     }
 
     fn for_train(example_output: &Matrix, output_axon: &ActiveAxon, _: &Matrix) -> NablaOutput {
@@ -295,6 +305,23 @@ impl Loss for CrossEntropy {
             biases: output_axon.activation.clone().sub(&example_output)
         };
         NablaOutput { error, nabla_loss: Some(nabla_loss) }
+    }
+}
+
+pub trait Regularization {
+    fn regularization<'a>(&self, weights: impl Iterator<Item=&'a Matrix>, train_size: usize) -> f64;
+    fn nabla_regularization_w(&self, train_size: usize) -> f64;
+}
+
+pub struct L2 { pub lambda: f64 }
+
+impl Regularization for L2 {
+    fn regularization<'a>(&self, weights: impl Iterator<Item=&'a Matrix>, train_size: usize) -> f64 {
+        return  (self.lambda / (2.0 * train_size as f64)) * weights.map(|w| w.norm()).sum::<f64>();
+    }
+
+    fn nabla_regularization_w(&self, train_size: usize) -> f64 {
+        self.lambda / train_size as f64
     }
 }
 

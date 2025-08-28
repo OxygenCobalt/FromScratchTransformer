@@ -75,7 +75,7 @@ impl Matrix {
         self.shape
     }
 
-    pub fn length(&self) -> f64 {
+    pub fn norm(&self) -> f64 {
         self.data.iter().map(|n| n * n).sum()
     }
 
@@ -143,6 +143,10 @@ impl Matrix {
         self.apply(|n| c * n)
     }
 
+    pub fn scale_assign(&mut self, c: f64) {
+        self.apply_assign(|n| c * n);
+    }
+
     pub fn mul(mut self, rhs: &Self) -> Self {
         if self.shape != rhs.shape {
             panic!("shape mismatch for element-wise multiplication: {:?} != {:?}", self.shape, rhs.shape);
@@ -203,10 +207,14 @@ impl Matrix {
     }
 
     pub fn apply(mut self, transform: impl Fn(f64) -> f64) -> Self {
+        self.apply_assign(transform);
+        self
+    }
+
+    pub fn apply_assign(&mut self, transform: impl Fn(f64) -> f64) {
         for v in &mut self.data {
             *v = transform(*v);
         }
-        self
     }
 
     pub fn apply_indexed(mut self, transform: impl Fn(usize, usize, f64) -> f64) -> Self {
@@ -254,7 +262,7 @@ impl Matrix {
         let shape = Shape { m: usize::from_le_bytes(nb), n: usize::from_le_bytes(mb) };
 
         let mut data = Vec::new();
-        for i in 0..(shape.m * shape.n) {
+        for _ in 0..(shape.m * shape.n) {
             let mut fb = [0u8; 8];
             read.read_exact(&mut fb)?;
             data.push(f64::from_le_bytes(fb));
