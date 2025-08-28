@@ -6,7 +6,7 @@ use crate::{
 };
 
 pub struct NeuralNetwork<L: Loss> {
-    layers: Vec<HiddenLayer>,
+    axons: Vec<Axon>,
     _loss: PhantomData<L>,
 }
 
@@ -15,22 +15,22 @@ impl<L: Loss> NeuralNetwork<L> {
         if layers.len() < 2 {
             panic!("not enough layers");
         }
-        let mut hidden_layers = vec![];
+        let mut axons = vec![];
         for i in 0..(layers.len() - 1) {
             let layer = &layers[i];
             let next_layer = &layers[i + 1];
             let in_size = layer.neurons;
             let out_size = next_layer.neurons;
-            let layer= HiddenLayer {
+            let axon= Axon {
                 weights: Matrix::noisy(Shape { m: out_size, n: in_size,  }),
                 biases: Matrix::noisy(Shape::vector(out_size)),
                 activation_fn: layer.activation_fn
             };
-            hidden_layers.push(layer);
+            axons.push(axon);
         }
 
         Self {
-            layers: hidden_layers,
+            axons,
             _loss: PhantomData,
         }
     }
@@ -47,7 +47,7 @@ impl<L: Loss> NeuralNetwork<L> {
         for epoch in 0..epochs {
             for batch in train.batch(batch_size) {
                 // TODO: Switch to matrix slicing across a 3d matrix, requires tensors :(
-                let mut sum_nablas: Vec<NablaLoss> = Vec::with_capacity(self.layers.len());
+                let mut sum_nablas: Vec<NablaLoss> = Vec::with_capacity(self.axons.len());
                 for example in batch {
                     let mut nablas = self.backprop(example);
                     if sum_nablas.is_empty() {
@@ -60,9 +60,9 @@ impl<L: Loss> NeuralNetwork<L> {
                     }
                 }
                 let scale_by = learning_rate / batch_size as f64;
-                for (layer, sum_nabla) in self.layers.iter_mut().zip(sum_nablas) {
-                    layer.weights.sub_assign(&sum_nabla.weights.scale(scale_by));
-                    layer.biases.sub_assign(&sum_nabla.biases.scale(scale_by));
+                for (axon, sum_nabla) in self.axons.iter_mut().zip(sum_nablas) {
+                    axon.weights.sub_assign(&sum_nabla.weights.scale(scale_by));
+                    axon.biases.sub_assign(&sum_nabla.biases.scale(scale_by));
                 }
             }
             if let Some(ref rep) = reporting {
@@ -89,27 +89,27 @@ impl<L: Loss> NeuralNetwork<L> {
             error: Matrix
         }
 
-        let mut calculated_layers: Vec<CalculatedLayer> = Vec::with_capacity(self.layers.len());
-        for layer in &self.layers {
-            let current = calculated_layers.last().map(|l| &l.activation).unwrap_or_else(|| &example.input);
-            let weighted_input = (layer.weights.clone().dot(current)).add(&layer.biases);
-            let activation = layer.activation_fn.activation(weighted_input.clone());
-            calculated_layers.push(CalculatedLayer {
-                layer: &layer,
+        let mut active_axons: Vec<ActiveAxon> = Vec::with_capacity(self.axons.len());
+        for axon in &self.axons {
+            let current = active_axons.last().map(|l| &l.activation).unwrap_or_else(|| &example.input);
+            let weighted_input = (axon.weights.clone().dot(current)).add(&axon.biases);
+            let activation = axon.activation_fn.activation(weighted_input.clone());
+            active_axons.push(ActiveAxon {
+                axon: &axon,
                 weighted_input,
                 activation,
             });
         }
 
-        fn last_activations<'a>(example: &'a Example, calculated_layers: &'a Vec<CalculatedLayer<'_>>) -> &'a Matrix {
-            calculated_layers.last()
+        fn last_activations<'a>(example: &'a Example, active_axons: &'a Vec<ActiveAxon<'_>>) -> &'a Matrix {
+            active_axons.last()
                 .map(|v| &v.activation)
                 .unwrap_or_else(|| &example.input)
         } 
 
-        fn nabla_loss(calculated_layer: CalculatedLayer<'_>, activations_in: &Matrix, error: &Matrix) -> NablaLoss {
+        fn nabla_loss(active_axon: ActiveAxon<'_>, activations_in: &Matrix, error: &Matrix) -> NablaLoss {
             NablaLoss {
-                weights: Matrix::new(calculated_layer.layer.weights.shape(), |i, j| {
+                weights: Matrix::new(active_axon.axon.weights.shape(), |i, j| {
                     unsafe { activations_in.get_unchecked(j, 0) * error.get_unchecked(i, 0) }
                 }),
                 biases: error.clone()
@@ -117,25 +117,25 @@ impl<L: Loss> NeuralNetwork<L> {
         }
 
 
-        let output_layer: CalculatedLayer<'_> = calculated_layers.pop().unwrap();
-        let activations_in = last_activations(example, &calculated_layers);
-        let nabla_output = L::for_train(&example.output, &output_layer, activations_in);
+        let output_axon: ActiveAxon<'_> = active_axons.pop().unwrap();
+        let activations_in = last_activations(example, &active_axons);
+        let nabla_output = L::for_train(&example.output, &output_axon, activations_in);
         let mut error = ErrorAndWeights {
-            weights: &output_layer.layer.weights,
+            weights: &output_axon.axon.weights,
             error: nabla_output.error
         };
 
-        let mut nablas = Vec::with_capacity(self.layers.len());
-        nablas.push(nabla_output.nabla_loss.unwrap_or_else(|| nabla_loss(output_layer, activations_in, &error.error)));
+        let mut nablas = Vec::with_capacity(self.axons.len());
+        nablas.push(nabla_output.nabla_loss.unwrap_or_else(|| nabla_loss(output_axon, activations_in, &error.error)));
 
-        while let Some(calculated_layer) = calculated_layers.pop() {
+        while let Some(active_axon) = active_axons.pop() {
             error = ErrorAndWeights {
-                weights: &calculated_layer.layer.weights,
+                weights: &active_axon.axon.weights,
                 error: (error.weights.clone().transpose().dot(&error.error))
-                    .mul(&calculated_layer.layer.activation_fn.activation_prime(calculated_layer.weighted_input.clone()))
+                    .mul(&active_axon.axon.activation_fn.activation_prime(active_axon.weighted_input.clone()))
             };
-            let activations_in = last_activations(example, &calculated_layers);
-            nablas.push(nabla_loss(calculated_layer, &activations_in, &error.error));
+            let activations_in = last_activations(example, &active_axons);
+            nablas.push(nabla_loss(active_axon, &activations_in, &error.error));
         }
 
         nablas.reverse();
@@ -160,20 +160,20 @@ impl<L: Loss> NeuralNetwork<L> {
 
     pub fn evaluate(&self, input: &Matrix) -> Matrix {
         let mut current = input.clone();
-        for layer in &self.layers {
-            let weighted = layer.weights.clone().dot(&current).add(&layer.biases);
-            let activation = layer.activation_fn.activation(weighted);
+        for axon in &self.axons {
+            let weighted = axon.weights.clone().dot(&current).add(&axon.biases);
+            let activation = axon.activation_fn.activation(weighted);
             current = activation;
         }
         current
     }
 
     pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
-        write.write_all(&self.layers.len().to_le_bytes())?;
-        for layer in &self.layers {
-            write.write_all(layer.activation_fn.id())?;
-            layer.weights.write(write)?;
-            layer.biases.write(write)?;
+        write.write_all(&self.axons.len().to_le_bytes())?;
+        for axon in &self.axons {
+            write.write_all(axon.activation_fn.id())?;
+            axon.weights.write(write)?;
+            axon.biases.write(write)?;
         }
         Ok(())
     }
@@ -181,23 +181,23 @@ impl<L: Loss> NeuralNetwork<L> {
     pub fn read(read: &mut impl Read) -> io::Result<Self> {
         let mut nb = [0u8; 8];
         read.read(&mut nb)?;
-        let layer_count = usize::from_le_bytes(nb);
-        let mut layers = Vec::with_capacity(layer_count);
-        for _ in 0..layer_count {
+        let axon_count = usize::from_le_bytes(nb);
+        let mut axons = Vec::with_capacity(axon_count);
+        for _ in 0..axon_count {
             let mut fnb = [0u8; 8];
             read.read(&mut fnb)?;
             let activation_fn = ActivationFn::from_id(&fnb)
                 .ok_or(io::Error::new(io::ErrorKind::Other, "invalid activation function"))?;
             let weights = Matrix::read(read)?;
             let biases  = Matrix::read(read)?;
-            layers.push(HiddenLayer {
+            axons.push(Axon {
                 weights,
                 biases,
                 activation_fn
             });
         }
         Ok(Self {
-            layers,
+            axons,
             _loss: PhantomData
         })
     }
@@ -258,7 +258,7 @@ impl ActivationFn {
 
 pub trait Loss {
     fn for_test(example_output: &Matrix, output_activations: &Matrix) -> f64;
-    fn for_train(example_output: &Matrix, output_layer: &CalculatedLayer, activations_in: &Matrix) -> NablaOutput;
+    fn for_train(example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> NablaOutput;
 }
 
 pub struct MSE;
@@ -268,8 +268,8 @@ impl Loss for MSE {
         return (output_activations.clone().sub(example_output)).length() / 2.0;
     }
 
-    fn for_train(example_output: &Matrix, output_layer: &CalculatedLayer, _: &Matrix) -> NablaOutput {
-        let error = output_layer.activation.clone().sub(&example_output).mul(&output_layer.layer.activation_fn.activation(output_layer.weighted_input.clone()));
+    fn for_train(example_output: &Matrix, output_axon: &ActiveAxon, _: &Matrix) -> NablaOutput {
+        let error = output_axon.activation.clone().sub(&example_output).mul(&output_axon.axon.activation_fn.activation(output_axon.weighted_input.clone()));
         NablaOutput { error, nabla_loss: None }
     }
 }
@@ -284,15 +284,15 @@ impl Loss for CrossEntropy {
         })
     }
 
-    fn for_train(example_output: &Matrix, output_layer: &CalculatedLayer, activations_in: &Matrix) -> NablaOutput {
-        let error = output_layer.activation.clone().sub(&example_output);
+    fn for_train(example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> NablaOutput {
+        let error = output_axon.activation.clone().sub(&example_output);
         let nabla_loss = NablaLoss {
-            weights: output_layer.layer.weights.clone().apply_indexed(|i, j, _| {
+            weights: output_axon.axon.weights.clone().apply_indexed(|i, j, _| {
                 activations_in.get(j, 0) * 
-                    ((output_layer.activation.get(i, 0) - 
+                    ((output_axon.activation.get(i, 0) - 
                         example_output.get(i, 0)))
             }),
-            biases: output_layer.activation.clone().sub(&example_output)
+            biases: output_axon.activation.clone().sub(&example_output)
         };
         NablaOutput { error, nabla_loss: Some(nabla_loss) }
     }
@@ -317,7 +317,7 @@ pub trait Reporting: SuccessCriteria {
     fn report(&self, epoch: Option<u64>, result: TestResult);
 }
 
-pub struct HiddenLayer {
+pub struct Axon {
     weights: Matrix,
     biases: Matrix,
     activation_fn: ActivationFn
@@ -333,8 +333,8 @@ pub struct Layer {
     pub activation_fn: ActivationFn
 }
 
-pub struct CalculatedLayer<'a> {
-    layer: &'a HiddenLayer,
+pub struct ActiveAxon<'a> {
+    axon: &'a Axon,
     weighted_input: Matrix,
     activation: Matrix,
 }
