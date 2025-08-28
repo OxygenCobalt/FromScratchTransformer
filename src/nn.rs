@@ -1,6 +1,4 @@
-use std::{fs::File, io::{self, Read, Write}, marker::PhantomData};
-
-use rand_distr::num_traits::sign;
+use std::{fs::File, io::{self, Read, Write}};
 
 use crate::{
     dataset::{Example, Test, Train},
@@ -232,14 +230,16 @@ impl NeuralNetwork {
 #[derive(Clone, Copy)]
 pub enum ActivationFn {
     Sigmoid,
-    ReLU
+    ReLU,
+    Softmax
 }
 
 impl ActivationFn {
     fn activation(&self, input: Matrix) -> Matrix {
         match self {
             Self::Sigmoid => input.apply(Self::sigmoid),
-            Self::ReLU => input.apply(Self::relu)
+            Self::ReLU => input.apply(Self::relu),
+            Self::Softmax => Self::softmax(input)
         }
     }
 
@@ -247,13 +247,15 @@ impl ActivationFn {
         match self {
             Self::Sigmoid => input.apply(Self::sigmoid_prime),
             Self::ReLU => input.apply(Self::relu_prime),
+            Self::Softmax => Self::softmax_prime(input)
         }
     }
 
     fn id(&self) -> &'static [u8; 8] {
         match self {
             Self::Sigmoid => b"Sigmoid\0",
-            Self::ReLU =>    b"ReLU\0\0\0\0"
+            Self::ReLU =>    b"ReLU\0\0\0\0",
+            Self::Softmax => b"Softmax\0"
         }
     }
 
@@ -280,11 +282,22 @@ impl ActivationFn {
     fn relu_prime(n: f64) -> f64 {
         if n > 0.0 { 1.0 } else { 0.0 }
     }
+
+    fn softmax(matrix: Matrix) -> Matrix {
+        let sum = matrix.sum_with(|_, _, v| v.exp());
+        matrix.apply(|v| v.exp() / sum)
+    }
+
+    fn softmax_prime(matrix: Matrix) -> Matrix {
+        // e^this / sum(e^all) -> e^this * (sum(e&^all))-1 -> self * (e^this * 1 / sum) 
+        let sum = matrix.sum_with(|_, _, v| v.exp());
+        matrix.apply(|v| -(v.exp() / sum).powi(2))
+    }
 }
 
 pub trait Loss {
     fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64;
-    fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> BackpropagatedOutput;
+    fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> BackpropLoss;
 }
 
 pub struct MSE;
@@ -294,9 +307,9 @@ impl Loss for MSE {
         (output_activations.clone().sub(example_output)).norm() / 2.0
     }
 
-    fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, _: &Matrix) -> BackpropagatedOutput {
+    fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, _: &Matrix) -> BackpropLoss {
         let error = output_axon.activation.clone().sub(&example_output).mul(&output_axon.axon.activation_fn.activation(output_axon.weighted_input.clone()));
-        BackpropagatedOutput { error, nabla_loss: None }
+        BackpropLoss { error, nabla_loss: None }
     }
 }
 
@@ -310,7 +323,7 @@ impl Loss for CrossEntropy {
         })
     }
 
-    fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> BackpropagatedOutput {
+    fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> BackpropLoss {
         let error = output_axon.activation.clone().sub(&example_output);
         let nabla_loss = NablaLoss {
             weights: output_axon.axon.weights.clone().apply_indexed(|i, j, _| {
@@ -320,7 +333,7 @@ impl Loss for CrossEntropy {
             }),
             biases: output_axon.activation.clone().sub(&example_output)
         };
-        BackpropagatedOutput { error, nabla_loss: Some(nabla_loss) }
+        BackpropLoss { error, nabla_loss: Some(nabla_loss) }
     }
 }
 
@@ -353,7 +366,7 @@ impl Regularization for L2 {
     }
 }
 
-pub struct BackpropagatedOutput {
+pub struct BackpropLoss {
     error: Matrix,
     nabla_loss: Option<NablaLoss>
 }
