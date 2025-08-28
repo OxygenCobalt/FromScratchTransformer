@@ -337,6 +337,18 @@ impl Loss for CrossEntropy {
     }
 }
 
+pub struct LogLikelihood;
+
+impl Loss for LogLikelihood {
+    fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64 {
+        -output_activations.get(example_output.argmax(), 0).ln()
+    }
+
+    fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> BackpropLoss {
+        CrossEntropy.for_backprop(example_output, output_axon, activations_in)
+    }
+}
+
 pub trait Regularization {
     fn regularization<'a>(&self, weights: impl Iterator<Item=&'a Matrix>, train_size: usize) -> f64;
     fn partial_regularization_w(&self, train_size: usize) -> f64;

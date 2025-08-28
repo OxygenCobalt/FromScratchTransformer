@@ -1,6 +1,6 @@
 use std::fs::File;
 
-use crate::{dataset::{Example, Test}, matrix::Matrix, nn::{ActivationFn, CrossEntropy, Layer, NeuralNetwork, Reporting, SuccessCriteria, L2}};
+use crate::{dataset::{Example, Test}, matrix::Matrix, nn::{ActivationFn, Layer, LogLikelihood, NeuralNetwork, Reporting, SuccessCriteria, L2}};
 
 mod dataset;
 mod matrix;
@@ -45,10 +45,10 @@ fn main() {
     nn.train(
         &mut mnist.train,  
         60, 10, 0.1, 
-        &CrossEntropy, 
+        &LogLikelihood, 
         &L2 { lambda: 5.0 },
         Some(MnistReporting { test: &mnist.test }), 
-        Some("./mnist_checkpts"),
+        None
     ).unwrap();
     println!("saving result to file...");
     let mut output = File::create("mnist.nn").unwrap();
