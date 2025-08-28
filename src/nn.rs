@@ -1,18 +1,18 @@
 use std::{fs::File, io::{self, Read, Write}, marker::PhantomData};
 
+use rand_distr::num_traits::sign;
+
 use crate::{
     dataset::{Example, Test, Train},
     matrix::{Matrix, Shape},
 };
 
-pub struct NeuralNetwork<L: Loss, R: Regularization> {
-    axons: Vec<Axon>,
-    _loss: PhantomData<L>,
-    regularization: R
+pub struct NeuralNetwork {
+    axons: Vec<Axon>
 }
 
-impl<L: Loss, R: Regularization> NeuralNetwork<L, R> {
-    pub fn new(layers: &[Layer], regularization: R) -> Self {
+impl NeuralNetwork {
+    pub fn new(layers: &[Layer]) -> Self {
         if layers.len() < 2 {
             panic!("not enough layers");
         }
@@ -31,15 +31,23 @@ impl<L: Loss, R: Regularization> NeuralNetwork<L, R> {
         }
 
         Self {
-            axons,
-            _loss: PhantomData,
-            regularization
+            axons
         }
     }
 
-    pub fn train(&mut self, train: &mut Train, epochs: u64, batch_size: usize, learning_rate: f64, reporting: Option<impl Reporting>, checkpoint_to: Option<&str>) -> io::Result<()> {
+    pub fn train(
+        &mut self,
+        train: &mut Train,
+        epochs: u64,
+        batch_size: usize,
+        learning_rate: f64,
+        loss: &impl Loss,
+        regularization: &impl Regularization,
+        reporting: Option<impl Reporting>,
+        checkpoint_to: Option<&str>
+    ) -> io::Result<()> {
         if let Some(ref rep) = reporting {
-            rep.report(None, self.test(rep.data(), rep));
+            rep.report(None, self.test(rep.data(), rep, loss, regularization));
         }
         if let Some(path) = checkpoint_to {
             let nn_path = path.to_owned() + "/init.nn";
@@ -52,7 +60,7 @@ impl<L: Loss, R: Regularization> NeuralNetwork<L, R> {
                 // TODO: Switch to matrix slicing across a 3d matrix, requires tensors :(
                 let mut sum_nablas: Vec<NablaLoss> = Vec::with_capacity(self.axons.len());
                 for example in batch {
-                    let mut nablas = self.backprop(example);
+                    let mut nablas = self.backprop(example, loss);
                     if sum_nablas.is_empty() {
                         sum_nablas.append(&mut nablas);
                         continue;
@@ -64,7 +72,7 @@ impl<L: Loss, R: Regularization> NeuralNetwork<L, R> {
                 }
                 let scale_by = learning_rate / batch_size as f64;
                 for (axon, sum_nabla) in self.axons.iter_mut().zip(sum_nablas) {
-                    let regularization = self.regularization.nabla_regularization_w(train_size);
+                    let regularization = regularization.nabla_regularization_w(train_size);
                     if regularization > 0.0 {
                         axon.weights.scale_assign(1.0 - (learning_rate * regularization));
                     }
@@ -73,7 +81,7 @@ impl<L: Loss, R: Regularization> NeuralNetwork<L, R> {
                 }
             }
             if let Some(ref rep) = reporting {
-                rep.report(Some(epoch), self.test(rep.data(), rep));
+                rep.report(Some(epoch), self.test(rep.data(), rep, loss, regularization));
             }
             if let Some(path) = checkpoint_to {
                 let nn_path = path.to_owned() + &format!["/{}.nn", epoch + 1];
@@ -84,7 +92,7 @@ impl<L: Loss, R: Regularization> NeuralNetwork<L, R> {
         Ok(())
     }
 
-    fn backprop(&self, example: &Example) -> Vec<NablaLoss> {
+    fn backprop(&self, example: &Example, loss: &impl Loss) -> Vec<NablaLoss> {
         // backprop assumes that
         // 1. the loss function can be written as the avg of several training examples
         //    this is bc backprop allows us to compute delta(w,b) for a specific example only
@@ -126,7 +134,7 @@ impl<L: Loss, R: Regularization> NeuralNetwork<L, R> {
 
         let output_axon: ActiveAxon<'_> = active_axons.pop().unwrap();
         let activations_in = last_activations(example, &active_axons);
-        let nabla_output = L::for_train(&example.output, &output_axon, activations_in);
+        let nabla_output = loss.for_train(&example.output, &output_axon, activations_in);
         let mut error = ErrorAndWeights {
             weights: &output_axon.axon.weights,
             error: nabla_output.error
@@ -149,7 +157,7 @@ impl<L: Loss, R: Regularization> NeuralNetwork<L, R> {
         nablas
     }
 
-    pub fn test(&self, test: &Test, success_criteria: &impl SuccessCriteria) -> TestResult {
+    pub fn test(&self, test: &Test, success_criteria: &impl SuccessCriteria, loss: &impl Loss, regularization: &impl Regularization) -> TestResult {
         let mut sum = 0.0;
         let mut successes = 0;
         for example in &test.examples {
@@ -157,10 +165,10 @@ impl<L: Loss, R: Regularization> NeuralNetwork<L, R> {
             if success_criteria.is_success(example, &result) {
                 successes += 1;
             }
-            sum += L::for_test(&example.output, &result);
+            sum += loss.for_test(&example.output, &result);
         }
         let loss = sum / test.examples.len() as f64;
-        let regularization = self.regularization.regularization(self.axons.iter().map(|a| &a.weights), test.examples.len());
+        let regularization = regularization.regularization(self.axons.iter().map(|a| &a.weights), test.examples.len());
         return TestResult {
             avg_loss: loss + regularization,
             successes
@@ -178,8 +186,10 @@ impl<L: Loss, R: Regularization> NeuralNetwork<L, R> {
     }
 
     pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
+        write.write(b"NeuralNt")?;
         write.write_all(&self.axons.len().to_le_bytes())?;
         for axon in &self.axons {
+            write.write_all(b"Axon\0\0\0\0")?;
             write.write_all(axon.activation_fn.id())?;
             axon.weights.write(write)?;
             axon.biases.write(write)?;
@@ -187,12 +197,22 @@ impl<L: Loss, R: Regularization> NeuralNetwork<L, R> {
         Ok(())
     }
 
-    pub fn read(read: &mut impl Read, regularization: R) -> io::Result<Self> {
+    pub fn read(read: &mut impl Read) -> io::Result<Self> {
+        let mut signature = [0u8; 8];
+        read.read(&mut signature)?;
+        if &signature != b"NeuralNt" {
+            return Err(io::Error::new(io::ErrorKind::Other, "invalid neuralnet signature"));
+        }
         let mut nb = [0u8; 8];
         read.read(&mut nb)?;
         let axon_count = usize::from_le_bytes(nb);
         let mut axons = Vec::with_capacity(axon_count);
         for _ in 0..axon_count {
+            let mut signature = [0u8; 8];
+            read.read(&mut signature)?;
+            if &signature != b"Axon\0\0\0\0" {
+                return Err(io::Error::new(io::ErrorKind::Other, "invalid axon signature"));
+            }
             let mut fnb = [0u8; 8];
             read.read(&mut fnb)?;
             let activation_fn = ActivationFn::from_id(&fnb)
@@ -205,11 +225,7 @@ impl<L: Loss, R: Regularization> NeuralNetwork<L, R> {
                 activation_fn
             });
         }
-        Ok(Self {
-            axons,
-            _loss: PhantomData,
-            regularization
-        })
+        Ok(Self { axons })
     }
 }
 
@@ -236,15 +252,15 @@ impl ActivationFn {
 
     fn id(&self) -> &'static [u8; 8] {
         match self {
-            Self::Sigmoid => b"sigmoid.",
-            Self::ReLU =>    b"relu...."
+            Self::Sigmoid => b"Sigmoid\0",
+            Self::ReLU =>    b"ReLU\0\0\0\0"
         }
     }
 
     fn from_id(id: &[u8; 8]) -> Option<Self> {
         match id {
-            b"sigmoid." => Some(Self::Sigmoid),
-            b"relu...." => Some(Self::ReLU),
+            b"Sigmoid\0" => Some(Self::Sigmoid),
+            b"ReLU\0\0\0\0" => Some(Self::ReLU),
             _ => None
         }
     }
@@ -267,18 +283,18 @@ impl ActivationFn {
 }
 
 pub trait Loss {
-    fn for_test(example_output: &Matrix, output_activations: &Matrix) -> f64;
-    fn for_train(example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> NablaOutput;
+    fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64;
+    fn for_train(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> NablaOutput;
 }
 
 pub struct MSE;
 
 impl Loss for MSE {
-    fn for_test(example_output: &Matrix, output_activations: &Matrix) -> f64 {
-        return (output_activations.clone().sub(example_output)).norm() / 2.0;
+    fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64 {
+        (output_activations.clone().sub(example_output)).norm() / 2.0
     }
 
-    fn for_train(example_output: &Matrix, output_axon: &ActiveAxon, _: &Matrix) -> NablaOutput {
+    fn for_train(&self, example_output: &Matrix, output_axon: &ActiveAxon, _: &Matrix) -> NablaOutput {
         let error = output_axon.activation.clone().sub(&example_output).mul(&output_axon.axon.activation_fn.activation(output_axon.weighted_input.clone()));
         NablaOutput { error, nabla_loss: None }
     }
@@ -287,14 +303,14 @@ impl Loss for MSE {
 pub struct CrossEntropy;
 
 impl Loss for CrossEntropy {
-    fn for_test(example_output: &Matrix, output_activations: &Matrix) -> f64 {
-        return example_output.sum_with(|i, j, y| {
+    fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64 {
+        example_output.sum_with(|i, j, y| {
             let a = output_activations.get(i, j);
-            return -(y * a.ln()) + (1.0 - y) * (1.0 - a).ln()
+            -(y * a.ln()) + (1.0 - y) * (1.0 - a).ln()
         })
     }
 
-    fn for_train(example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> NablaOutput {
+    fn for_train(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> NablaOutput {
         let error = output_axon.activation.clone().sub(&example_output);
         let nabla_loss = NablaLoss {
             weights: output_axon.axon.weights.clone().apply_indexed(|i, j, _| {
@@ -313,11 +329,23 @@ pub trait Regularization {
     fn nabla_regularization_w(&self, train_size: usize) -> f64;
 }
 
+pub struct NoRegularization;
+
+impl Regularization for NoRegularization {
+    fn regularization<'a>(&self, _: impl Iterator<Item=&'a Matrix>, _: usize) -> f64 {
+        0.0
+    }
+
+    fn nabla_regularization_w(&self, _: usize) -> f64 {
+        0.0
+    }
+}
+
 pub struct L2 { pub lambda: f64 }
 
 impl Regularization for L2 {
     fn regularization<'a>(&self, weights: impl Iterator<Item=&'a Matrix>, train_size: usize) -> f64 {
-        return  (self.lambda / (2.0 * train_size as f64)) * weights.map(|w| w.norm()).sum::<f64>();
+        (self.lambda / (2.0 * train_size as f64)) * weights.map(|w| w.norm()).sum::<f64>()
     }
 
     fn nabla_regularization_w(&self, train_size: usize) -> f64 {

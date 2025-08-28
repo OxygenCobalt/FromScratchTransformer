@@ -247,6 +247,7 @@ impl Matrix {
     }
 
     pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
+        write.write_all(b"Matrix\0\0")?;
         write.write_all(&self.shape.m.to_le_bytes())?;
         write.write(&self.shape.n.to_le_bytes())?;
         write.write(&self.data.iter().map(|v| v.to_le_bytes()).flatten().collect::<Vec<u8>>())?;
@@ -254,6 +255,11 @@ impl Matrix {
     }
 
     pub fn read(read: &mut impl Read) -> io::Result<Self> {
+        let mut signature = [0u8; 8];
+        read.read(&mut signature)?;
+        if &signature != b"Matrix\0\0" {
+            return Err(io::Error::new(io::ErrorKind::Other, "invalid matrix signature"));
+        }
         let mut nb = [0u8; 8];
         read.read(&mut nb)?;
         let mut mb = [0u8; 8];

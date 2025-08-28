@@ -37,12 +37,19 @@ fn main() {
     let mut mnist = dataset::mnist().unwrap();
     println!("loading done: {} train examples, {} test examples.", mnist.train.examples.len(), mnist.test.examples.len());
     println!("begin training...");
-    let mut nn = NeuralNetwork::<CrossEntropy, L2>::new(&[
+    let mut nn = NeuralNetwork::new(&[
         Layer { neurons: mnist.io_shape.in_size, activation_fn: ActivationFn::Sigmoid },
-        Layer { neurons: 30, activation_fn: ActivationFn::Sigmoid },
+        Layer { neurons: 100, activation_fn: ActivationFn::Sigmoid },
         Layer { neurons: mnist.io_shape.out_size, activation_fn: ActivationFn::Sigmoid },
-    ], L2 { lambda: 0.1 });
-    nn.train(&mut mnist.train,  30, 10, 0.5, Some(MnistReporting { test: &mnist.test }), None).unwrap();
+    ]);
+    nn.train(
+        &mut mnist.train,  
+        60, 10, 0.1, 
+        &CrossEntropy, 
+        &L2 { lambda: 5.0 },
+        Some(MnistReporting { test: &mnist.test }), 
+        Some("./mnist_checkpts"),
+    ).unwrap();
     println!("saving result to file...");
     let mut output = File::create("mnist.nn").unwrap();
     nn.write(&mut output).unwrap();
