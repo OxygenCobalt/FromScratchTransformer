@@ -75,8 +75,8 @@ impl Matrix {
         self.shape
     }
 
-    pub fn norm(&self) -> f64 {
-        self.data.iter().map(|n| n * n).sum()
+    pub fn norm(&self, i: i32) -> f64 {
+        self.data.iter().map(|n| n.abs().powi(i)).sum()
     }
 
     pub fn get(&self, i: usize, j: usize) -> f64 {

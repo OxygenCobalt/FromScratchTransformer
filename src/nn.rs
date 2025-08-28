@@ -70,10 +70,7 @@ impl NeuralNetwork {
                 }
                 let scale_by = learning_rate / batch_size as f64;
                 for (axon, sum_nabla) in self.axons.iter_mut().zip(sum_nablas) {
-                    let regularization = regularization.partial_regularization_w(train_size);
-                    if regularization > 0.0 {
-                        axon.weights.scale_assign(1.0 - (learning_rate * regularization));
-                    }
+                    regularization.partial_regularization_w(&mut axon.weights, learning_rate, train_size);
                     axon.weights.sub_assign(&sum_nabla.weights.scale(scale_by));
                     axon.biases.sub_assign(&sum_nabla.biases.scale(scale_by));
                 }
@@ -304,7 +301,7 @@ pub struct MSE;
 
 impl Loss for MSE {
     fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64 {
-        (output_activations.clone().sub(example_output)).norm() / 2.0
+        (output_activations.clone().sub(example_output)).norm(2) / 2.0
     }
 
     fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, _: &Matrix) -> BackpropLoss {
@@ -351,7 +348,7 @@ impl Loss for LogLikelihood {
 
 pub trait Regularization {
     fn regularization<'a>(&self, weights: impl Iterator<Item=&'a Matrix>, train_size: usize) -> f64;
-    fn partial_regularization_w(&self, train_size: usize) -> f64;
+    fn partial_regularization_w(&self, weights: &mut Matrix, learning_rate: f64, train_size: usize);
 }
 
 pub struct NoRegularization;
@@ -361,22 +358,36 @@ impl Regularization for NoRegularization {
         0.0
     }
 
-    fn partial_regularization_w(&self, _: usize) -> f64 {
-        0.0
+    fn partial_regularization_w(&self, _: &mut Matrix, _: f64, _: usize) {
+        
     }
+}
+
+pub struct L1 { pub lambda: f64 }
+
+impl Regularization for L1 {
+    fn regularization<'a>(&self, weights: impl Iterator<Item=&'a Matrix>, train_size: usize) -> f64 {
+        (self.lambda / train_size as f64) * weights.map(|w| w.norm(1)).sum::<f64>()
+    }
+
+    fn partial_regularization_w(&self, weights: &mut Matrix, learning_rate: f64, train_size: usize) {
+        weights.apply_assign(|v| v - ((learning_rate * self.lambda) / train_size as f64) * if v >= 0.0 { 1.0 } else { -1.0 });
+    }
+
 }
 
 pub struct L2 { pub lambda: f64 }
 
 impl Regularization for L2 {
     fn regularization<'a>(&self, weights: impl Iterator<Item=&'a Matrix>, train_size: usize) -> f64 {
-        (self.lambda / (2.0 * train_size as f64)) * weights.map(|w| w.norm()).sum::<f64>()
+        (self.lambda / (2.0 * train_size as f64)) * weights.map(|w| w.norm(2)).sum::<f64>()
     }
 
-    fn partial_regularization_w(&self, train_size: usize) -> f64 {
-        self.lambda / train_size as f64
+    fn partial_regularization_w(&self, weights: &mut Matrix, learning_rate: f64, train_size: usize) {
+        weights.scale_assign(1.0 - (self.lambda * learning_rate) / train_size as f64);
     }
 }
+
 
 pub struct BackpropLoss {
     error: Matrix,
