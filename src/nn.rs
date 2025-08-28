@@ -72,7 +72,7 @@ impl NeuralNetwork {
                 }
                 let scale_by = learning_rate / batch_size as f64;
                 for (axon, sum_nabla) in self.axons.iter_mut().zip(sum_nablas) {
-                    let regularization = regularization.nabla_regularization_w(train_size);
+                    let regularization = regularization.partial_regularization_w(train_size);
                     if regularization > 0.0 {
                         axon.weights.scale_assign(1.0 - (learning_rate * regularization));
                     }
@@ -99,7 +99,7 @@ impl NeuralNetwork {
         //    so we activationsta have avg it out if we want to perform sgd
         // 2. the loss must be written as a fn of the neural networks outputs
         
-        pub struct ErrorAndWeights<'a> {
+        pub struct BackpropagatedLayer<'a> {
             weights: &'a Matrix,
             error: Matrix
         }
@@ -134,23 +134,23 @@ impl NeuralNetwork {
 
         let output_axon: ActiveAxon<'_> = active_axons.pop().unwrap();
         let activations_in = last_activations(example, &active_axons);
-        let nabla_output = loss.for_train(&example.output, &output_axon, activations_in);
-        let mut error = ErrorAndWeights {
+        let backprop_loss = loss.for_backprop(&example.output, &output_axon, activations_in);
+        let mut backpropagated = BackpropagatedLayer {
             weights: &output_axon.axon.weights,
-            error: nabla_output.error
+            error: backprop_loss.error
         };
 
         let mut nablas = Vec::with_capacity(self.axons.len());
-        nablas.push(nabla_output.nabla_loss.unwrap_or_else(|| nabla_loss(output_axon, activations_in, &error.error)));
+        nablas.push(backprop_loss.nabla_loss.unwrap_or_else(|| nabla_loss(output_axon, activations_in, &backpropagated.error)));
 
         while let Some(active_axon) = active_axons.pop() {
-            error = ErrorAndWeights {
+            backpropagated = BackpropagatedLayer {
                 weights: &active_axon.axon.weights,
-                error: (error.weights.clone().transpose().dot(&error.error))
+                error: (backpropagated.weights.clone().transpose().dot(&backpropagated.error))
                     .mul(&active_axon.axon.activation_fn.activation_prime(active_axon.weighted_input.clone()))
             };
             let activations_in = last_activations(example, &active_axons);
-            nablas.push(nabla_loss(active_axon, &activations_in, &error.error));
+            nablas.push(nabla_loss(active_axon, &activations_in, &backpropagated.error));
         }
 
         nablas.reverse();
@@ -284,7 +284,7 @@ impl ActivationFn {
 
 pub trait Loss {
     fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64;
-    fn for_train(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> NablaOutput;
+    fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> BackpropagatedOutput;
 }
 
 pub struct MSE;
@@ -294,9 +294,9 @@ impl Loss for MSE {
         (output_activations.clone().sub(example_output)).norm() / 2.0
     }
 
-    fn for_train(&self, example_output: &Matrix, output_axon: &ActiveAxon, _: &Matrix) -> NablaOutput {
+    fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, _: &Matrix) -> BackpropagatedOutput {
         let error = output_axon.activation.clone().sub(&example_output).mul(&output_axon.axon.activation_fn.activation(output_axon.weighted_input.clone()));
-        NablaOutput { error, nabla_loss: None }
+        BackpropagatedOutput { error, nabla_loss: None }
     }
 }
 
@@ -310,7 +310,7 @@ impl Loss for CrossEntropy {
         })
     }
 
-    fn for_train(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> NablaOutput {
+    fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> BackpropagatedOutput {
         let error = output_axon.activation.clone().sub(&example_output);
         let nabla_loss = NablaLoss {
             weights: output_axon.axon.weights.clone().apply_indexed(|i, j, _| {
@@ -320,13 +320,13 @@ impl Loss for CrossEntropy {
             }),
             biases: output_axon.activation.clone().sub(&example_output)
         };
-        NablaOutput { error, nabla_loss: Some(nabla_loss) }
+        BackpropagatedOutput { error, nabla_loss: Some(nabla_loss) }
     }
 }
 
 pub trait Regularization {
     fn regularization<'a>(&self, weights: impl Iterator<Item=&'a Matrix>, train_size: usize) -> f64;
-    fn nabla_regularization_w(&self, train_size: usize) -> f64;
+    fn partial_regularization_w(&self, train_size: usize) -> f64;
 }
 
 pub struct NoRegularization;
@@ -336,7 +336,7 @@ impl Regularization for NoRegularization {
         0.0
     }
 
-    fn nabla_regularization_w(&self, _: usize) -> f64 {
+    fn partial_regularization_w(&self, _: usize) -> f64 {
         0.0
     }
 }
@@ -348,12 +348,12 @@ impl Regularization for L2 {
         (self.lambda / (2.0 * train_size as f64)) * weights.map(|w| w.norm()).sum::<f64>()
     }
 
-    fn nabla_regularization_w(&self, train_size: usize) -> f64 {
+    fn partial_regularization_w(&self, train_size: usize) -> f64 {
         self.lambda / train_size as f64
     }
 }
 
-pub struct NablaOutput {
+pub struct BackpropagatedOutput {
     error: Matrix,
     nabla_loss: Option<NablaLoss>
 }
