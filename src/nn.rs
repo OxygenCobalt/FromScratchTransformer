@@ -93,11 +93,6 @@ impl NeuralNetwork {
         //    this is bc backprop allows us to compute delta(w,b) for a specific example only
         //    so we activationsta have avg it out if we want to perform sgd
         // 2. the loss must be written as a fn of the neural networks outputs
-        
-        pub struct BackpropagatedLayer<'a> {
-            weights: &'a Matrix,
-            error: Matrix
-        }
 
         let mut active_axons: Vec<ActiveAxon> = Vec::with_capacity(self.axons.len());
         for axon in &self.axons {
@@ -115,7 +110,7 @@ impl NeuralNetwork {
             active_axons.last()
                 .map(|v| &v.activation)
                 .unwrap_or_else(|| &example.input)
-        } 
+        }
 
         fn nabla_loss(active_axon: ActiveAxon<'_>, activations_in: &Matrix, error: &Matrix) -> NablaLoss {
             NablaLoss {
@@ -125,7 +120,11 @@ impl NeuralNetwork {
                 biases: error.clone()
             }
         }
-
+        
+        pub struct BackpropagatedLayer<'a> {
+            weights: &'a Matrix,
+            error: Matrix
+        }
 
         let output_axon: ActiveAxon<'_> = active_axons.pop().unwrap();
         let activations_in = last_activations(example, &active_axons);
@@ -228,6 +227,7 @@ impl NeuralNetwork {
 pub enum ActivationFn {
     Sigmoid,
     ReLU,
+    SiLU,
     Softmax
 }
 
@@ -236,6 +236,7 @@ impl ActivationFn {
         match self {
             Self::Sigmoid => input.apply(Self::sigmoid),
             Self::ReLU => input.apply(Self::relu),
+            Self::SiLU => input.apply(Self::silu),
             Self::Softmax => Self::softmax(input)
         }
     }
@@ -244,6 +245,7 @@ impl ActivationFn {
         match self {
             Self::Sigmoid => input.apply(Self::sigmoid_prime),
             Self::ReLU => input.apply(Self::relu_prime),
+            Self::SiLU => input.apply(Self::silu_prime),
             Self::Softmax => Self::softmax_prime(input)
         }
     }
@@ -252,20 +254,23 @@ impl ActivationFn {
         match self {
             Self::Sigmoid => b"Sigmoid\0",
             Self::ReLU =>    b"ReLU\0\0\0\0",
-            Self::Softmax => b"Softmax\0"
+            Self::SiLU =>    b"SiLU\0\0\0\0",
+            Self::Softmax => b"Softmax\0",
         }
     }
 
     fn from_id(id: &[u8; 8]) -> Option<Self> {
         match id {
-            b"Sigmoid\0" => Some(Self::Sigmoid),
+            b"Sigmoid\0"    => Some(Self::Sigmoid),
             b"ReLU\0\0\0\0" => Some(Self::ReLU),
+            b"SiLU\0\0\0\0" => Some(Self::SiLU),
+            b"Softmax\0"    => Some(Self::Softmax),
             _ => None
         }
     }
 
     fn sigmoid(n: f64) -> f64 {
-        1f64 / (1f64 + f64::exp(-n))
+        1f64 / (1f64 + (-n).exp())
     }
     
     fn sigmoid_prime(n: f64) -> f64 {
@@ -278,6 +283,14 @@ impl ActivationFn {
 
     fn relu_prime(n: f64) -> f64 {
         if n > 0.0 { 1.0 } else { 0.0 }
+    }
+
+    fn silu(n: f64) -> f64 {
+        n / (1.0 + (-n).exp())
+    }
+
+    fn silu_prime(n: f64) -> f64 {
+        (1.0 + (-n).exp() * (1.0 + n)) / (1.0 + (-n).exp()).powi(2)
     }
 
     fn softmax(matrix: Matrix) -> Matrix {
