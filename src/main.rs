@@ -5,6 +5,7 @@ use crate::{dataset::{Example, Test}, matrix::Matrix, nn::{ActivationFn, CrossEn
 mod dataset;
 mod matrix;
 mod nn;
+mod autograd;
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -39,7 +40,7 @@ fn main() {
     println!("begin training...");
     let mut nn = NeuralNetwork::new(&[
         Layer { neurons: mnist.io_shape.in_size, activation_fn: ActivationFn::SiLU },
-        Layer { neurons: 100, activation_fn: ActivationFn::SiLU },
+        Layer { neurons: 30, activation_fn: ActivationFn::SiLU },
         Layer { neurons: mnist.io_shape.out_size, activation_fn: ActivationFn::Softmax },
     ]);
     nn.train(

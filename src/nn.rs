@@ -1,8 +1,7 @@
-use std::{fs::File, io::{self, Read, Write}};
+use std::{cell::RefCell, fs::File, io::{self, Read, Write}, pin::Pin, rc::Rc, sync::Arc};
 
 use crate::{
-    dataset::{Example, Test, Train},
-    matrix::{Matrix, Shape},
+    autograd::{Autograd, ComputationNode, Function}, dataset::{Example, Test, Train}, matrix::{Matrix, Shape}
 };
 
 pub struct NeuralNetwork {
@@ -58,7 +57,7 @@ impl NeuralNetwork {
                 // TODO: Switch to matrix slicing across a 3d matrix, requires tensors :(
                 let mut sum_nablas: Vec<NablaLoss> = Vec::with_capacity(self.axons.len());
                 for example in batch {
-                    let mut nablas = self.backprop(example, loss);
+                    let mut nablas = self.neo_backprop(example, loss);
                     if sum_nablas.is_empty() {
                         sum_nablas.append(&mut nablas);
                         continue;
@@ -149,6 +148,73 @@ impl NeuralNetwork {
 
         nablas.reverse();
         nablas
+    }
+
+    fn neo_backprop(&self, example: &Example, loss: &impl Loss) -> Vec<NablaLoss> {
+        pub struct SigmoidActivationTest {
+            x: Rc<RefCell<ComputationNode>>
+        }
+
+        impl SigmoidActivationTest {
+            fn sigmoid(n: f64) -> f64 {
+                1f64 / (1f64 + (-n).exp())
+            }
+
+            fn sigmoid_prime(n: f64) -> f64 {
+                Self::sigmoid(n) * (1.0 - Self::sigmoid(n))
+            }
+        }
+
+        impl Function for SigmoidActivationTest {
+            fn f(&self) -> Matrix {
+                self.x.borrow().matrix.clone().apply(Self::sigmoid)
+            }
+
+            fn df(&mut self, grad: &Matrix) {
+                let result = self.x.borrow().matrix.clone().apply(Self::sigmoid_prime).mul(grad);
+                Rc::get_mut(&mut self.x).unwrap().borrow_mut().backward(result);
+            }
+        }
+
+        pub struct MSE2 {
+            x: Rc<RefCell<ComputationNode>>,
+            example: Example
+        }
+
+        impl Function for MSE2 {
+            fn f(&self) -> Matrix {
+                Matrix::scalar(self.x.borrow().matrix.clone().sub(&self.example.output).norm(2) / 2.0, Shape { m: 1, n: 1 })
+            }
+
+            fn df(&mut self, grad: &Matrix) {
+                let result = self.x.borrow().matrix.clone().sub(&self.example.output);
+                self.x.borrow_mut().backward(result);
+            }
+        }
+
+        pub struct AutoAxon {
+            weights: Autograd,
+            biases: Autograd,
+            activation_fn: ActivationFn
+        }
+        let auto_axons: Vec<AutoAxon> = self.axons.iter().map(|a| AutoAxon {
+            weights: Autograd::new(a.weights.clone()),
+            biases: Autograd::new(a.biases.clone()),
+            activation_fn: a.activation_fn
+        }).collect();
+        // pretend we are doing a normal feed-forward run, autograd tracks all the ops
+        let mut current = Autograd::new(example.input.clone());
+        for axon in &auto_axons {
+            let weighted = axon.weights.dot(&current).add(&axon.biases);
+            let activation = weighted.execute_with(|x| SigmoidActivationTest { x });
+            current = activation;
+        }
+        let mut result = current.execute_with(|x| MSE2 { x, example: example.clone() });
+        result.backward();
+        auto_axons.iter().map(|a| NablaLoss {
+            weights: a.weights.grad().unwrap().clone(),
+            biases: a.biases.grad().unwrap().clone()
+        }).collect()
     }
 
     pub fn test(&self, test: &Test, success_criteria: &impl SuccessCriteria, loss: &impl Loss, regularization: &impl Regularization) -> TestResult {
@@ -250,6 +316,14 @@ impl ActivationFn {
         }
     }
 
+    fn sigmoid(n: f64) -> f64 {
+        1f64 / (1f64 + (-n).exp())
+    }
+    
+    fn sigmoid_prime(n: f64) -> f64 {
+        Self::sigmoid(n) * (1.0 - Self::sigmoid(n))
+    }
+
     fn id(&self) -> &'static [u8; 8] {
         match self {
             Self::Sigmoid => b"Sigmoid\0",
@@ -269,13 +343,6 @@ impl ActivationFn {
         }
     }
 
-    fn sigmoid(n: f64) -> f64 {
-        1f64 / (1f64 + (-n).exp())
-    }
-    
-    fn sigmoid_prime(n: f64) -> f64 {
-        Self::sigmoid(n) * (1.0 - Self::sigmoid(n))
-    }
 
     fn relu(n: f64) -> f64 {
         if n > 0.0 { n } else { 0.0 }
@@ -304,6 +371,8 @@ impl ActivationFn {
         matrix.apply(|v| -(v.exp() / sum).powi(2))
     }
 }
+
+
 
 pub trait Loss {
     fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64;

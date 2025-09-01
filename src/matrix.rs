@@ -6,24 +6,6 @@ use rand_distr::{Distribution, Normal};
 
 static NORMAL: LazyLock<Normal<f64>> = std::sync::LazyLock::new(|| Normal::new(0.0, 1.0).unwrap());
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Shape {
-    pub m: usize,
-    pub n: usize,
-}
-
-impl Shape {
-    pub fn vector(n: usize) -> Self {
-        Self { m: n, n: 1 }
-    }
-}
-
-impl Debug for Shape {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write![f, "{}x{}", self.m, self.n]
-    }
-}
-
 #[derive(Clone, PartialEq)]
 pub struct Matrix {
     data: Vec<f64>,
@@ -52,6 +34,10 @@ impl Matrix {
 
     pub fn noisy(shape: Shape) -> Self {
         Self::new(shape, |_, _| NORMAL.sample(&mut rand::rng()))
+    }
+
+    pub fn scalar(c: f64, shape: Shape) -> Self {
+        Self { data: vec![c; shape.n * shape.m], shape }
     }
 
     pub fn argmax(&self) -> usize {
@@ -191,6 +177,20 @@ impl Matrix {
         }
     }
 
+    pub fn outer(mut self, rhs: &Self) -> Self {
+        if self.shape.n != 1 || rhs.shape.n != 1 {
+            panic!("shape mismatch: {:?} {:?}", self.shape, rhs.shape);
+        }
+        self.shape.n = rhs.shape.m;
+        self.data.resize(self.shape.m * self.shape.n, 0f64);
+        for i in 0..self.shape.m {
+            for j in 0..self.shape.n {
+                self.set(i, 0, self.get(i, 0) * rhs.get(j, 0));
+            }
+        }
+        self
+    }
+
     pub fn transpose(self) -> Self {
         let mut new = Self::null(Shape {
             m: self.shape.n,
@@ -300,3 +300,20 @@ impl Debug for Matrix {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Shape {
+    pub m: usize,
+    pub n: usize,
+}
+
+impl Shape {
+    pub fn vector(n: usize) -> Self {
+        Self { m: n, n: 1 }
+    }
+}
+
+impl Debug for Shape {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write![f, "{}x{}", self.m, self.n]
+    }
+}
