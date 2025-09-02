@@ -36,18 +36,8 @@ impl Matrix {
         Self::new(shape, |_, _| NORMAL.sample(&mut rand::rng()))
     }
 
-    pub fn scalar(c: f64, shape: Shape) -> Self {
-        Self { data: vec![c; shape.n * shape.m], shape }
-    }
-
-    pub fn argmax(&self) -> usize {
-        let mut maxi = 0;
-        for (i, v) in self.data.iter().enumerate() {
-            if *v > self.data[maxi] {
-                maxi = i;
-            }
-        }
-        return maxi;
+    pub fn scalar(c: f64) -> Self {
+        Self { data: vec![c], shape: Shape { m: 1, n: 1 } }
     }
 
     pub fn vector(data: Vec<f64>) -> Self {
@@ -69,6 +59,16 @@ impl Matrix {
     pub unsafe fn get_unchecked(&self, i: usize, j: usize) -> f64 {
         let idx = self.index_of(i, j);
         unsafe { *self.data.get_unchecked(idx) }
+    }
+
+    pub fn argmax(&self) -> usize {
+        let mut maxi = 0;
+        for (i, v) in self.data.iter().enumerate() {
+            if *v > self.data[maxi] {
+                maxi = i;
+            }
+        }
+        return maxi;
     }
 
     pub fn set(&mut self, i: usize, j: usize, value: f64) {

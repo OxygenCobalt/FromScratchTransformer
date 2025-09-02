@@ -12,6 +12,9 @@ mod dataset;
 mod loss;
 mod activation;
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn main() {
     println!("loading data...");
     let mut mnist = mnist().unwrap();
@@ -34,9 +37,6 @@ fn main() {
     nn.write(&mut output).unwrap();
 }
 
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
 struct MnistReporting<'a> {
     test: &'a Test
 }
@@ -45,7 +45,6 @@ impl <'a> Reporting for MnistReporting<'a> {
     fn data(&self) -> &Test {
         &self.test
     }
-
 
     fn report(&self, epoch: Option<u64>, result: TestResult) {
         let percent_successful = (result.successes as f64 / self.test.examples.len() as f64) * 100.0;

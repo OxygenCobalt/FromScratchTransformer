@@ -1,4 +1,4 @@
-use crate::{autograd::{AutogradNode, Operation, OperationFactory}, matrix::{Matrix, Shape}};
+use crate::{autograd::{AutogradNode, Operation, OperationFactory}, matrix::Matrix};
 
 pub trait Loss {
     fn loss(&self, activations: &Matrix, output: &Matrix) -> f64;
@@ -32,7 +32,7 @@ struct MSEOperation {
 
 impl Operation for MSEOperation {
     fn f(&self) -> Matrix {
-        Matrix::scalar(MSE.loss(&self.activations.borrow().matrix, &self.output), Shape { m: 1, n: 1 })
+        Matrix::scalar(MSE.loss(&self.activations.borrow().matrix, &self.output))
     }
 
     fn df(&mut self, _: &Matrix) {

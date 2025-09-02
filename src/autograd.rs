@@ -58,7 +58,7 @@ pub struct Computation {
 
 impl Computation {
     fn backward_init(&mut self) {
-        self.backward(Matrix::scalar(1.0, self.matrix.shape()));
+        self.backward(Matrix::scalar(1.0));
     }
 
     pub fn backward(&mut self, grad: Matrix) {

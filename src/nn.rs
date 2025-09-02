@@ -20,8 +20,8 @@ impl NeuralNetwork {
             let next_layer = &layers[i + 1];
             let in_size = layer.neurons;
             let out_size = next_layer.neurons;
-            let axon= Axon {
-                weights: Matrix::noisy(Shape { m: out_size, n: in_size,  }),
+            let axon = Axon {
+                weights: Matrix::noisy(Shape { m: out_size, n: in_size }),
                 biases: Matrix::noisy(Shape::vector(out_size)),
                 activation_fn: layer.activation_fn
             };
