@@ -2,14 +2,14 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use crate::matrix::Matrix;
+use super::matrix::Matrix;
 
-pub struct Autograd(Rc<RefCell<ComputationNode>>);
+pub struct Autograd(AutogradNode);
 
 impl Autograd {
     pub fn new(matrix: Matrix) -> Self {
         Self(Rc::new(
-            RefCell::new(ComputationNode { matrix, grad: None, parent: None })
+            RefCell::new(Computation { matrix, grad: None, op: None })
         ))
     }
 
@@ -21,20 +21,20 @@ impl Autograd {
         self.execute(Dot { lhs: self.0.clone(), rhs: rhs.0.clone() })
     }
 
-    pub fn execute_with(&self, factory: impl FunctionFactory) -> Self {
+    pub fn execute_with(&self, factory: impl OperationFactory) -> Self {
         self.execute_impl(factory.new(self.0.clone()))
     }
 
-    fn execute(&self, function: impl Function + 'static) -> Self {
-        self.execute_impl(Box::new(function))
+    fn execute(&self, op: impl Operation + 'static) -> Self {
+        self.execute_impl(Box::new(op))
     }
 
-    fn execute_impl(&self, function: Box<dyn Function + 'static>) -> Self {
+    fn execute_impl(&self, op: Box<dyn Operation + 'static>) -> Self {
         Self(
-            Rc::new(RefCell::new(ComputationNode { 
-                matrix: function.f(),
+            Rc::new(RefCell::new(Computation { 
+                matrix: op.f(),
                 grad: None,
-                parent: Some(function)
+                op: Some(op)
             }))
         )
     }
@@ -48,38 +48,41 @@ impl Autograd {
     }
 }
 
-pub struct ComputationNode {
+pub type AutogradNode = Rc<RefCell<Computation>>;
+
+pub struct Computation {
     pub matrix: Matrix,
     grad: Option<Matrix>,
-    parent: Option<Box<dyn Function>>
+    op: Option<Box<dyn Operation>>
 }
 
-impl ComputationNode {
+impl Computation {
     fn backward_init(&mut self) {
         self.backward(Matrix::scalar(1.0, self.matrix.shape()));
     }
+
     pub fn backward(&mut self, grad: Matrix) {
-        if let Some(parent) = self.parent.as_mut() {
-            parent.df(&grad);
+        if let Some(op) = self.op.as_mut() {
+            op.df(&grad);
         }
-        self.grad = match &self.grad {
-            Some(existing) => Some(existing.clone().add(&grad)),
-            None => Some(grad)
+        match self.grad.as_mut() {
+            Some(existing) => existing.add_assign(&grad),
+            None => self.grad = Some(grad)
         };
     }
 }
 
-pub trait Function {
+pub trait Operation {
     fn f(&self) -> Matrix;
     fn df(&mut self, grad: &Matrix);
 }
 
 struct Add {
-    lhs: Rc<RefCell<ComputationNode>>,
-    rhs: Rc<RefCell<ComputationNode>>
+    lhs: AutogradNode,
+    rhs: AutogradNode
 }
 
-impl Function for Add {    
+impl Operation for Add {    
     fn f(&self) -> Matrix {
         // add = lhs + rhs
         self.lhs.borrow().matrix.clone().add(&self.rhs.borrow().matrix)
@@ -94,24 +97,24 @@ impl Function for Add {
 }
 
 struct Dot {
-    lhs: Rc<RefCell<ComputationNode>>,
-    rhs: Rc<RefCell<ComputationNode>>
+    lhs: AutogradNode,
+    rhs: AutogradNode
 }
 
-impl Function for Dot {
+impl Operation for Dot {
     fn f(&self) -> Matrix {
         // dot = lhs * rhs
         self.lhs.borrow().matrix.clone().dot(&self.rhs.borrow().matrix)
     }
 
     fn df(&mut self, grad: &Matrix) {
-        // df/dlhs = df/ddot ⊗ rhs   
+        // df/dlhs = df/ddot * rhs^T
         // df/drhs = lhs^T * df/ddot
         self.lhs.borrow_mut().backward(grad.clone().dot(&self.rhs.borrow().matrix.clone().transpose()));
         self.rhs.borrow_mut().backward(self.lhs.borrow().matrix.clone().transpose().dot(&grad));
     }
 }
 
-pub trait FunctionFactory {
-    fn new(self, this: Rc<RefCell<ComputationNode>>) -> Box<dyn Function>;
+pub trait OperationFactory {
+    fn new(self, this: AutogradNode) -> Box<dyn Operation>;
 }

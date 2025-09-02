@@ -1,7 +1,8 @@
-use std::{cell::RefCell, fs::File, io::{self, Read, Write}, rc::Rc};
+use std::{fs::File, io::{self, Read, Write}};
 
-use crate::{
-    autograd::{Autograd, ComputationNode, Function, FunctionFactory}, dataset::{Example, Test, Train}, matrix::{Matrix, Shape}
+use super::{
+    loss::Loss, activation::Activation,
+    autograd::{Autograd}, dataset::{Example, Test, Train}, matrix::{Matrix, Shape}
 };
 
 pub struct NeuralNetwork {
@@ -87,7 +88,7 @@ impl NeuralNetwork {
         pub struct AutoAxon {
             weights: Autograd,
             biases: Autograd,
-            activation_fn: ActivationFn
+            activation_fn: Activation
         }
 
         let auto_axons: Vec<AutoAxon> = self.axons.iter().map(|a| AutoAxon {
@@ -102,7 +103,7 @@ impl NeuralNetwork {
             let activation = weighted.execute_with(axon.activation_fn);
             current = activation;
         }
-        let mut result = current.execute_with(loss.function(example.output.clone()));
+        let mut result = current.execute_with(loss.op(example.output.clone()));
         result.backward();
 
         auto_axons.into_iter().map(|a| NablaLoss {
@@ -168,7 +169,7 @@ impl NeuralNetwork {
             }
             let mut fnb = [0u8; 8];
             read.read(&mut fnb)?;
-            let activation_fn = ActivationFn::from_id(&fnb)
+            let activation_fn = Activation::from_id(&fnb)
                 .ok_or(io::Error::new(io::ErrorKind::Other, "invalid activation function"))?;
             let weights = Matrix::read(read)?;
             let biases  = Matrix::read(read)?;
@@ -181,123 +182,6 @@ impl NeuralNetwork {
         Ok(Self { axons })
     }
 }
-
-#[derive(Clone, Copy)]
-pub enum ActivationFn {
-    Sigmoid,
-}
-
-impl FunctionFactory for ActivationFn {
-    fn new(self, this: Rc<RefCell<ComputationNode>>) -> Box<dyn Function> {
-        Box::new(SigmoidActivation { x: this })
-    }
-}
-
-impl ActivationFn {
-    fn id(&self) -> &'static [u8; 8] {
-        match self {
-            Self::Sigmoid => b"Sigmoid\0",
-        }
-    }
-
-    fn from_id(id: &[u8; 8]) -> Option<Self> {
-        match id {
-            b"Sigmoid\0" => Some(Self::Sigmoid),
-            _ => None
-        }
-    }
-
-    fn f(&self, matrix: Matrix) -> Matrix {
-        matrix.apply(SigmoidActivation::sigmoid)
-    }
-}
-pub struct SigmoidActivation {
-    x: Rc<RefCell<ComputationNode>>
-}
-
-impl SigmoidActivation {
-    fn sigmoid(n: f64) -> f64 {
-        1f64 / (1f64 + (-n).exp())
-    }
-
-    fn sigmoid_prime(n: f64) -> f64 {
-        Self::sigmoid(n) * (1.0 - Self::sigmoid(n))
-    }
-}
-
-impl Function for SigmoidActivation {
-    fn f(&self) -> Matrix {
-        self.x.borrow().matrix.clone().apply(Self::sigmoid)
-    }
-
-    fn df(&mut self, grad: &Matrix) {
-        let result = self.x.borrow().matrix.clone().apply(Self::sigmoid_prime).mul(grad);
-        Rc::get_mut(&mut self.x).unwrap().borrow_mut().backward(result);
-    }
-}
-
-pub trait Loss {
-    fn loss(&self, activations: &Matrix, output: &Matrix) -> f64;
-    fn function(&self, output: Matrix) -> impl FunctionFactory;
-}
-
-pub struct MSE;
-
-impl Loss for MSE {
-    fn loss(&self, activations: &Matrix, output: &Matrix) -> f64 {
-        activations.flatten().zip(output.flatten()).map(|(a, o)| (a - o).powi(2)).sum()
-    }
-
-    fn function(&self, output: Matrix) -> impl FunctionFactory {
-        MSEFactory { output }
-    }
-}
-
-struct MSEFactory { output: Matrix }
-
-impl FunctionFactory for MSEFactory {
-    fn new(self, this: Rc<RefCell<ComputationNode>>) -> Box<dyn Function> {
-        Box::new(MSEFunction { activations: this, output: self.output })
-    }
-}
-
-struct MSEFunction {
-    activations: Rc<RefCell<ComputationNode>>,
-    output: Matrix
-}
-
-impl Function for MSEFunction {
-    fn f(&self) -> Matrix {
-        Matrix::scalar(MSE.loss(&self.activations.borrow().matrix, &self.output), Shape { m: 1, n: 1 })
-    }
-
-    fn df(&mut self, _: &Matrix) {
-        let result = self.activations.borrow().matrix.clone().sub(&self.output);
-        self.activations.borrow_mut().backward(result);
-    }
-}
-
-// pub struct CrossEntropy;
-
-// impl Loss for CrossEntropy {
-//     fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64 {
-//         example_output.sum_with(|i, j, y| {
-//             let a = output_activations.get(i, j);
-//             -(y * a.ln()) + (1.0 - y) * (1.0 - a).ln()
-//         })
-//     }
-
-// pub struct LogLikelihood;
-
-// impl Loss for LogLikelihood {
-//     fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64 {
-//         -output_activations.get(example_output.argmax(), 0).ln()
-//     }
-
-//     fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> BackpropLoss {
-//         CrossEntropy.for_backprop(example_output, output_axon, activations_in)
-//     }
-// }
 
 pub struct TestResult {
     pub avg_loss: f64,
@@ -315,13 +199,13 @@ pub trait Reporting: SuccessCriteria {
 
 pub struct Layer {
     pub neurons: usize,
-    pub activation_fn: ActivationFn
+    pub activation_fn: Activation
 }
 
 struct Axon {
     weights: Matrix,
     biases: Matrix,
-    activation_fn: ActivationFn
+    activation_fn: Activation
 }
 
 struct NablaLoss {
