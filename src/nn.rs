@@ -133,7 +133,7 @@ impl NeuralNetwork {
         let mut current = input.clone();
         for axon in &self.axons {
             let weighted = axon.weights.clone().dot(&current).add(&axon.biases);
-            let activation = axon.activation_fn.f(weighted);
+            let activation = axon.activation_fn.activate(weighted);
             current = activation;
         }
         current
