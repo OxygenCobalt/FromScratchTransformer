@@ -1,7 +1,7 @@
-use std::{cell::RefCell, fs::File, io::{self, Read, Write}, pin::Pin, rc::Rc, sync::Arc};
+use std::{cell::RefCell, fs::File, io::{self, Read, Write}, rc::Rc};
 
 use crate::{
-    autograd::{Autograd, ComputationNode, Function}, dataset::{Example, Test, Train}, matrix::{Matrix, Shape}
+    autograd::{Autograd, ComputationNode, Function, FunctionFactory}, dataset::{Example, Test, Train}, matrix::{Matrix, Shape}
 };
 
 pub struct NeuralNetwork {
@@ -39,25 +39,23 @@ impl NeuralNetwork {
         batch_size: usize,
         learning_rate: f64,
         loss: &impl Loss,
-        regularization: &impl Regularization,
         reporting: Option<impl Reporting>,
         checkpoint_to: Option<&str>
     ) -> io::Result<()> {
         if let Some(ref rep) = reporting {
-            rep.report(None, self.test(rep.data(), rep, loss, regularization));
+            rep.report(None, self.test(rep.data(), rep, loss));
         }
         if let Some(path) = checkpoint_to {
             let nn_path = path.to_owned() + "/init.nn";
             let mut file = File::create(nn_path)?;
             self.write(&mut file)?;
         }
-        let train_size = train.examples.len();
         for epoch in 0..epochs {
             for batch in train.batch(batch_size) {
                 // TODO: Switch to matrix slicing across a 3d matrix, requires tensors :(
                 let mut sum_nablas: Vec<NablaLoss> = Vec::with_capacity(self.axons.len());
                 for example in batch {
-                    let mut nablas = self.neo_backprop(example, loss);
+                    let mut nablas = self.backprop(example, loss);
                     if sum_nablas.is_empty() {
                         sum_nablas.append(&mut nablas);
                         continue;
@@ -69,13 +67,12 @@ impl NeuralNetwork {
                 }
                 let scale_by = learning_rate / batch_size as f64;
                 for (axon, sum_nabla) in self.axons.iter_mut().zip(sum_nablas) {
-                    regularization.partial_regularization_w(&mut axon.weights, learning_rate, train_size);
                     axon.weights.sub_assign(&sum_nabla.weights.scale(scale_by));
                     axon.biases.sub_assign(&sum_nabla.biases.scale(scale_by));
                 }
             }
             if let Some(ref rep) = reporting {
-                rep.report(Some(epoch), self.test(rep.data(), rep, loss, regularization));
+                rep.report(Some(epoch), self.test(rep.data(), rep, loss));
             }
             if let Some(path) = checkpoint_to {
                 let nn_path = path.to_owned() + &format!["/{}.nn", epoch + 1];
@@ -87,137 +84,34 @@ impl NeuralNetwork {
     }
 
     fn backprop(&self, example: &Example, loss: &impl Loss) -> Vec<NablaLoss> {
-        // backprop assumes that
-        // 1. the loss function can be written as the avg of several training examples
-        //    this is bc backprop allows us to compute delta(w,b) for a specific example only
-        //    so we activationsta have avg it out if we want to perform sgd
-        // 2. the loss must be written as a fn of the neural networks outputs
-
-        let mut active_axons: Vec<ActiveAxon> = Vec::with_capacity(self.axons.len());
-        for axon in &self.axons {
-            let current = active_axons.last().map(|l| &l.activation).unwrap_or_else(|| &example.input);
-            let weighted_input = (axon.weights.clone().dot(current)).add(&axon.biases);
-            let activation = axon.activation_fn.activation(weighted_input.clone());
-            active_axons.push(ActiveAxon {
-                axon: &axon,
-                weighted_input,
-                activation,
-            });
-        }
-
-        fn last_activations<'a>(example: &'a Example, active_axons: &'a Vec<ActiveAxon<'_>>) -> &'a Matrix {
-            active_axons.last()
-                .map(|v| &v.activation)
-                .unwrap_or_else(|| &example.input)
-        }
-
-        fn nabla_loss(active_axon: ActiveAxon<'_>, activations_in: &Matrix, error: &Matrix) -> NablaLoss {
-            NablaLoss {
-                weights: Matrix::new(active_axon.axon.weights.shape(), |i, j| {
-                    unsafe { activations_in.get_unchecked(j, 0) * error.get_unchecked(i, 0) }
-                }),
-                biases: error.clone()
-            }
-        }
-        
-        pub struct BackpropagatedLayer<'a> {
-            weights: &'a Matrix,
-            error: Matrix
-        }
-
-        let output_axon: ActiveAxon<'_> = active_axons.pop().unwrap();
-        let activations_in = last_activations(example, &active_axons);
-        let backprop_loss = loss.for_backprop(&example.output, &output_axon, activations_in);
-        let mut backpropagated = BackpropagatedLayer {
-            weights: &output_axon.axon.weights,
-            error: backprop_loss.error
-        };
-
-        let mut nablas = Vec::with_capacity(self.axons.len());
-        nablas.push(backprop_loss.nabla_loss.unwrap_or_else(|| nabla_loss(output_axon, activations_in, &backpropagated.error)));
-
-        while let Some(active_axon) = active_axons.pop() {
-            backpropagated = BackpropagatedLayer {
-                weights: &active_axon.axon.weights,
-                error: (backpropagated.weights.clone().transpose().dot(&backpropagated.error))
-                    .mul(&active_axon.axon.activation_fn.activation_prime(active_axon.weighted_input.clone()))
-            };
-            let activations_in = last_activations(example, &active_axons);
-            nablas.push(nabla_loss(active_axon, &activations_in, &backpropagated.error));
-        }
-
-        nablas.reverse();
-        nablas
-    }
-
-    fn neo_backprop(&self, example: &Example, loss: &impl Loss) -> Vec<NablaLoss> {
-        pub struct SigmoidActivationTest {
-            x: Rc<RefCell<ComputationNode>>
-        }
-
-        impl SigmoidActivationTest {
-            fn sigmoid(n: f64) -> f64 {
-                1f64 / (1f64 + (-n).exp())
-            }
-
-            fn sigmoid_prime(n: f64) -> f64 {
-                Self::sigmoid(n) * (1.0 - Self::sigmoid(n))
-            }
-        }
-
-        impl Function for SigmoidActivationTest {
-            fn f(&self) -> Matrix {
-                self.x.borrow().matrix.clone().apply(Self::sigmoid)
-            }
-
-            fn df(&mut self, grad: &Matrix) {
-                let result = self.x.borrow().matrix.clone().apply(Self::sigmoid_prime).mul(grad);
-                Rc::get_mut(&mut self.x).unwrap().borrow_mut().backward(result);
-            }
-        }
-
-        pub struct MSE2 {
-            x: Rc<RefCell<ComputationNode>>,
-            example: Example
-        }
-
-        impl Function for MSE2 {
-            fn f(&self) -> Matrix {
-                Matrix::scalar(self.x.borrow().matrix.clone().sub(&self.example.output).norm(2) / 2.0, Shape { m: 1, n: 1 })
-            }
-
-            fn df(&mut self, grad: &Matrix) {
-                let result = self.x.borrow().matrix.clone().sub(&self.example.output);
-                self.x.borrow_mut().backward(result);
-            }
-        }
-
         pub struct AutoAxon {
             weights: Autograd,
             biases: Autograd,
             activation_fn: ActivationFn
         }
+
         let auto_axons: Vec<AutoAxon> = self.axons.iter().map(|a| AutoAxon {
             weights: Autograd::new(a.weights.clone()),
             biases: Autograd::new(a.biases.clone()),
             activation_fn: a.activation_fn
         }).collect();
-        // pretend we are doing a normal feed-forward run, autograd tracks all the ops
+
         let mut current = Autograd::new(example.input.clone());
         for axon in &auto_axons {
             let weighted = axon.weights.dot(&current).add(&axon.biases);
-            let activation = weighted.execute_with(|x| SigmoidActivationTest { x });
+            let activation = weighted.execute_with(axon.activation_fn);
             current = activation;
         }
-        let mut result = current.execute_with(|x| MSE2 { x, example: example.clone() });
+        let mut result = current.execute_with(loss.function(example.output.clone()));
         result.backward();
-        auto_axons.iter().map(|a| NablaLoss {
+
+        auto_axons.into_iter().map(|a| NablaLoss {
             weights: a.weights.grad().unwrap().clone(),
             biases: a.biases.grad().unwrap().clone()
         }).collect()
     }
 
-    pub fn test(&self, test: &Test, success_criteria: &impl SuccessCriteria, loss: &impl Loss, regularization: &impl Regularization) -> TestResult {
+    pub fn test(&self, test: &Test, success_criteria: &impl SuccessCriteria, loss: &impl Loss) -> TestResult {
         let mut sum = 0.0;
         let mut successes = 0;
         for example in &test.examples {
@@ -225,12 +119,11 @@ impl NeuralNetwork {
             if success_criteria.is_success(example, &result) {
                 successes += 1;
             }
-            sum += loss.for_test(&example.output, &result);
+            sum += loss.loss(&example.output, &result);
         }
         let loss = sum / test.examples.len() as f64;
-        let regularization = regularization.regularization(self.axons.iter().map(|a| &a.weights), test.examples.len());
         return TestResult {
-            avg_loss: loss + regularization,
+            avg_loss: loss,
             successes
         }
     }
@@ -239,7 +132,7 @@ impl NeuralNetwork {
         let mut current = input.clone();
         for axon in &self.axons {
             let weighted = axon.weights.clone().dot(&current).add(&axon.biases);
-            let activation = axon.activation_fn.activation(weighted);
+            let activation = axon.activation_fn.f(weighted);
             current = activation;
         }
         current
@@ -292,189 +185,119 @@ impl NeuralNetwork {
 #[derive(Clone, Copy)]
 pub enum ActivationFn {
     Sigmoid,
-    ReLU,
-    SiLU,
-    Softmax
+}
+
+impl FunctionFactory for ActivationFn {
+    fn new(self, this: Rc<RefCell<ComputationNode>>) -> Box<dyn Function> {
+        Box::new(SigmoidActivation { x: this })
+    }
 }
 
 impl ActivationFn {
-    fn activation(&self, input: Matrix) -> Matrix {
-        match self {
-            Self::Sigmoid => input.apply(Self::sigmoid),
-            Self::ReLU => input.apply(Self::relu),
-            Self::SiLU => input.apply(Self::silu),
-            Self::Softmax => Self::softmax(input)
-        }
-    }
-
-    fn activation_prime(&self, input: Matrix) -> Matrix {
-        match self {
-            Self::Sigmoid => input.apply(Self::sigmoid_prime),
-            Self::ReLU => input.apply(Self::relu_prime),
-            Self::SiLU => input.apply(Self::silu_prime),
-            Self::Softmax => Self::softmax_prime(input)
-        }
-    }
-
-    fn sigmoid(n: f64) -> f64 {
-        1f64 / (1f64 + (-n).exp())
-    }
-    
-    fn sigmoid_prime(n: f64) -> f64 {
-        Self::sigmoid(n) * (1.0 - Self::sigmoid(n))
-    }
-
     fn id(&self) -> &'static [u8; 8] {
         match self {
             Self::Sigmoid => b"Sigmoid\0",
-            Self::ReLU =>    b"ReLU\0\0\0\0",
-            Self::SiLU =>    b"SiLU\0\0\0\0",
-            Self::Softmax => b"Softmax\0",
         }
     }
 
     fn from_id(id: &[u8; 8]) -> Option<Self> {
         match id {
-            b"Sigmoid\0"    => Some(Self::Sigmoid),
-            b"ReLU\0\0\0\0" => Some(Self::ReLU),
-            b"SiLU\0\0\0\0" => Some(Self::SiLU),
-            b"Softmax\0"    => Some(Self::Softmax),
+            b"Sigmoid\0" => Some(Self::Sigmoid),
             _ => None
         }
     }
 
+    fn f(&self, matrix: Matrix) -> Matrix {
+        matrix.apply(SigmoidActivation::sigmoid)
+    }
+}
+pub struct SigmoidActivation {
+    x: Rc<RefCell<ComputationNode>>
+}
 
-    fn relu(n: f64) -> f64 {
-        if n > 0.0 { n } else { 0.0 }
+impl SigmoidActivation {
+    fn sigmoid(n: f64) -> f64 {
+        1f64 / (1f64 + (-n).exp())
     }
 
-    fn relu_prime(n: f64) -> f64 {
-        if n > 0.0 { 1.0 } else { 0.0 }
-    }
-
-    fn silu(n: f64) -> f64 {
-        n / (1.0 + (-n).exp())
-    }
-
-    fn silu_prime(n: f64) -> f64 {
-        (1.0 + (-n).exp() * (1.0 + n)) / (1.0 + (-n).exp()).powi(2)
-    }
-
-    fn softmax(matrix: Matrix) -> Matrix {
-        let sum = matrix.sum_with(|_, _, v| v.exp());
-        matrix.apply(|v| v.exp() / sum)
-    }
-
-    fn softmax_prime(matrix: Matrix) -> Matrix {
-        // e^this / sum(e^all) -> e^this * (sum(e&^all))-1 -> self * (e^this * 1 / sum) 
-        let sum = matrix.sum_with(|_, _, v| v.exp());
-        matrix.apply(|v| -(v.exp() / sum).powi(2))
+    fn sigmoid_prime(n: f64) -> f64 {
+        Self::sigmoid(n) * (1.0 - Self::sigmoid(n))
     }
 }
 
+impl Function for SigmoidActivation {
+    fn f(&self) -> Matrix {
+        self.x.borrow().matrix.clone().apply(Self::sigmoid)
+    }
 
+    fn df(&mut self, grad: &Matrix) {
+        let result = self.x.borrow().matrix.clone().apply(Self::sigmoid_prime).mul(grad);
+        Rc::get_mut(&mut self.x).unwrap().borrow_mut().backward(result);
+    }
+}
 
 pub trait Loss {
-    fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64;
-    fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> BackpropLoss;
+    fn loss(&self, activations: &Matrix, output: &Matrix) -> f64;
+    fn function(&self, output: Matrix) -> impl FunctionFactory;
 }
 
 pub struct MSE;
 
 impl Loss for MSE {
-    fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64 {
-        (output_activations.clone().sub(example_output)).norm(2) / 2.0
+    fn loss(&self, activations: &Matrix, output: &Matrix) -> f64 {
+        activations.flatten().zip(output.flatten()).map(|(a, o)| (a - o).powi(2)).sum()
     }
 
-    fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, _: &Matrix) -> BackpropLoss {
-        let error = output_axon.activation.clone().sub(&example_output).mul(&output_axon.axon.activation_fn.activation(output_axon.weighted_input.clone()));
-        BackpropLoss { error, nabla_loss: None }
-    }
-}
-
-pub struct CrossEntropy;
-
-impl Loss for CrossEntropy {
-    fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64 {
-        example_output.sum_with(|i, j, y| {
-            let a = output_activations.get(i, j);
-            -(y * a.ln()) + (1.0 - y) * (1.0 - a).ln()
-        })
-    }
-
-    fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> BackpropLoss {
-        let error = output_axon.activation.clone().sub(&example_output);
-        let nabla_loss = NablaLoss {
-            weights: output_axon.axon.weights.clone().apply_indexed(|i, j, _| {
-                activations_in.get(j, 0) * 
-                    ((output_axon.activation.get(i, 0) - 
-                        example_output.get(i, 0)))
-            }),
-            biases: output_axon.activation.clone().sub(&example_output)
-        };
-        BackpropLoss { error, nabla_loss: Some(nabla_loss) }
+    fn function(&self, output: Matrix) -> impl FunctionFactory {
+        MSEFactory { output }
     }
 }
 
-pub struct LogLikelihood;
+struct MSEFactory { output: Matrix }
 
-impl Loss for LogLikelihood {
-    fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64 {
-        -output_activations.get(example_output.argmax(), 0).ln()
-    }
-
-    fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> BackpropLoss {
-        CrossEntropy.for_backprop(example_output, output_axon, activations_in)
+impl FunctionFactory for MSEFactory {
+    fn new(self, this: Rc<RefCell<ComputationNode>>) -> Box<dyn Function> {
+        Box::new(MSEFunction { activations: this, output: self.output })
     }
 }
 
-pub trait Regularization {
-    fn regularization<'a>(&self, weights: impl Iterator<Item=&'a Matrix>, train_size: usize) -> f64;
-    fn partial_regularization_w(&self, weights: &mut Matrix, learning_rate: f64, train_size: usize);
+struct MSEFunction {
+    activations: Rc<RefCell<ComputationNode>>,
+    output: Matrix
 }
 
-pub struct NoRegularization;
-
-impl Regularization for NoRegularization {
-    fn regularization<'a>(&self, _: impl Iterator<Item=&'a Matrix>, _: usize) -> f64 {
-        0.0
+impl Function for MSEFunction {
+    fn f(&self) -> Matrix {
+        Matrix::scalar(MSE.loss(&self.activations.borrow().matrix, &self.output), Shape { m: 1, n: 1 })
     }
 
-    fn partial_regularization_w(&self, _: &mut Matrix, _: f64, _: usize) {
-        
-    }
-}
-
-pub struct L1 { pub lambda: f64 }
-
-impl Regularization for L1 {
-    fn regularization<'a>(&self, weights: impl Iterator<Item=&'a Matrix>, train_size: usize) -> f64 {
-        (self.lambda / train_size as f64) * weights.map(|w| w.norm(1)).sum::<f64>()
-    }
-
-    fn partial_regularization_w(&self, weights: &mut Matrix, learning_rate: f64, train_size: usize) {
-        weights.apply_assign(|v| v - ((learning_rate * self.lambda) / train_size as f64) * if v >= 0.0 { 1.0 } else { -1.0 });
-    }
-
-}
-
-pub struct L2 { pub lambda: f64 }
-
-impl Regularization for L2 {
-    fn regularization<'a>(&self, weights: impl Iterator<Item=&'a Matrix>, train_size: usize) -> f64 {
-        (self.lambda / (2.0 * train_size as f64)) * weights.map(|w| w.norm(2)).sum::<f64>()
-    }
-
-    fn partial_regularization_w(&self, weights: &mut Matrix, learning_rate: f64, train_size: usize) {
-        weights.scale_assign(1.0 - (self.lambda * learning_rate) / train_size as f64);
+    fn df(&mut self, _: &Matrix) {
+        let result = self.activations.borrow().matrix.clone().sub(&self.output);
+        self.activations.borrow_mut().backward(result);
     }
 }
 
+// pub struct CrossEntropy;
 
-pub struct BackpropLoss {
-    error: Matrix,
-    nabla_loss: Option<NablaLoss>
-}
+// impl Loss for CrossEntropy {
+//     fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64 {
+//         example_output.sum_with(|i, j, y| {
+//             let a = output_activations.get(i, j);
+//             -(y * a.ln()) + (1.0 - y) * (1.0 - a).ln()
+//         })
+//     }
+
+// pub struct LogLikelihood;
+
+// impl Loss for LogLikelihood {
+//     fn for_test(&self, example_output: &Matrix, output_activations: &Matrix) -> f64 {
+//         -output_activations.get(example_output.argmax(), 0).ln()
+//     }
+
+//     fn for_backprop(&self, example_output: &Matrix, output_axon: &ActiveAxon, activations_in: &Matrix) -> BackpropLoss {
+//         CrossEntropy.for_backprop(example_output, output_axon, activations_in)
+//     }
+// }
 
 pub struct TestResult {
     pub avg_loss: f64,
@@ -490,24 +313,18 @@ pub trait Reporting: SuccessCriteria {
     fn report(&self, epoch: Option<u64>, result: TestResult);
 }
 
-pub struct Axon {
-    weights: Matrix,
-    biases: Matrix,
-    activation_fn: ActivationFn
-}
-
-pub struct NablaLoss {
-    weights: Matrix,
-    biases: Matrix
-}
-
 pub struct Layer {
     pub neurons: usize,
     pub activation_fn: ActivationFn
 }
 
-pub struct ActiveAxon<'a> {
-    axon: &'a Axon,
-    weighted_input: Matrix,
-    activation: Matrix,
+struct Axon {
+    weights: Matrix,
+    biases: Matrix,
+    activation_fn: ActivationFn
+}
+
+struct NablaLoss {
+    weights: Matrix,
+    biases: Matrix
 }

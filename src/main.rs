@@ -1,6 +1,6 @@
 use std::fs::File;
 
-use crate::{dataset::{Example, Test}, matrix::Matrix, nn::{ActivationFn, CrossEntropy, Layer, NeuralNetwork, Reporting, SuccessCriteria, L1}};
+use crate::{dataset::{Example, Test}, matrix::Matrix, nn::{ActivationFn, Layer, NeuralNetwork, Reporting, SuccessCriteria, MSE}};
 
 mod dataset;
 mod matrix;
@@ -39,15 +39,14 @@ fn main() {
     println!("loading done: {} train examples, {} test examples.", mnist.train.examples.len(), mnist.test.examples.len());
     println!("begin training...");
     let mut nn = NeuralNetwork::new(&[
-        Layer { neurons: mnist.io_shape.in_size, activation_fn: ActivationFn::SiLU },
-        Layer { neurons: 30, activation_fn: ActivationFn::SiLU },
-        Layer { neurons: mnist.io_shape.out_size, activation_fn: ActivationFn::Softmax },
+        Layer { neurons: mnist.io_shape.in_size, activation_fn: ActivationFn::Sigmoid },
+        Layer { neurons: 30, activation_fn: ActivationFn::Sigmoid },
+        Layer { neurons: mnist.io_shape.out_size, activation_fn: ActivationFn::Sigmoid },
     ]);
     nn.train(
         &mut mnist.train,  
-        60, 10, 0.1, 
-        &CrossEntropy, 
-        &L1 { lambda: 5.0 },
+        30, 10, 3.0, 
+        &MSE, 
         Some(MnistReporting { test: &mnist.test }), 
         None
     ).unwrap();

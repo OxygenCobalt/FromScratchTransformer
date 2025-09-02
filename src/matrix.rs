@@ -61,10 +61,6 @@ impl Matrix {
         self.shape
     }
 
-    pub fn norm(&self, i: i32) -> f64 {
-        self.data.iter().map(|n| n.abs().powi(i)).sum()
-    }
-
     pub fn get(&self, i: usize, j: usize) -> f64 {
         let idx = self.index_of(i, j);
         self.data[idx]
@@ -129,10 +125,6 @@ impl Matrix {
         self.apply(|n| c * n)
     }
 
-    pub fn scale_assign(&mut self, c: f64) {
-        self.apply_assign(|n| c * n);
-    }
-
     pub fn mul(mut self, rhs: &Self) -> Self {
         if self.shape != rhs.shape {
             panic!("shape mismatch for element-wise multiplication: {:?} != {:?}", self.shape, rhs.shape);
@@ -177,20 +169,6 @@ impl Matrix {
         }
     }
 
-    pub fn outer(mut self, rhs: &Self) -> Self {
-        if self.shape.n != 1 || rhs.shape.n != 1 {
-            panic!("shape mismatch: {:?} {:?}", self.shape, rhs.shape);
-        }
-        self.shape.n = rhs.shape.m;
-        self.data.resize(self.shape.m * self.shape.n, 0f64);
-        for i in 0..self.shape.m {
-            for j in 0..self.shape.n {
-                self.set(i, 0, self.get(i, 0) * rhs.get(j, 0));
-            }
-        }
-        self
-    }
-
     pub fn transpose(self) -> Self {
         let mut new = Self::null(Shape {
             m: self.shape.n,
@@ -207,43 +185,14 @@ impl Matrix {
     }
 
     pub fn apply(mut self, transform: impl Fn(f64) -> f64) -> Self {
-        self.apply_assign(transform);
-        self
-    }
-
-    pub fn apply_assign(&mut self, transform: impl Fn(f64) -> f64) {
         for v in &mut self.data {
             *v = transform(*v);
         }
-    }
-
-    pub fn apply_indexed(mut self, transform: impl Fn(usize, usize, f64) -> f64) -> Self {
-        let mut i = 0;
-        let mut j = 0;
-        for v in &mut self.data {
-            *v = transform(i, j, *v);
-            j += 1;
-            if j >= self.shape.n {
-                i += 1;
-                j = 0;
-            } 
-        }
         self
     }
 
-    pub fn sum_with(&self, transform: impl Fn(usize, usize, f64) -> f64) -> f64 {
-        let mut i = 0;
-        let mut j = 0;
-        let mut sum = 0.0;
-        for v in &self.data {
-            sum += transform(i, j, *v);
-            j += 1;
-            if j >= self.shape.n {
-                i += 1;
-                j = 0;
-            } 
-        }
-        sum
+    pub fn flatten(&self) -> impl Iterator<Item=&f64> {
+        self.data.iter()
     }
 
     pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
