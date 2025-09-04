@@ -3,7 +3,7 @@ use std::fs::File;
 use arrow::array::{Array, BinaryArray, Int64Array, StructArray};
 use parquet::arrow::arrow_reader::ArrowReaderBuilder;
 
-use crate::{activation::Activation, dataset::{Dataset, Example, IOShape, Test, Train}, loss::MSE, matrix::Matrix, nn::{Layer, NeuralNetwork, Reporting, SuccessCriteria, TestResult}};
+use crate::{activation::Activation, dataset::{Dataset, Example, IOShape, Test, Train}, loss::MSE, matrix::Matrix, nn::{Layer, Layer2, NeuralNetwork, Reporting, SuccessCriteria, TestResult}};
 
 mod matrix;
 mod autograd;
@@ -16,14 +16,15 @@ mod activation;
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() {
+
     println!("loading data...");
     let mut mnist = mnist().unwrap();
     println!("loading done: {} train examples, {} test examples.", mnist.train.examples.len(), mnist.test.examples.len());
     println!("begin training...");
     let mut nn = NeuralNetwork::new(&[
-        Layer { neurons: mnist.io_shape.in_size, activation_fn: Activation::Sigmoid },
-        Layer { neurons: 30, activation_fn: Activation::Sigmoid },
-        Layer { neurons: mnist.io_shape.out_size, activation_fn: Activation::Sigmoid },
+        Layer2::Dense { neurons: mnist.io_shape.in_size, activation: Activation::Sigmoid },
+        Layer2::Dropout { neurons: 30, rate: 0.1, activation: Activation::Sigmoid },
+        Layer2::Dense { neurons: mnist.io_shape.out_size, activation: Activation::Sigmoid },
     ]);
     nn.train(
         &mut mnist.train,  

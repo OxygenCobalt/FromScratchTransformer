@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 
 use rand_distr::{Distribution, Normal};
 
-static NORMAL: LazyLock<Normal<f64>> = std::sync::LazyLock::new(|| Normal::new(0.0, 1.0).unwrap());
+pub static NORMAL: LazyLock<Normal<f64>> = std::sync::LazyLock::new(|| Normal::new(0.0, 1.0).unwrap());
 
 #[derive(Clone, PartialEq)]
 pub struct Matrix {
@@ -151,6 +151,15 @@ impl Matrix {
 
     pub fn scale(self, c: f64) -> Self {
         self.apply(|n| c * n)
+    }
+
+    pub fn zero_rows(mut self, rows: &[usize]) -> Self {
+        for i in rows {
+            for j in 0..self.shape.n {
+                self.set(*i, j, 0.0)
+            }
+        }
+        self
     }
 
     pub fn mul(mut self, rhs: &Self) -> Self {

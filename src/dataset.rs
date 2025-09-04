@@ -1,7 +1,5 @@
 use rand::seq::SliceRandom;
 
-use crate::matrix::Shape;
-
 use super::matrix::Matrix;
 
 

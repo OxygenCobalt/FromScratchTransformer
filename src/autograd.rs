@@ -21,6 +21,18 @@ impl Autograd {
         self.execute(Dot { lhs: self.0.clone(), rhs: rhs.0.clone() })
     }
 
+    pub fn scale(&self, c: f64) -> Self {
+        self.execute(Scale { lhs: c, rhs: self.0.clone() })
+    }
+
+    pub fn hacky_dropout(self, rows: &[usize]) -> Self {
+        // todo: make this an actual operation
+        let mut slf = self.0.borrow_mut();
+        slf.matrix = slf.matrix.clone().zero_rows(rows);
+        std::mem::drop(slf);
+        self
+    }
+
     pub fn execute_with(&self, factory: impl OperationFactory) -> Self {
         self.execute_impl(factory.new(self.0.clone()))
     }
@@ -112,6 +124,25 @@ impl Operation for Dot {
         // df/drhs = lhs^T * df/ddot
         self.lhs.borrow_mut().backward(grad.clone().dot(&self.rhs.borrow().matrix.clone().transpose()));
         self.rhs.borrow_mut().backward(self.lhs.borrow().matrix.clone().transpose().dot(&grad));
+    }
+}
+
+struct Scale {
+    lhs: f64,
+    rhs: AutogradNode
+}
+
+impl Operation for Scale {
+    fn f(&self) -> Matrix {
+        // dot = lhs * rhs
+        self.rhs.borrow().matrix.clone().scale(self.lhs)
+    }
+
+    fn df(&mut self, grad: &Matrix) {
+        // df/dlhs = TODO
+        // df/drhs = c * df/ddot
+        let scale = self.rhs.borrow().matrix.clone().scale(self.lhs);
+        self.rhs.borrow_mut().backward(scale);
     }
 }
 
