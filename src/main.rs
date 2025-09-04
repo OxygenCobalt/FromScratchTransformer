@@ -62,9 +62,13 @@ impl <'a> SuccessCriteria for MnistReporting<'a> {
 pub fn mnist() -> Result<Dataset, parquet::errors::ParquetError> {
     let train = load_mnist("./mnist/mnist/train-00000-of-00001.parquet")?;
     let test = load_mnist("./mnist/mnist/test-00000-of-00001.parquet")?;
+    let io_shape = IOShape {
+            in_size: 784,
+            out_size: 10,
+        };
     let dataset = Dataset {
-        train: Train { examples: train },
-        test: Test { examples: test },
+        train: Train { examples: train, io_shape },
+        test: Test { examples: test, io_shape },
         io_shape: IOShape {
             in_size: 784,
             out_size: 10,

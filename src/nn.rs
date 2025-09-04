@@ -21,8 +21,8 @@ impl NeuralNetwork {
             let in_size = layer.neurons;
             let out_size = next_layer.neurons;
             let axon = Axon {
-                weights: Matrix::noisy(Shape { m: out_size, n: in_size }),
-                biases: Matrix::noisy(Shape::vector(out_size)),
+                weights: Matrix::normal(Shape { m: out_size, n: in_size }),
+                biases: Matrix::normal(Shape::vector(out_size)),
                 activation_fn: layer.activation_fn
             };
             axons.push(axon);
@@ -35,7 +35,7 @@ impl NeuralNetwork {
 
     pub fn train(
         &mut self,
-        train: &mut Train,
+        train: &Train,
         epochs: u64,
         batch_size: usize,
         learning_rate: f64,
@@ -53,23 +53,35 @@ impl NeuralNetwork {
         }
         for epoch in 0..epochs {
             for batch in train.batch(batch_size) {
-                // TODO: Switch to matrix slicing across a 3d matrix, requires tensors :(
-                let mut sum_nablas: Vec<NablaLoss> = Vec::with_capacity(self.axons.len());
-                for example in batch {
-                    let mut nablas = self.backprop(example, loss);
-                    if sum_nablas.is_empty() {
-                        sum_nablas.append(&mut nablas);
-                        continue;
-                    }
-                    for (sum_nabla, nabla) in sum_nablas.iter_mut().zip(nablas) {
-                        sum_nabla.weights.add_assign(&nabla.weights);
-                        sum_nabla.biases.add_assign(&nabla.biases);
-                    }
+                struct AutoAxon {
+                    weights: Autograd,
+                    biases: Autograd,
+                    activation_fn: Activation
                 }
+
+                let auto_axons: Vec<AutoAxon> = self.axons.iter().map(|a| AutoAxon {
+                    weights: Autograd::new(a.weights.clone()),
+                    biases: Autograd::new(Matrix::columns(vec![&a.biases; batch_size].as_slice())), // need to apply it to all of the batch at once
+                    activation_fn: a.activation_fn
+                }).collect();
+
+                let mut current = Autograd::new(batch.input);
+
+                for axon in &auto_axons {
+                    let weighted = axon.weights.dot(&current).add(&axon.biases);
+                    let activation = weighted.execute_with(axon.activation_fn);
+                    current = activation;
+                }
+                // eval loss and backpropagate back to weights/biases
+                current.execute_with(loss.op(batch.output)).backward();
+                // this drops the entire computation graph allowing us to move the weight/bias
+                // gradients out w/o a clone
+                std::mem::drop(current);
+
                 let scale_by = learning_rate / batch_size as f64;
-                for (axon, sum_nabla) in self.axons.iter_mut().zip(sum_nablas) {
-                    axon.weights.sub_assign(&sum_nabla.weights.scale(scale_by));
-                    axon.biases.sub_assign(&sum_nabla.biases.scale(scale_by));
+                for (axon, auto_axon) in self.axons.iter_mut().zip(auto_axons.into_iter()) {
+                    axon.weights.sub_assign(&auto_axon.weights.into_grad().unwrap().scale(scale_by));
+                    axon.biases.sub_assign(&auto_axon.biases.into_grad().unwrap().scale(scale_by).nsum());
                 }
             }
             if let Some(ref rep) = reporting {
@@ -82,34 +94,6 @@ impl NeuralNetwork {
             }
         }
         Ok(())
-    }
-
-    fn backprop(&self, example: &Example, loss: &impl Loss) -> Vec<NablaLoss> {
-        pub struct AutoAxon {
-            weights: Autograd,
-            biases: Autograd,
-            activation_fn: Activation
-        }
-
-        let auto_axons: Vec<AutoAxon> = self.axons.iter().map(|a| AutoAxon {
-            weights: Autograd::new(a.weights.clone()),
-            biases: Autograd::new(a.biases.clone()),
-            activation_fn: a.activation_fn
-        }).collect();
-
-        let mut current = Autograd::new(example.input.clone());
-        for axon in &auto_axons {
-            let weighted = axon.weights.dot(&current).add(&axon.biases);
-            let activation = weighted.execute_with(axon.activation_fn);
-            current = activation;
-        }
-        let mut result = current.execute_with(loss.op(example.output.clone()));
-        result.backward();
-
-        auto_axons.into_iter().map(|a| NablaLoss {
-            weights: a.weights.grad().unwrap().clone(),
-            biases: a.biases.grad().unwrap().clone()
-        }).collect()
     }
 
     pub fn test(&self, test: &Test, success_criteria: &impl SuccessCriteria, loss: &impl Loss) -> TestResult {
@@ -206,9 +190,4 @@ struct Axon {
     weights: Matrix,
     biases: Matrix,
     activation_fn: Activation
-}
-
-struct NablaLoss {
-    weights: Matrix,
-    biases: Matrix
 }

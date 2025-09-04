@@ -13,12 +13,6 @@ pub struct Matrix {
 }
 
 impl Matrix {
-    pub fn null(shape: Shape) -> Self {
-        let mut data = Vec::new();
-        data.resize(shape.m * shape.n, 0f64);
-        Self { data, shape }
-    }
-
     pub fn new(shape: Shape, mut fill: impl FnMut(usize, usize) -> f64) -> Self {
         let mut data = Vec::new();
         let mut n = 0;
@@ -32,7 +26,13 @@ impl Matrix {
         Self { shape, data }
     }
 
-    pub fn noisy(shape: Shape) -> Self {
+    pub fn null(shape: Shape) -> Self {
+        let mut data = Vec::new();
+        data.resize(shape.m * shape.n, 0f64);
+        Self { data, shape }
+    }
+
+    pub fn normal(shape: Shape) -> Self {
         Self::new(shape, |_, _| NORMAL.sample(&mut rand::rng()))
     }
 
@@ -47,8 +47,32 @@ impl Matrix {
         }
     }
 
+    pub fn columns(columns: &[&Matrix]) -> Self {
+        let mut data = Vec::new();
+        for i in 0..columns[0].shape.m {
+            for j in 0..columns.len() {
+                data.push(columns[j].get(i, 0));
+            }
+        }
+        Self { data, shape: Shape { m: columns[0].shape.m,  n: columns.len() } }
+    }
+
     pub fn shape(&self) -> Shape {
         self.shape
+    }
+
+    pub fn nsum(mut self) -> Self {
+        let mut new = Vec::with_capacity(self.shape.m);
+        for i in 0..self.shape.m {
+            let mut sum = 0.0;
+            for j in 0..self.shape.n {
+                sum += self.get(i, j)
+            }
+                new.push(sum);
+        }
+        self.data = new;
+        self.shape.n = 1;
+        self
     }
 
     pub fn get(&self, i: usize, j: usize) -> f64 {
@@ -59,16 +83,6 @@ impl Matrix {
     pub unsafe fn get_unchecked(&self, i: usize, j: usize) -> f64 {
         let idx = self.index_of(i, j);
         unsafe { *self.data.get_unchecked(idx) }
-    }
-
-    pub fn argmax(&self) -> usize {
-        let mut maxi = 0;
-        for (i, v) in self.data.iter().enumerate() {
-            if *v > self.data[maxi] {
-                maxi = i;
-            }
-        }
-        return maxi;
     }
 
     pub fn set(&mut self, i: usize, j: usize, value: f64) {
@@ -83,6 +97,20 @@ impl Matrix {
 
     fn index_of(&self, i: usize, j: usize) -> usize {
         i * self.shape.n + j
+    }
+
+    pub fn argmax(&self) -> usize {
+        let mut maxi = 0;
+        for (i, v) in self.data.iter().enumerate() {
+            if *v > self.data[maxi] {
+                maxi = i;
+            }
+        }
+        return maxi;
+    }
+
+    pub fn flatten(&self) -> &[f64] {
+        &self.data
     }
 
     pub fn add(mut self, rhs: &Self) -> Self {
@@ -189,10 +217,6 @@ impl Matrix {
             *v = transform(*v);
         }
         self
-    }
-
-    pub fn flatten(&self) -> impl Iterator<Item=&f64> {
-        self.data.iter()
     }
 
     pub fn write(&self, write: &mut impl Write) -> io::Result<()> {

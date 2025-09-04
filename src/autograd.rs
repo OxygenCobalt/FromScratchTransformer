@@ -43,8 +43,8 @@ impl Autograd {
         self.0.borrow_mut().backward_init();
     }
 
-    pub fn grad(&self) -> Option<Matrix> {
-        self.0.borrow().grad.clone()
+    pub fn into_grad(self) -> Option<Matrix> {
+        Rc::into_inner(self.0).and_then(|c| c.into_inner().grad)
     }
 }
 
