@@ -1,4 +1,4 @@
-use crate::{autograd::{AutogradNode, Operation, OperationFactory}, matrix::Matrix};
+use crate::{autograd::{AutogradNode, Operation, OperationFactory}, matrix::Matrix, tensor::{self, Tensor}};
 
 
 #[derive(Clone, Copy)]
@@ -37,6 +37,14 @@ impl Activation {
             Self::Sigmoid => matrix.apply(SigmoidActivation::sigmoid),
             Self::ReLU => matrix.apply(ReLUActivation::relu),
             Self::SiLU => matrix.apply(SiLUActivation::silu)
+        }
+    }
+
+    pub fn activate2<T: Tensor>(&self, y: T) -> T {
+        match self {
+            Self::Sigmoid => T::scalar(1.0).sub(&y.neg().exp()).unwrap().inv(),
+            Self::ReLU => y.max(0.0),
+            Self::SiLU => y.clone().mul(&Self::Sigmoid.activate2(y)).unwrap()
         }
     }
 }

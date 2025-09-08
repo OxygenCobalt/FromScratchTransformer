@@ -2,6 +2,8 @@ use std::{fs::File, io::{self, Read, Write}};
 
 use rand::{seq::IndexedRandom, Rng};
 
+use crate::tensor::Tensor;
+
 use super::{
     loss::Loss, activation::Activation,
     autograd::{Autograd}, dataset::{Example, Test, Train}, matrix::{Matrix, Shape}
@@ -286,5 +288,17 @@ impl  <'a> AxonMut<'a> {
                     biases.sub_assign(&auto_biases.into_grad().unwrap().nsum().scale(c));
                 }
         }
+    }
+}
+
+struct DenseParams<T: Tensor> {
+    weights: T,
+    biases: T,
+    activation: Activation
+}
+
+impl <T: Tensor> DenseParams<T> {
+    fn forward(&self, activations: T) -> T {
+        self.activation.activate2(self.weights.clone().dot(&activations, (&[1], &[0])).unwrap())
     }
 }

@@ -1,7 +1,8 @@
-use crate::{autograd::{AutogradNode, Operation, OperationFactory}, matrix::Matrix};
+use crate::{autograd::{AutogradNode, Operation, OperationFactory}, matrix::Matrix, tensor::Tensor};
 
 pub trait Loss {
     fn loss(&self, batch_activations: &Matrix, output: &Matrix) -> f64;
+    fn loss2<T: Tensor>(&self, batch_activations: &T, output: &T) -> T;
     fn op(&self, output: Matrix) -> impl OperationFactory;
 }
 
@@ -10,6 +11,10 @@ pub struct MSE;
 impl Loss for MSE {
     fn loss(&self, batch_activations: &Matrix, output: &Matrix) -> f64 {
         batch_activations.flatten().iter().zip(output.flatten().iter()).map(|(a, o)| (a - o).powi(2)).sum()
+    }
+    
+    fn loss2<T: Tensor>(&self, batch_activations: &T, output: &T) -> T {
+        batch_activations.clone().sub(output).unwrap().norm(2)
     }
 
     fn op(&self, output: Matrix) -> impl OperationFactory {

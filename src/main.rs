@@ -11,6 +11,7 @@ mod nn;
 mod dataset;
 mod loss;
 mod activation;
+mod tensor;
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
