@@ -246,11 +246,13 @@ impl Tensor for CPUTensor {
         };
 
         let mut new_point = vec![0; new.shape.len()];
+        let mut lhs_point = vec![0; self.ndim()];
+        let mut rhs_point = vec![0; other.ndim()];
         'iterate: loop {
-            let mut lhs_point = new_point[..lhs_survivors.len()].to_vec();
-            lhs_point.resize(lhs_point.len() + lhs_contraction.len(), 0);
-            let mut rhs_point = vec![0; lhs_contraction.len()];
-            rhs_point.extend_from_slice(&new_point[lhs_survivors.len()..]);
+            lhs_point.iter_mut().rev().take(lhs_contraction.len()).for_each(|x| *x = 0);
+            lhs_point.iter_mut().take(lhs_survivors.len()).zip(&new_point).for_each(|(x, y)| *x = *y);
+            rhs_point.iter_mut().take(lhs_contraction.len()).for_each(|x| *x = 0);
+            rhs_point.iter_mut().rev().take(lhs_survivors.len()).zip(new_point.iter().rev()).for_each(|(x, y)| *x = *y);
             let mut sum = 0.0;
             'summate: loop {
                 sum += *self.get(&lhs_point).unwrap() * *other.get(&rhs_point).unwrap();
