@@ -1,24 +1,107 @@
+use std::io::{self, Read, Write};
+
 pub trait Tensor where Self: Sized + Clone {
     fn scalar(c: impl Into<f64>) -> Self;
     fn vector(v: impl Into<Vec<f64>>) -> Option<Self>;
-    fn tensor(f: impl FnMut() -> f64, shape: &[usize]) -> Option<Self>;
+    fn tensor(i: impl TensorInit) -> Option<Self>;
+    fn ndim(&self) -> usize;
     fn shape(&self) -> &[usize];
     fn get(&self, point: &[usize]) -> Option<&f64>;
+    fn iter(&self) -> impl Iterator<Item=&f64>;
     fn add(self, other: &Self) -> Option<Self>;
     fn sub(self, other: &Self) -> Option<Self>;
     fn mul(self, other: &Self) -> Option<Self>;
-    fn dot(self, other: &Self, axes: (&[usize], &[usize])) -> Option<Self>;
-    fn norm(self, i: u8) -> Self;
+    fn dot(self, other: &Self, axes: usize) -> Option<Self>;
     fn ln(self) -> Self;
     fn exp(self) -> Self;
-    fn inv(self) -> Self;
+    fn pow(self, i: i32) -> Self;
+    fn sum(self) -> Self;
     fn neg(self) -> Self;
     fn max(self, y: f64) -> Self;
 }
 
+pub trait TensorInit {
+    fn make(self) -> Option<(Vec<usize>, Vec<f64>)>;
+}
+
+/// a "sharp tensor" is just an extension of non-differentiable
+/// tensor methods. well, in practice things like transpose
+/// *are* differentiable, but nothing im working on needs the
+/// gradient of a transpose yet so it's also here.
 pub trait SharpTensor: Tensor {
-    fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64>;
     fn tranpose(self, axes: &[usize]) -> Option<Self>;
+    fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64>;
+    fn iter_mut(&mut self) -> impl Iterator<Item=&mut f64>;
+    fn argmax(&self) -> usize;
+}
+
+pub trait TensorIO: Tensor {
+    fn read(read: &mut impl Read) -> io::Result<Self>;
+    fn write(&self, write: &mut impl Write) -> io::Result<()>;
+}
+
+#[derive(Clone)]
+pub enum Th {
+    R(Vec<f64>),
+    C(Vec<Self>)
+}
+
+impl TensorInit for Th {
+    fn make(self) -> Option<(Vec<usize>, Vec<f64>)> {
+        let mut shape: Vec<usize> = Vec::new();
+        let mut stack = Vec::new();
+        stack.push((self, 0));
+        let mut data = Vec::new();
+        while let Some((_, depth)) = stack.get(0) {
+            let depth = *depth;
+            let len = match stack.remove(0) {
+                (Th::R(mut row), _) => {
+                    let len = row.len();
+                    data.append(&mut row);
+                    len
+                },
+                (Th::C(col), depth) => {
+                    let len = col.len();
+                    stack.extend(col.into_iter().map(|tv| (tv, depth + 1)));
+                    len
+                }
+            };
+            match shape.get(depth) {
+                Some(existing) => if *existing != len { return None },
+                None => {
+                    shape.resize(depth + 1,0);
+                    shape[depth] = len;
+                }
+            }
+        }
+        shape.reverse();
+        Some((shape, data))
+    }
+}
+
+pub struct Fill  {
+    pub shape: Vec<usize>,
+    pub with: f64
+}
+
+impl TensorInit for Fill {
+    fn make(self) -> Option<(Vec<usize>, Vec<f64>)> {
+        let data = vec![self.with; CPUTensor::len(&self.shape)];
+        return Some((self.shape, data))
+    }
+}
+
+pub struct Generate<F: FnMut() -> f64> {
+    pub shape: Vec<usize>,
+    pub with: F
+}
+
+impl <F: FnMut() -> f64> TensorInit for Generate<F> {
+    fn make(self) -> Option<(Vec<usize>, Vec<f64>)> {
+        let mut data = Vec::new();
+        data.resize_with(CPUTensor::len(self.shape.as_slice()), self.with);
+        return Some((self.shape, data))
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -29,7 +112,10 @@ pub struct CPUTensor {
 
 impl CPUTensor {
     fn len(shape: &[usize]) -> usize {
-        shape.iter().cloned().reduce(|a, v| a * v).unwrap()
+        if shape.is_empty() {
+            return 1;
+        }
+        shape.iter().cloned().reduce(|a, v| a * v).unwrap_or(0)
     }
 
     fn point_index(&self, of: &[usize]) -> Option<usize> {
@@ -38,31 +124,49 @@ impl CPUTensor {
         }
         let mut idx = 0;
         let mut mult = 1;
-        for (i, p) in of.iter().enumerate().rev() {
+        for (i, p) in of.iter().enumerate() {
             idx += mult * p;
             mult *= self.shape[i];
         }
         Some(idx)
     }
 
-    fn element_op(mut self, other: &Self, op: impl Fn(&mut f64, &f64)  -> ()) -> Option<Self> {
-        if self.shape == other.shape {
-            self.data.iter_mut().zip(other.data.iter()).for_each(|(rhs, lhs)| op(rhs, lhs))
-        } else {
-            match other.shape.len() {
-                // dont know generalized broadcasting yet, these are the only cases i need right now
-                0 => self.data.iter_mut().for_each(|rhs| op(rhs, other.get(&[]).unwrap())),
-                1 if self.shape.len() == 2 && self.shape[0] == other.shape[0] => {
-                    for i in 0..other.shape[0] {
-                        for j in 0..self.shape[1] {
-                            op(self.get_mut(&[i, j]).unwrap(), other.get(&[i]).unwrap())
-                        }
-                    }
-                },
-                _ => return None
+    fn arithmetic(self, other: &Self, op: impl Fn(&f64, &f64)  -> f64) -> Option<Self> {
+        let mut new_shape = Vec::new();
+        for i in 0..self.shape.len().max(other.shape.len()) {
+            let lhs = self.shape.get(i).cloned().unwrap_or(1);
+            let rhs = other.shape.get(i).cloned().unwrap_or(1);
+            if lhs == rhs {
+                new_shape.push(lhs);
+            } else if lhs == 1 {
+                new_shape.push(rhs);
+            } else if rhs == 1 {
+                new_shape.push(lhs);
+            } else {
+                return None;
             }
         }
-        Some(self)
+
+        let mut new = Self {
+            data: vec![0.0; Self::len(new_shape.as_slice())],
+            shape: new_shape,
+        };
+        let mut new_point = vec![0; new.shape.len()];
+        'iterate: loop {
+            let lhs_point: Vec<usize> = new_point.iter().enumerate().filter(|(i, _)| *i < self.shape.len()).map(|(i, x)| x % self.shape[i]).collect();
+            let rhs_point: Vec<usize> = new_point.iter().enumerate().filter(|(i, _)| *i < other.shape.len()).map(|(i, x)| x % other.shape[i]).collect();
+            *new.get_mut(&new_point).unwrap() = 
+                op(self.get(&lhs_point).unwrap(), other.get(&rhs_point).unwrap());
+            for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
+                let o = *p;
+                *p = (*p + 1) % s;
+                if *p > o {
+                    continue 'iterate;
+                }
+            }
+            break;
+        }
+        Some(new)
     }
 }
 
@@ -76,16 +180,25 @@ impl Tensor for CPUTensor {
         if data.is_empty() {
             return None;
         }
+        if data.len() == 1 {
+            return Some(Self::scalar(data[0]))
+        }
         Some(Self { shape: vec![data.len()], data })
     }
 
-    fn tensor(f: impl FnMut() -> f64, shape: &[usize]) -> Option<Self> {
-        if shape.is_empty() {
+    fn tensor(i: impl TensorInit) -> Option<Self> {
+        let (shape, data) = i.make()?;
+        if shape.iter().any(|i| *i == 0) {
             return None;
         }
-        let mut data = Vec::new();
-        data.resize_with(Self::len(shape), f);
-        Some(Self { data, shape: shape.to_vec() })
+        if shape.len() < 1 {
+            return Self::vector(data);
+        }
+        Some(Self { data, shape })
+    }
+
+    fn ndim(&self) -> usize {
+        self.shape.len()
     }
     
     fn shape(&self) -> &[usize] {
@@ -96,68 +209,68 @@ impl Tensor for CPUTensor {
         self.point_index(point).and_then(|i| self.data.get(i))
     }
 
+    fn iter(&self) -> impl Iterator<Item=&f64> {
+        self.data.iter()
+    }
+
     fn add(self, other: &Self) -> Option<Self>{
-        self.element_op(other, |rhs, lhs| *rhs += lhs)
+        self.arithmetic(other, |rhs, lhs| *rhs + *lhs)
     }
 
     fn sub(self, other: &Self) -> Option<Self> {
-        self.element_op(other, |rhs, lhs| *rhs -= lhs)
+        self.arithmetic(other, |rhs, lhs| *rhs - *lhs)
     }
 
     fn mul(self, other: &Self) -> Option<Self> {
-        self.element_op(other, |rhs, lhs| *rhs *= lhs)
+        self.arithmetic(other, |rhs, lhs| *rhs * *lhs)
     }
 
-    fn dot(self, other: &Self, axes: (&[usize], &[usize])) -> Option<Self> {
-        if axes.0.is_empty() || axes.0.iter().any(|i| *i > self.shape.len()) {
+    fn dot(self, other: &Self, depth: usize) -> Option<Self> {
+        if depth > self.shape.len() || depth > other.shape.len() {
             return None;
         }
-        if axes.1.is_empty() || axes.1.iter().any(|i| *i > self.shape.len()) {
+        let lhs_contraction = &self.shape[self.shape.len() - depth..];
+        let rhs_contraction = &other.shape[..depth];
+        if lhs_contraction != rhs_contraction {
             return None;
         }
-        if axes.0.len() != axes.1.len() {
-            return None;
-        }
-        if axes.0.iter().zip(axes.1.iter()).any(|(l, r)| self.shape[*l] != other.shape[*r]) {
-            return None;
-        }
-        let new_shape: Vec<usize> = 
-            self.shape.iter().enumerate().filter(|(i, _)| !axes.0.contains(i)).map(|(_, a)| a)
-                .chain(other.shape.iter().enumerate().filter(|(i, _)| !axes.1.contains(i)).map(|(_, a)| a))
-                .cloned()
-                .collect();
+        let contraction_shape = lhs_contraction.to_vec();
+        let lhs_survivors = &self.shape[..self.shape.len() - depth];
+        let rhs_survivors = &other.shape[depth..];
+        let mut new_shape: Vec<usize> = lhs_survivors.to_vec();
+        new_shape.extend_from_slice(rhs_survivors);
 
         let mut new = Self {
             data: vec![0.0; Self::len(new_shape.as_slice())],
             shape: new_shape,
         };
 
-        let mut point = vec![0; new.shape.len()];
+        let mut new_point = vec![0; new.shape.len()];
         'iterate: loop {
-            fn recursive(point: Vec<usize>, sum_vars: Vec<usize>, axes: (&[usize], &[usize]), new: &mut CPUTensor, lhs: &CPUTensor, rhs: &CPUTensor) {
-                if sum_vars.len() == axes.0.len() {
-                    let mut lhs_point: Vec<usize> = point.clone();
-                    let zipped_lhs_point: Vec<usize> = (0..lhs.shape.len())
-                        .map(|i| axes.0.iter().position(|j| i == *j)
-                        .map(|k| sum_vars[k]).unwrap_or_else(|| lhs_point.remove(0))
-                    ).collect();
-                    let mut rhs_point = point.clone();
-                    let zipped_rhs_point: Vec<usize> = (0..lhs.shape.len())
-                        .map(|i| axes.1.iter().position(|j| i == *j)
-                        .map(|k| sum_vars[k]).unwrap_or_else(|| rhs_point.remove(0))).collect();
-                    *new.get_mut(point.as_slice()).unwrap() += *lhs.get(&zipped_lhs_point).unwrap() * *rhs.get(&zipped_rhs_point).unwrap()
-                } else {
-                    for i in 0..lhs.shape[axes.0.len()] {
-                        let mut next = sum_vars.clone();
-                        next.push(i);
-                        recursive(point.clone(), next, axes, new, lhs, rhs);
+            let mut contraction_point = vec![0; lhs_contraction.len()];
+            let mut sum = 0.0;
+            'summate: loop {
+                let mut lhs_point = new_point[..lhs_survivors.len()].to_vec();
+                lhs_point.extend_from_slice(&contraction_point);
+                let mut rhs_point = contraction_point.clone();
+                rhs_point.extend_from_slice(&new_point[lhs_survivors.len()..]);
+                sum += *self.get(&lhs_point).unwrap() * *other.get(&rhs_point).unwrap();
+
+                for (p, s) in contraction_point.iter_mut().zip(contraction_shape.iter()) {
+                    let o = *p;
+                    *p = (*p + 1) % s;
+                    if *p > o {
+                        continue 'summate;
                     }
                 }
+
+                break;
             }
 
-            recursive(point.clone(), Vec::new(), axes, &mut new, &self, other);
+            *new.get_mut(&new_point).unwrap() = sum;
             
-            for (p, s) in point.iter_mut().zip(new.shape.iter()).rev() {
+            
+            for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
                 let o = *p;
                 *p = (*p + 1) % s;
                 if *p > o {
@@ -171,8 +284,8 @@ impl Tensor for CPUTensor {
         Some(new)
     }
 
-    fn norm(self, i: u8) -> Self {
-        Self::scalar(self.data.iter().map(|x| x.abs().powi(i.into())).sum::<f64>())
+    fn sum(self) -> Self {
+        Self::scalar(self.data.iter().sum::<f64>())
     }
 
     fn ln(mut self) -> Self {
@@ -185,8 +298,8 @@ impl Tensor for CPUTensor {
         self
     }
 
-    fn inv(mut self) -> Self {
-        self.data.iter_mut().for_each(|x| *x = 1.0 / *x);
+    fn pow(mut self, i: i32) -> Self {
+        self.data.iter_mut().for_each(|x| *x = x.powi(i));
         self
     }
 
@@ -220,7 +333,7 @@ impl SharpTensor for CPUTensor {
             *new.get_mut(&new_point).unwrap() = 
                 *self.get(&point.as_slice()).unwrap();
 
-            for (p, s) in point.iter_mut().zip(self.shape.iter()).rev() {
+            for (p, s) in point.iter_mut().zip(self.shape.iter()) {
                 let o = *p;
                 *p = (*p + 1) % s;
                 if *p > o {
@@ -237,46 +350,60 @@ impl SharpTensor for CPUTensor {
     fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64> {
         self.point_index(point).and_then(|i| self.data.get_mut(i))
     }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item=&mut f64> {
+        self.data.iter_mut()
+    }
+
+    fn argmax(&self) -> usize {
+        let mut maxi = 0;
+        for (i, v) in self.data.iter().enumerate() {
+            if *v > self.data[maxi] {
+                maxi = i;
+            }
+        }
+        return maxi;
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use rand::{rngs::SmallRng, RngCore, SeedableRng};
-
-    use crate::tensor::{CPUTensor, Tensor, SharpTensor};
-
-    #[test]
-    fn get() {
-        let mut rng = SmallRng::from_seed([0; 32]);
-        let tensor = CPUTensor::tensor(|| { rng.next_u32() } as f64, &[3, 3]).unwrap();
-        assert_eq!(tensor.get(&[1, 2]).cloned(), Some(88327031.0));
+impl TensorIO for CPUTensor {
+    fn read(read: &mut impl Read) -> io::Result<Self> {
+        let mut signature = [0u8; 8];
+        read.read(&mut signature)?;
+        if &signature != b"Tensor\0\0" {
+            return Err(io::Error::new(io::ErrorKind::Other, "invalid tesnor signature"));
+        }
+        let mut ndimb = [0u8; 8];
+        read.read(&mut ndimb)?;
+        let ndim = usize::from_le_bytes(ndimb);
+        let mut shape = vec![0; ndim];
+        for s in &mut shape {
+            let mut dim = [0u8; 8];
+            read.read(&mut dim)?;
+            *s = usize::from_le_bytes(ndimb);
+        }
+        let size = Self::len(shape.as_slice()) * 8;
+        let mut data = vec![0.0; size];
+        for d in &mut data {
+            let mut x = [0u8; 8];
+            read.read(&mut x)?;
+            *d = f64::from_le_bytes(x);
+        }
+        Ok(Self {
+            shape,
+            data
+        })
     }
 
-    #[test]
-    fn set() {
-        let mut rng = SmallRng::from_seed([0; 32]);
-        let mut tensor = CPUTensor::tensor(|| { rng.next_u32() } as f64, &[3, 3]).unwrap();
-        *tensor.get_mut(&[1, 2]).unwrap() = 3.0;
-        assert_eq!(tensor.get(&[1, 2]).cloned(), Some(3.0));
-    }
-
-
-    #[test]
-    fn transpose() {
-        let mut rng = SmallRng::from_seed([0; 32]);
-        let mut tensor = CPUTensor::tensor(|| { rng.next_u32() } as f64, &[3, 3, 3]).unwrap();
-        assert_eq!(tensor.get(&[2, 1, 0]).cloned(), Some(560731428.0));
-        tensor = tensor.tranpose(&[1, 0, 2]).unwrap();
-        assert_eq!(tensor.get(&[1, 2, 0]).cloned(), Some(560731428.0));
-    }
-
-    #[test]
-    fn dot() {
-        let mut rng = SmallRng::from_seed([0; 32]);
-        let mut a = CPUTensor::tensor(|| 0.5, &[3, 3]).unwrap();
-        let mut b = CPUTensor::tensor(|| 0.5, &[3, 3]).unwrap();
-        let res = a.dot(&b, (&[1], &[1])).unwrap();
-        dbg!(res.get(&[1, 1]));
-        assert!(false)
+    fn write(&self, write: &mut impl Write) -> io::Result<()> {
+        write.write_all(b"Tensor\0\0")?;
+        write.write_all(&self.shape.len().to_le_bytes())?;
+        for s in &self.shape {
+            write.write_all(&s.to_be_bytes())?;
+        }
+        for x in &self.data {
+            write.write_all(&x.to_be_bytes())?;
+        }
+        Ok(())
     }
 }

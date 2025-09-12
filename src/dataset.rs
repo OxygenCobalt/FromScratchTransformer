@@ -1,6 +1,8 @@
 use rand::seq::SliceRandom;
 
-use super::matrix::Matrix;
+use crate::tensor::{CPUTensor, Th};
+
+use super::tensor::Tensor;
 
 
 #[derive(Clone)]
@@ -14,12 +16,12 @@ impl Train {
         let mut examples = self.examples.clone();
         examples.shuffle(&mut rand::rng());
         self.examples.chunks(size).map(|examples| {                    
-            let input = Matrix::columns(
-                examples.iter().map(|e| &e.input).collect::<Vec<_>>().as_slice()
-            );          
-            let output = Matrix::columns(
-                examples.iter().map(|e| &e.output).collect::<Vec<_>>().as_slice()
-            );
+            let input = CPUTensor::tensor(
+                Th::C(examples.iter().map(|e| Th::R(e.input.iter().cloned().collect())).collect::<Vec<Th>>())
+            ).unwrap();
+            let output = CPUTensor::tensor(
+                Th::C(examples.iter().map(|e| Th::R(e.output.iter().cloned().collect())).collect::<Vec<Th>>())
+            ).unwrap();
             Example { input, output }
         }).collect()
     }
@@ -27,8 +29,8 @@ impl Train {
 
 #[derive(Clone)]
 pub struct Example {
-    pub input: Matrix,
-    pub output: Matrix,
+    pub input: CPUTensor,
+    pub output: CPUTensor,
 }
 
 pub struct Test {
