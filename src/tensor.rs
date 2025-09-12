@@ -291,7 +291,7 @@ impl Tensor for CPUTensor {
             rhs_point
                 .iter_mut()
                 .rev()
-                .take(lhs_survivors.len())
+                .take(new_point.len() - lhs_survivors.len())
                 .zip(new_point.iter().rev())
                 .for_each(|(x, y)| *x = *y);
             let mut sum = 0.0;
