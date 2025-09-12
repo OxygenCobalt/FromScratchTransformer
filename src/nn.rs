@@ -1,16 +1,21 @@
-use std::{fs::File, io::{self, Read, Write}};
-use std::sync::LazyLock;
 use rand_distr::{Distribution, Normal};
+use std::sync::LazyLock;
+use std::{
+    fs::File,
+    io::{self, Read, Write},
+};
 
 use crate::tensor::{CPUTensor, Generate, SharpTensor, Tensor, TensorIO};
 
 use super::{
-    loss::Loss, activation::Activation,
-    autograd::{Autograd}, dataset::{Example, Test, Train}
+    activation::Activation,
+    autograd::Autograd,
+    dataset::{Example, Test, Train},
+    loss::Loss,
 };
 
 pub struct NeuralNetwork {
-    axons: Vec<Axon<CPUTensor>>
+    axons: Vec<Axon<CPUTensor>>,
 }
 
 impl NeuralNetwork {
@@ -23,9 +28,7 @@ impl NeuralNetwork {
             axons.push(layers[i].axon(&layers[i + 1]));
         }
 
-        Self {
-            axons
-        }
+        Self { axons }
     }
 
     pub fn train(
@@ -36,7 +39,7 @@ impl NeuralNetwork {
         learning_rate: f64,
         loss: &impl Loss,
         reporting: Option<impl Reporting>,
-        checkpoint_to: Option<&str>
+        checkpoint_to: Option<&str>,
     ) -> io::Result<()> {
         if let Some(ref rep) = reporting {
             rep.report(None, self.test(rep.data(), rep, loss));
@@ -48,7 +51,8 @@ impl NeuralNetwork {
         }
         for epoch in 0..epochs {
             for (i, batch) in train.batch(batch_size).into_iter().enumerate() {
-                let auto_axons: Vec<Axon<Autograd<CPUTensor>>> = self.axons.iter_mut().map(|a| a.train()).collect();
+                let auto_axons: Vec<Axon<Autograd<CPUTensor>>> =
+                    self.axons.iter_mut().map(|a| a.train()).collect();
                 let mut current = Autograd::new(batch.input);
                 for axon in &auto_axons {
                     current = axon.forward(&current)
@@ -57,7 +61,7 @@ impl NeuralNetwork {
                 // this drops the entire computation graph allowing us to move the weight/bias
                 // gradients out w/o a clone
                 std::mem::drop(current);
-                
+
                 let c = learning_rate / batch_size as f64;
                 for (axon, auto_axon) in self.axons.iter_mut().zip(auto_axons.into_iter()) {
                     axon.commit(auto_axon, c);
@@ -75,7 +79,12 @@ impl NeuralNetwork {
         Ok(())
     }
 
-    pub fn test(&self, test: &Test, success_criteria: &impl SuccessCriteria, loss: &impl Loss) -> TestResult {
+    pub fn test(
+        &self,
+        test: &Test,
+        success_criteria: &impl SuccessCriteria,
+        loss: &impl Loss,
+    ) -> TestResult {
         let mut sum = 0.0;
         let mut successes = 0;
         for example in &test.examples {
@@ -88,8 +97,8 @@ impl NeuralNetwork {
         let loss = sum / test.examples.len() as f64;
         return TestResult {
             avg_loss: loss,
-            successes
-        }
+            successes,
+        };
     }
 
     pub fn evaluate(&self, input: &CPUTensor) -> CPUTensor {
@@ -113,7 +122,10 @@ impl NeuralNetwork {
         let mut signature = [0u8; 8];
         read.read(&mut signature)?;
         if &signature != b"NeuralNt" {
-            return Err(io::Error::new(io::ErrorKind::Other, "invalid neuralnet signature"));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "invalid neuralnet signature",
+            ));
         }
         let mut nb = [0u8; 8];
         read.read(&mut nb)?;
@@ -140,22 +152,37 @@ pub trait Reporting: SuccessCriteria {
     fn report(&self, epoch: Option<u64>, result: TestResult);
 }
 
-pub static NORMAL: LazyLock<Normal<f64>> = std::sync::LazyLock::new(|| Normal::new(0.0, 1.0).unwrap());
+pub static NORMAL: LazyLock<Normal<f64>> =
+    std::sync::LazyLock::new(|| Normal::new(0.0, 1.0).unwrap());
 
 pub enum Layer {
-    Dense { neurons: usize, activation: Activation },
-    Dropout { neurons: usize, rate: f64, activation: Activation }
+    Dense {
+        neurons: usize,
+        activation: Activation,
+    },
+    Dropout {
+        neurons: usize,
+        rate: f64,
+        activation: Activation,
+    },
 }
 
 impl Layer {
     fn axon<T: Tensor>(&self, last: &Layer) -> Axon<T> {
         match self {
-            Self::Dense { neurons, activation } => Axon::Dense { 
-                ff: FeedForward::new(last.activation_shape()[0], *neurons, *activation) 
+            Self::Dense {
+                neurons,
+                activation,
+            } => Axon::Dense {
+                ff: FeedForward::new(last.activation_shape()[0], *neurons, *activation),
             },
-            Self::Dropout { neurons, rate, activation } => Axon::Dropout { 
-                ff: FeedForward::new(last.activation_shape()[0], *neurons, *activation), 
-                rate: *rate 
+            Self::Dropout {
+                neurons,
+                rate,
+                activation,
+            } => Axon::Dropout {
+                ff: FeedForward::new(last.activation_shape()[0], *neurons, *activation),
+                rate: *rate,
             },
         }
     }
@@ -163,7 +190,7 @@ impl Layer {
     fn activation_shape(&self) -> Vec<usize> {
         match self {
             Self::Dense { neurons, .. } => vec![*neurons],
-            Self::Dropout { neurons, .. } => vec![*neurons]
+            Self::Dropout { neurons, .. } => vec![*neurons],
         }
     }
 }
@@ -171,31 +198,47 @@ impl Layer {
 struct FeedForward<T: Tensor> {
     weights: T,
     biases: T,
-    activation: Activation
+    activation: Activation,
 }
 
-impl <T: Tensor> FeedForward<T> {
+impl<T: Tensor> FeedForward<T> {
     fn new(last: usize, next: usize, activation: Activation) -> Self {
         Self {
-                weights: T::tensor(Generate { shape: vec![last, next], with: || NORMAL.sample(&mut rand::rng())}).unwrap(),
-                biases: T::tensor(Generate { shape: vec![last], with: || NORMAL.sample(&mut rand::rng())}).unwrap(),
-                activation
+            weights: T::tensor(Generate {
+                shape: vec![last, next],
+                with: || NORMAL.sample(&mut rand::rng()),
+            })
+            .unwrap(),
+            biases: T::tensor(Generate {
+                shape: vec![last],
+                with: || NORMAL.sample(&mut rand::rng()),
+            })
+            .unwrap(),
+            activation,
         }
     }
 
     fn forward(&self, activations: &T) -> T {
-        self.activation.activate(self.weights.clone()
-            .dot(&activations, 1).unwrap()
-            .add(&self.biases).unwrap())
+        self.activation.activate(
+            self.weights
+                .clone()
+                .dot(&activations, 1)
+                .unwrap()
+                .add(&self.biases)
+                .unwrap(),
+        )
     }
 }
 
-impl <T: TensorIO> FeedForward<T> {
+impl<T: TensorIO> FeedForward<T> {
     fn read(read: &mut impl Read) -> io::Result<Self> {
         let mut signature = [0u8; 8];
         read.read(&mut signature)?;
         if &signature != b"FeedFrwd" {
-            return Err(io::Error::new(io::ErrorKind::Other, "invalid feedforward signature"))
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "invalid feedforward signature",
+            ));
         }
         let mut activation_id = [0u8; 8];
         read.read(&mut activation_id)?;
@@ -206,7 +249,7 @@ impl <T: TensorIO> FeedForward<T> {
         Ok(Self {
             activation,
             weights,
-            biases
+            biases,
         })
     }
 
@@ -218,45 +261,47 @@ impl <T: TensorIO> FeedForward<T> {
     }
 }
 
-enum Axon<T: Tensor>  {
+enum Axon<T: Tensor> {
     Dense { ff: FeedForward<T> },
-    Dropout { ff: FeedForward<T>, rate: f64 }
+    Dropout { ff: FeedForward<T>, rate: f64 },
 }
 
-impl <T: Tensor> Axon<T> {
+impl<T: Tensor> Axon<T> {
     pub fn forward(&self, activations: &T) -> T {
         match self {
             Self::Dense { ff } => ff.forward(activations),
-            Self::Dropout { ff, .. } => ff.forward(activations)
+            Self::Dropout { ff, .. } => ff.forward(activations),
         }
     }
 }
 
-impl <T: SharpTensor> Axon<T> {
+impl<T: SharpTensor> Axon<T> {
     fn train<'a>(&'a mut self) -> Axon<Autograd<T>> {
         match self {
-            Self::Dense { ff } => {
-                Axon::Dense { ff: FeedForward { 
+            Self::Dense { ff } => Axon::Dense {
+                ff: FeedForward {
                     weights: Autograd::new(ff.weights.clone()),
                     biases: Autograd::new(ff.biases.clone()),
-                    activation: ff.activation
-                }}
+                    activation: ff.activation,
+                },
             },
-            Self::Dropout { ff, rate } =>  {
+            Self::Dropout { ff, rate } => {
                 let mut dropped_weights = ff.weights.clone();
                 for row in 0..dropped_weights.shape()[1] {
                     if rand::random_range(0.0..1.0) > *rate {
-                        continue
+                        continue;
                     }
                     for col in 0..dropped_weights.shape()[0] {
                         *dropped_weights.get_mut(&[col, row]).unwrap() = 0.0;
                     }
                 }
-                Axon::Dense { ff: FeedForward { 
-                    weights: Autograd::new(dropped_weights),
-                    biases: Autograd::new(ff.biases.clone()),
-                    activation: ff.activation
-                }}
+                Axon::Dense {
+                    ff: FeedForward {
+                        weights: Autograd::new(dropped_weights),
+                        biases: Autograd::new(ff.biases.clone()),
+                        activation: ff.activation,
+                    },
+                }
             }
         }
     }
@@ -264,34 +309,56 @@ impl <T: SharpTensor> Axon<T> {
     pub fn commit(&mut self, axon: Axon<Autograd<T>>, c: f64) -> Option<()> {
         let scale = T::scalar(c);
         match (self, axon) {
-            (Self::Dense { ff  }, Axon::<Autograd<T>>::Dense { ff: autoff }) => {
-                ff.weights = ff.weights.clone().sub(&autoff.weights.into_grad().unwrap().mul(&scale).unwrap()).unwrap();
-                ff.biases = ff.biases.clone().sub(&autoff.biases.into_grad().unwrap().mul(&scale).unwrap()).unwrap();
-            },
-            (Self::Dropout { ff, ..  }, Axon::<Autograd<T>>::Dropout { ff: autoff, .. }) => {
-                ff.weights = ff.weights.clone().sub(&autoff.weights.into_grad().unwrap().mul(&scale).unwrap()).unwrap();
-                ff.biases = ff.biases.clone().sub(&autoff.biases.into_grad().unwrap().mul(&scale).unwrap()).unwrap();
-            },
-            _ => return None
+            (Self::Dense { ff }, Axon::<Autograd<T>>::Dense { ff: autoff }) => {
+                ff.weights = ff
+                    .weights
+                    .clone()
+                    .sub(&autoff.weights.into_grad().unwrap().mul(&scale).unwrap())
+                    .unwrap();
+                ff.biases = ff
+                    .biases
+                    .clone()
+                    .sub(&autoff.biases.into_grad().unwrap().mul(&scale).unwrap())
+                    .unwrap();
+            }
+            (Self::Dropout { ff, .. }, Axon::<Autograd<T>>::Dropout { ff: autoff, .. }) => {
+                ff.weights = ff
+                    .weights
+                    .clone()
+                    .sub(&autoff.weights.into_grad().unwrap().mul(&scale).unwrap())
+                    .unwrap();
+                ff.biases = ff
+                    .biases
+                    .clone()
+                    .sub(&autoff.biases.into_grad().unwrap().mul(&scale).unwrap())
+                    .unwrap();
+            }
+            _ => return None,
         }
         Some(())
     }
 }
 
-impl <T: TensorIO> Axon<T> {
+impl<T: TensorIO> Axon<T> {
     fn read(read: &mut impl Read) -> io::Result<Self> {
         let mut id = [0u8; 8];
         read.read(&mut id)?;
         match &id {
-            b"AxonDnse" => {
-                Ok(Self::Dense { ff: FeedForward::read(read)? })
-            }
+            b"AxonDnse" => Ok(Self::Dense {
+                ff: FeedForward::read(read)?,
+            }),
             b"AxonDrop" => {
                 let mut rateb = [0u8; 8];
                 read.read(&mut rateb)?;
-                Ok(Self::Dropout { ff: FeedForward::read(read)?, rate: f64::from_le_bytes(rateb) })
+                Ok(Self::Dropout {
+                    ff: FeedForward::read(read)?,
+                    rate: f64::from_le_bytes(rateb),
+                })
             }
-            _ => Err(io::Error::new(io::ErrorKind::Other, "invalid axon signature"))
+            _ => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "invalid axon signature",
+            )),
         }
     }
 
@@ -300,7 +367,7 @@ impl <T: TensorIO> Axon<T> {
             Self::Dense { ff } => {
                 write.write_all(b"AxonDnse")?;
                 ff.write(write)
-            },
+            }
             Self::Dropout { ff, rate } => {
                 write.write_all(b"AxonDrop")?;
                 write.write_all(&rate.to_le_bytes())?;

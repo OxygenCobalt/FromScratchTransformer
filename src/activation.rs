@@ -4,7 +4,7 @@ use crate::tensor::Tensor;
 pub enum Activation {
     Sigmoid,
     ReLU,
-    SiLU
+    SiLU,
 }
 
 impl Activation {
@@ -12,7 +12,7 @@ impl Activation {
         match self {
             Self::Sigmoid => b"ActvSigm",
             Self::ReLU => b"ActvReLU",
-            Self::SiLU => b"ActvSiLU"
+            Self::SiLU => b"ActvSiLU",
         }
     }
 
@@ -21,7 +21,7 @@ impl Activation {
             b"ActvSigm" => Some(Self::Sigmoid),
             b"ActvReLU" => Some(Self::ReLU),
             b"ActvSiLU" => Some(Self::SiLU),
-            _ => None
+            _ => None,
         }
     }
 
@@ -29,7 +29,7 @@ impl Activation {
         match self {
             Self::Sigmoid => T::scalar(1.0).add(&y.neg().exp()).unwrap().pow(-1),
             Self::ReLU => y.max(0.0),
-            Self::SiLU => y.clone().mul(&Self::Sigmoid.activate(y)).unwrap()
+            Self::SiLU => y.clone().mul(&Self::Sigmoid.activate(y)).unwrap(),
         }
     }
 }

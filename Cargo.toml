@@ -13,7 +13,6 @@ rand_distr = "0.5.1"
 tikv-jemallocator = "0.6.0"
 
 [profile.release]
-strip = 'symbols'
 panic = 'abort'
 codegen-units = 1
 lto = 'fat'

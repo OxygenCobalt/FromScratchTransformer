@@ -3,14 +3,20 @@ use std::fs::File;
 use arrow::array::{Array, BinaryArray, Int64Array, StructArray};
 use parquet::arrow::arrow_reader::ArrowReaderBuilder;
 
-use crate::{activation::Activation, dataset::{Dataset, Example, IOShape, Test, Train}, loss::MSE, nn::{Layer, NeuralNetwork, Reporting, SuccessCriteria, TestResult}, tensor::{CPUTensor, SharpTensor, Tensor}};
+use crate::{
+    activation::Activation,
+    dataset::{Dataset, Example, IOShape, Test, Train},
+    loss::MSE,
+    nn::{Layer, NeuralNetwork, Reporting, SuccessCriteria, TestResult},
+    tensor::{CPUTensor, SharpTensor, Tensor},
+};
 
-mod tensor;
+mod activation;
 mod autograd;
-mod nn;
 mod dataset;
 mod loss;
-mod activation;
+mod nn;
+mod tensor;
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -18,42 +24,65 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 fn main() {
     println!("loading data...");
     let mut mnist = mnist().unwrap();
-    println!("loading done: {} train examples, {} test examples.", mnist.train.examples.len(), mnist.test.examples.len());
+    println!(
+        "loading done: {} train examples, {} test examples.",
+        mnist.train.examples.len(),
+        mnist.test.examples.len()
+    );
     println!("begin training...");
     let mut nn = NeuralNetwork::new(&[
-        Layer::Dense { neurons: mnist.io_shape.in_size, activation: Activation::Sigmoid },
-        Layer::Dense { neurons: 30, activation: Activation::Sigmoid },
-        Layer::Dense { neurons: mnist.io_shape.out_size, activation: Activation::Sigmoid },
+        Layer::Dense {
+            neurons: mnist.io_shape.in_size,
+            activation: Activation::Sigmoid,
+        },
+        Layer::Dense {
+            neurons: 30,
+            activation: Activation::Sigmoid,
+        },
+        Layer::Dense {
+            neurons: mnist.io_shape.out_size,
+            activation: Activation::Sigmoid,
+        },
     ]);
     nn.train(
-        &mut mnist.train,  
-        1, 10, 3.0, 
-        &MSE, 
-        Some(MnistReporting { test: &mnist.test }), 
-        None
-    ).unwrap();
-    println!("saving result to file...");
-    let mut output = File::create("mnist.nn").unwrap();
-    nn.write(&mut output).unwrap();
+        &mut mnist.train,
+        30,
+        10,
+        3.0,
+        &MSE,
+        None::<MnistReporting>,
+        None,
+    )
+    .unwrap();
 }
 
 struct MnistReporting<'a> {
-    test: &'a Test
+    test: &'a Test,
 }
 
-impl <'a> Reporting for MnistReporting<'a> {
+impl<'a> Reporting for MnistReporting<'a> {
     fn data(&self) -> &Test {
         &self.test
     }
 
     fn report(&self, epoch: Option<u64>, result: TestResult) {
-        let percent_successful = (result.successes as f64 / self.test.examples.len() as f64) * 100.0;
-        let phase = epoch.map(|e| format!["epoch {}", e + 1]).unwrap_or("init".to_owned()) ;
-        println!("{}: loss = {}, {} / {} ({}%) successful", phase, result.avg_loss, result.successes, self.test.examples.len(), percent_successful)
+        let percent_successful =
+            (result.successes as f64 / self.test.examples.len() as f64) * 100.0;
+        let phase = epoch
+            .map(|e| format!["epoch {}", e + 1])
+            .unwrap_or("init".to_owned());
+        println!(
+            "{}: loss = {}, {} / {} ({}%) successful",
+            phase,
+            result.avg_loss,
+            result.successes,
+            self.test.examples.len(),
+            percent_successful
+        )
     }
 }
 
-impl <'a> SuccessCriteria for MnistReporting<'a> {
+impl<'a> SuccessCriteria for MnistReporting<'a> {
     fn is_success(&self, example: &Example, output: &impl SharpTensor) -> bool {
         example.output.argmax() == output.argmax()
     }
@@ -63,12 +92,18 @@ pub fn mnist() -> Result<Dataset, parquet::errors::ParquetError> {
     let train = load_mnist("./mnist/mnist/train-00000-of-00001.parquet")?;
     let test = load_mnist("./mnist/mnist/test-00000-of-00001.parquet")?;
     let io_shape = IOShape {
-            in_size: 784,
-            out_size: 10,
-        };
+        in_size: 784,
+        out_size: 10,
+    };
     let dataset = Dataset {
-        train: Train { examples: train, io_shape },
-        test: Test { examples: test, io_shape },
+        train: Train {
+            examples: train,
+            io_shape,
+        },
+        test: Test {
+            examples: test,
+            io_shape,
+        },
         io_shape: IOShape {
             in_size: 784,
             out_size: 10,
@@ -82,7 +117,7 @@ fn load_mnist(path: &str) -> Result<Vec<Example>, parquet::errors::ParquetError>
     let parquet = ArrowReaderBuilder::try_new(train)?.build()?;
     let mut images: Vec<CPUTensor> = Vec::new();
     let mut labels: Vec<CPUTensor> = Vec::new();
-    for item in parquet.take(2) {
+    for item in parquet {
         let record_batch = item.unwrap();
         let image_column = record_batch
             .column_by_name("image")
