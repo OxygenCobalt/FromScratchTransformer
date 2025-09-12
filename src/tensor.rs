@@ -247,19 +247,20 @@ impl Tensor for CPUTensor {
 
         let mut new_point = vec![0; new.shape.len()];
         'iterate: loop {
-            let mut contraction_point = vec![0; lhs_contraction.len()];
+            let mut lhs_point = new_point[..lhs_survivors.len()].to_vec();
+            lhs_point.resize(lhs_point.len() + lhs_contraction.len(), 0);
+            let mut rhs_point = vec![0; lhs_contraction.len()];
+            rhs_point.extend_from_slice(&new_point[lhs_survivors.len()..]);
             let mut sum = 0.0;
             'summate: loop {
-                let mut lhs_point = new_point[..lhs_survivors.len()].to_vec();
-                lhs_point.extend_from_slice(&contraction_point);
-                let mut rhs_point = contraction_point.clone();
-                rhs_point.extend_from_slice(&new_point[lhs_survivors.len()..]);
                 sum += *self.get(&lhs_point).unwrap() * *other.get(&rhs_point).unwrap();
 
-                for (p, s) in contraction_point.iter_mut().zip(contraction_shape.iter()) {
-                    let o = *p;
-                    *p = (*p + 1) % s;
-                    if *p > o {
+                for ((p_rhs, p_lhs), s) in lhs_point.iter_mut().rev().take(lhs_contraction.len()).zip(rhs_point.iter_mut().take(lhs_contraction.len())).zip(contraction_shape.iter()) {
+                    let o_rhs = *p_rhs;
+                    *p_rhs = (*p_rhs + 1) % s;
+                    *p_lhs = (*p_lhs + 1) % s;
+                    if *p_rhs > o_rhs {
+                        // both points should be synchronized so we can just check for the change in one
                         continue 'summate;
                     }
                 }
