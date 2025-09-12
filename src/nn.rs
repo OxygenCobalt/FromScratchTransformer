@@ -243,8 +243,17 @@ impl <T: SharpTensor> Axon<T> {
                 }}
             },
             Self::Dropout { ff, rate } =>  {
+                let mut dropped_weights = ff.weights.clone();
+                for row in 0..dropped_weights.shape()[1] {
+                    if rand::random_range(0.0..1.0) > *rate {
+                        continue
+                    }
+                    for col in 0..dropped_weights.shape()[0] {
+                        *dropped_weights.get_mut(&[col, row]).unwrap() = 0.0;
+                    }
+                }
                 Axon::Dense { ff: FeedForward { 
-                    weights: Autograd::new(ff.weights.clone()),
+                    weights: Autograd::new(dropped_weights),
                     biases: Autograd::new(ff.biases.clone()),
                     activation: ff.activation
                 }}
