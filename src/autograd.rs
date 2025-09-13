@@ -54,41 +54,41 @@ impl<T: SharpTensor> Tensor for Autograd<T> {
         self.0.tensor.iter()
     }
 
-    fn add(self, other: &Self) -> Option<Self> {
+    fn add(&self, other: &Self) -> Option<Self> {
         Operation::Add {
-            lhs: self.0,
+            lhs: self.0.clone(),
             rhs: other.0.clone(),
         }
         .forward()
     }
 
-    fn sub(self, other: &Self) -> Option<Self> {
+    fn sub(&self, other: &Self) -> Option<Self> {
         Operation::Sub {
-            lhs: self.0,
+            lhs: self.0.clone(),
             rhs: other.0.clone(),
         }
         .forward()
     }
 
-    fn mul(self, other: &Self) -> Option<Self> {
+    fn mul(&self, other: &Self) -> Option<Self> {
         Operation::Mul {
-            lhs: self.0,
+            lhs: self.0.clone(),
             rhs: other.0.clone(),
         }
         .forward()
     }
 
-    fn dot(self, other: &Self, depth: usize) -> Option<Self> {
+    fn dot(&self, other: &Self, depth: usize) -> Option<Self> {
         Operation::Dot {
-            lhs: self.0,
+            lhs: self.0.clone(),
             rhs: other.0.clone(),
             depth,
         }
         .forward()
     }
 
-    fn sum(self) -> Self {
-        Operation::Sum { t: self.0 }.forward().unwrap()
+    fn sum(&self) -> Self {
+        Operation::Sum { t: self.0.clone() }.forward().unwrap()
     }
 
     fn pow(self, i: i32) -> Self {
@@ -232,11 +232,11 @@ impl<T: SharpTensor> Operation<T> {
 
     fn forward(self) -> Option<Autograd<T>> {
         let tensor = match &self {
-            Self::Add { lhs, rhs } => lhs.tensor.clone().add(&rhs.tensor),
-            Self::Sub { lhs, rhs } => lhs.tensor.clone().sub(&rhs.tensor),
-            Self::Mul { lhs, rhs } => lhs.tensor.clone().mul(&rhs.tensor),
-            Self::Dot { lhs, rhs, depth } => lhs.tensor.clone().dot(&rhs.tensor, *depth),
-            Self::Sum { t } => Some(t.tensor.clone().sum()),
+            Self::Add { lhs, rhs } => lhs.tensor.add(&rhs.tensor),
+            Self::Sub { lhs, rhs } => lhs.tensor.sub(&rhs.tensor),
+            Self::Mul { lhs, rhs } => lhs.tensor.mul(&rhs.tensor),
+            Self::Dot { lhs, rhs, depth } => lhs.tensor.dot(&rhs.tensor, *depth),
+            Self::Sum { t } => Some(t.tensor.sum()),
             Self::Ln { t } => Some(t.tensor.clone().ln()),
             Self::Exp { t } => Some(t.tensor.clone().exp()),
             Self::Pow { t, i } => Some(t.tensor.clone().pow(*i)),
@@ -268,8 +268,8 @@ impl<T: SharpTensor> Operation<T> {
                 let mut rhs_axes: Vec<usize> = (0..rhs.tensor.ndim()).collect();
                 rhs_axes.rotate_right(lhs_shift);
                 lhs.backward(
-                    grad.clone()
-                        .dot(&rhs.tensor.clone().tranpose(&rhs_axes).unwrap(), lhs_shift)
+                    grad
+                        .dot(&rhs.tensor.tranpose(&rhs_axes).unwrap(), lhs_shift)
                         .unwrap(),
                 );
 
@@ -278,7 +278,6 @@ impl<T: SharpTensor> Operation<T> {
                 lhs_axes.rotate_left(rhs_shift);
                 rhs.backward(
                     lhs.tensor
-                        .clone()
                         .tranpose(&lhs_axes)
                         .unwrap()
                         .dot(grad, rhs_shift)

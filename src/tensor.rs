@@ -11,14 +11,14 @@ where
     fn shape(&self) -> &[usize];
     fn get(&self, point: &[usize]) -> Option<&f64>;
     fn iter(&self) -> impl Iterator<Item = &f64>;
-    fn add(self, other: &Self) -> Option<Self>;
-    fn sub(self, other: &Self) -> Option<Self>;
-    fn mul(self, other: &Self) -> Option<Self>;
-    fn dot(self, other: &Self, axes: usize) -> Option<Self>;
+    fn add(&self, other: &Self) -> Option<Self>;
+    fn sub(&self, other: &Self) -> Option<Self>;
+    fn mul(&self, other: &Self) -> Option<Self>;
+    fn dot(&self, other: &Self, axes: usize) -> Option<Self>;
     fn ln(self) -> Self;
     fn exp(self) -> Self;
     fn pow(self, i: i32) -> Self;
-    fn sum(self) -> Self;
+    fn sum(&self) -> Self;
     fn neg(self) -> Self;
     fn max(self, y: f64) -> Self;
 }
@@ -32,7 +32,7 @@ pub trait TensorInit {
 /// *are* differentiable, but nothing im working on needs the
 /// gradient of a transpose yet so it's also here.
 pub trait SharpTensor: Tensor {
-    fn tranpose(self, axes: &[usize]) -> Option<Self>;
+    fn tranpose(&self, axes: &[usize]) -> Option<Self>;
     fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64>;
     fn iter_mut(&mut self) -> impl Iterator<Item = &mut f64>;
 }
@@ -137,7 +137,7 @@ impl CPUTensor {
         Some(idx)
     }
 
-    fn arithmetic(self, other: &Self, op: impl Fn(&f64, &f64) -> f64) -> Option<Self> {
+    fn arithmetic(&self, other: &Self, op: impl Fn(&f64, &f64) -> f64) -> Option<Self> {
         let mut new_shape = Vec::new();
         for i in 0..self.shape.len().max(other.shape.len()) {
             let lhs = self.shape.get(i).cloned().unwrap_or(1);
@@ -237,19 +237,19 @@ impl Tensor for CPUTensor {
         self.data.iter()
     }
 
-    fn add(self, other: &Self) -> Option<Self> {
+    fn add(&self, other: &Self) -> Option<Self> {
         self.arithmetic(other, |rhs, lhs| *rhs + *lhs)
     }
 
-    fn sub(self, other: &Self) -> Option<Self> {
+    fn sub(&self, other: &Self) -> Option<Self> {
         self.arithmetic(other, |rhs, lhs| *rhs - *lhs)
     }
 
-    fn mul(self, other: &Self) -> Option<Self> {
+    fn mul(&self, other: &Self) -> Option<Self> {
         self.arithmetic(other, |rhs, lhs| *rhs * *lhs)
     }
 
-    fn dot(self, other: &Self, depth: usize) -> Option<Self> {
+    fn dot(&self, other: &Self, depth: usize) -> Option<Self> {
         if depth > self.shape.len() || depth > other.shape.len() {
             return None;
         }
@@ -332,7 +332,7 @@ impl Tensor for CPUTensor {
         Some(new)
     }
 
-    fn sum(self) -> Self {
+    fn sum(&self) -> Self {
         Self::scalar(self.data.iter().sum::<f64>())
     }
 
@@ -363,7 +363,7 @@ impl Tensor for CPUTensor {
 }
 
 impl SharpTensor for CPUTensor {
-    fn tranpose(self, axes: &[usize]) -> Option<Self> {
+    fn tranpose(&self, axes: &[usize]) -> Option<Self> {
         if self.shape.len() != axes.len() || axes.iter().any(|i| *i > self.shape.len()) {
             return None;
         }

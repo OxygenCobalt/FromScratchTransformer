@@ -298,7 +298,6 @@ impl<T: Tensor> FeedForward<T> {
     fn forward(&self, activations: &T) -> T {
         self.activation.activate(
             self.weights
-                .clone()
                 .dot(&activations, 1)
                 .unwrap()
                 .add(&self.biases)
@@ -389,24 +388,20 @@ impl<T: SharpTensor> Axon<T> {
             (Self::Dense { ff }, Axon::<Autograd<T>>::Dense { ff: autoff }) => {
                 ff.weights = ff
                     .weights
-                    .clone()
                     .sub(&autoff.weights.into_grad().unwrap().mul(&scale).unwrap())
                     .unwrap();
                 ff.biases = ff
                     .biases
-                    .clone()
                     .sub(&autoff.biases.into_grad().unwrap().mul(&scale).unwrap())
                     .unwrap();
             }
             (Self::Dropout { ff, .. }, Axon::<Autograd<T>>::Dropout { ff: autoff, .. }) => {
                 ff.weights = ff
                     .weights
-                    .clone()
                     .sub(&autoff.weights.into_grad().unwrap().mul(&scale).unwrap())
                     .unwrap();
                 ff.biases = ff
                     .biases
-                    .clone()
                     .sub(&autoff.biases.into_grad().unwrap().mul(&scale).unwrap())
                     .unwrap();
             }

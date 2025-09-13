@@ -8,6 +8,6 @@ pub struct MSE;
 
 impl Loss for MSE {
     fn loss<T: Tensor>(&self, batch_activations: &T, output: &T) -> T {
-        batch_activations.clone().sub(output).unwrap().pow(2).sum()
+        batch_activations.sub(output).unwrap().pow(2).sum()
     }
 }
