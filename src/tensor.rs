@@ -35,7 +35,6 @@ pub trait SharpTensor: Tensor {
     fn tranpose(self, axes: &[usize]) -> Option<Self>;
     fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64>;
     fn iter_mut(&mut self) -> impl Iterator<Item = &mut f64>;
-    fn argmax(&self) -> usize;
 }
 
 pub trait TensorIO: Tensor {
@@ -399,16 +398,6 @@ impl SharpTensor for CPUTensor {
 
     fn iter_mut(&mut self) -> impl Iterator<Item = &mut f64> {
         self.data.iter_mut()
-    }
-
-    fn argmax(&self) -> usize {
-        let mut maxi = 0;
-        for (i, v) in self.data.iter().enumerate() {
-            if *v > self.data[maxi] {
-                maxi = i;
-            }
-        }
-        return maxi;
     }
 }
 

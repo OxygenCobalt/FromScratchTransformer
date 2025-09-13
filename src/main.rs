@@ -1,166 +1,47 @@
-use std::fs::File;
-
-use arrow::array::{Array, BinaryArray, Int64Array, StructArray};
-use parquet::arrow::arrow_reader::ArrowReaderBuilder;
+use std::path::{Path, PathBuf};
 
 use crate::{
     activation::Activation,
-    dataset::{Dataset, Example, IOShape, Test, Train},
     loss::MSE,
-    nn::{Layer, NeuralNetwork, Reporting, SuccessCriteria, TestResult},
-    tensor::{CPUTensor, SharpTensor, Tensor},
+    nn::{Checkpoint, Hyperparams, Layer, NeuralNetwork},
 };
 
 mod activation;
 mod autograd;
-mod dataset;
 mod loss;
 mod nn;
 mod tensor;
+mod mnist;
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() {
-    println!("loading data...");
-    let mut mnist = mnist().unwrap();
-    println!(
-        "loading done: {} train examples, {} test examples.",
-        mnist.train.examples.len(),
-        mnist.test.examples.len()
-    );
-    println!("begin training...");
+    let mnist = mnist::mnist(Path::new("data/mnist")).unwrap();
     let mut nn = NeuralNetwork::new(&[
         Layer::Dense {
-            neurons: mnist.io_shape.in_size,
+            neurons: 784,
             activation: Activation::Sigmoid,
         },
-        Layer::Dense {
-            neurons: 30,
+        Layer::Dropout {
+            neurons: 100,
             activation: Activation::Sigmoid,
+            rate: 0.01
         },
         Layer::Dense {
-            neurons: mnist.io_shape.out_size,
+            neurons: 10,
             activation: Activation::Sigmoid,
         },
     ]);
+    let hyperparams = Hyperparams {
+        epochs: 30,
+        batch_size: 10,
+        learning_rate: 3.0
+    };
     nn.train(
-        &mut mnist.train,
-        30,
-        10,
-        3.0,
+        &Checkpoint(&mnist, PathBuf::from("data/mnist_checkpts")),
+        hyperparams,
         &MSE,
-        None::<MnistReporting>,
-        None,
     )
     .unwrap();
-}
-
-struct MnistReporting<'a> {
-    test: &'a Test,
-}
-
-impl<'a> Reporting for MnistReporting<'a> {
-    fn data(&self) -> &Test {
-        &self.test
-    }
-
-    fn report(&self, epoch: Option<u64>, result: TestResult) {
-        let percent_successful =
-            (result.successes as f64 / self.test.examples.len() as f64) * 100.0;
-        let phase = epoch
-            .map(|e| format!["epoch {}", e + 1])
-            .unwrap_or("init".to_owned());
-        println!(
-            "{}: loss = {}, {} / {} ({}%) successful",
-            phase,
-            result.avg_loss,
-            result.successes,
-            self.test.examples.len(),
-            percent_successful
-        )
-    }
-}
-
-impl<'a> SuccessCriteria for MnistReporting<'a> {
-    fn is_success(&self, example: &Example, output: &impl SharpTensor) -> bool {
-        example.output.argmax() == output.argmax()
-    }
-}
-
-pub fn mnist() -> Result<Dataset, parquet::errors::ParquetError> {
-    let train = load_mnist("./mnist/mnist/train-00000-of-00001.parquet")?;
-    let test = load_mnist("./mnist/mnist/test-00000-of-00001.parquet")?;
-    let io_shape = IOShape {
-        in_size: 784,
-        out_size: 10,
-    };
-    let dataset = Dataset {
-        train: Train {
-            examples: train,
-            io_shape,
-        },
-        test: Test {
-            examples: test,
-            io_shape,
-        },
-        io_shape: IOShape {
-            in_size: 784,
-            out_size: 10,
-        },
-    };
-    Ok(dataset)
-}
-
-fn load_mnist(path: &str) -> Result<Vec<Example>, parquet::errors::ParquetError> {
-    let train = File::open(path)?;
-    let parquet = ArrowReaderBuilder::try_new(train)?.build()?;
-    let mut images: Vec<CPUTensor> = Vec::new();
-    let mut labels: Vec<CPUTensor> = Vec::new();
-    for item in parquet {
-        let record_batch = item.unwrap();
-        let image_column = record_batch
-            .column_by_name("image")
-            .expect("Column 'image' not found");
-        let image_struct = image_column
-            .as_any()
-            .downcast_ref::<StructArray>()
-            .expect("Failed to cast image column to StructArray");
-        let bytes_column = image_struct
-            .column_by_name("bytes")
-            .expect("No 'bytes' field in image struct");
-        let image_bytes_array = bytes_column
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .expect("Failed to cast bytes to BinaryArray");
-        let label_column = record_batch
-            .column_by_name("label")
-            .expect("Column 'label' not found");
-        let label_array = label_column
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .expect("Failed to cast label column to Int64Array");
-        for i in 0..image_struct.len() {
-            let image_bytes = image_bytes_array.value(i);
-            let decoder = png::Decoder::new(image_bytes);
-            let mut reader = decoder.read_info().unwrap();
-            let mut buf = vec![0; reader.output_buffer_size()];
-            reader.next_frame(&mut buf).unwrap();
-            let pixels: Vec<f64> = buf.iter().map(|&b| b as f64 / 255.0).collect();
-
-            let image_matrix = Tensor::vector(pixels).unwrap();
-            images.push(image_matrix);
-
-            let label = label_array.value(i);
-            let mut label_vec = vec![0.0; 10];
-            label_vec[label as usize] = 1.0;
-            let label_matrix = Tensor::vector(label_vec).unwrap();
-            labels.push(label_matrix);
-        }
-    }
-    let examples = images
-        .into_iter()
-        .zip(labels.into_iter())
-        .map(|(input, output)| Example { input, output });
-    Ok(examples.collect())
 }
