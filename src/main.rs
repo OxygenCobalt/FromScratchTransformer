@@ -11,12 +11,13 @@ mod nn;
 mod tensor;
 mod mnist;
 mod obw;
+mod embeddings;
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() {
-    let obw = one_billion_words(Path::new("data/1-billion-word-language-modeling-benchmark-r13output")).unwrap();
+    let obw = one_billion_words::<CPUTensor>(Path::new("data/1-billion-word-language-modeling-benchmark-r13output")).unwrap();
     println!("{}", obw.train.len());
     // let mnist = mnist::mnist::<CPUTensor>(Path::new("data/mnist")).unwrap();
     // let mut nn = NeuralNetwork::new(&[
