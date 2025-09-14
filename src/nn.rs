@@ -2,12 +2,13 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand_distr::{Distribution, Normal};
 use std::fs::File;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::io::{self, Read, Write};
 use rand::seq::SliceRandom;
 
-use crate::tensor::{CPUTensor, Generate, SharpTensor, Tensor, TensorIO, Th};
+use crate::tensor::{Generate, SharpTensor, Tensor, TensorIO, Th};
 
 use super::{
     activation::Activation,
@@ -15,11 +16,11 @@ use super::{
     loss::Loss,
 };
 
-pub struct NeuralNetwork {
-    axons: Vec<Axon<CPUTensor>>,
+pub struct NeuralNetwork<T: Tensor> {
+    axons: Vec<Axon<T>>,
 }
 
-impl NeuralNetwork {
+impl <T: Tensor> NeuralNetwork<T> {
     pub fn new(layers: &[Layer]) -> Self {
         if layers.len() < 2 {
             panic!("not enough layers");
@@ -32,9 +33,38 @@ impl NeuralNetwork {
         Self { axons }
     }
 
+    pub fn test(
+        &self,
+        test: &Test<T>,
+        loss: &impl Loss,
+    ) -> TestResults<T> {
+        let mut sum = 0.0;
+        let mut results = Vec::new();
+        for example in &test.examples {
+            let activations = self.evaluate(&example.input);
+            sum += loss.loss(&activations, &example.output).get(&[]).unwrap();
+            results.push(TestResult { example: example.clone(), activations });
+        }
+        let loss = sum / test.examples.len() as f64;
+        return TestResults {
+            avg_loss: loss,
+            results,
+        };
+    }
+
+    pub fn evaluate(&self, input: &T) -> T {
+        let mut current = input.clone();
+        for axon in &self.axons {
+            current = axon.forward(&current)
+        }
+        current
+    }
+}
+
+impl <T: SharpTensor> NeuralNetwork<T> {
     pub fn train(
         &mut self,
-        train: &impl TrainingSetup,
+        train: &impl TrainingSetup<T>,
         hyperparams: Hyperparams,
         loss: &impl Loss,
     ) -> io::Result<()> {
@@ -54,7 +84,7 @@ impl NeuralNetwork {
                 .with_prefix(format!["epoch {}", epoch + 1].blue().to_string());
             let mut avg_loss = 0.0;
             for batch in batches {
-                let auto_axons: Vec<Axon<Autograd<CPUTensor>>> =
+                let auto_axons: Vec<Axon<Autograd<T>>> =
                     self.axons.iter_mut().map(|a| a.train()).collect();
                 let mut current = Autograd::new(batch.input);
                 for axon in &auto_axons {
@@ -80,34 +110,9 @@ impl NeuralNetwork {
         }
         Ok(())
     }
+}
 
-    pub fn test(
-        &self,
-        test: &Test,
-        loss: &impl Loss,
-    ) -> TestResults {
-        let mut sum = 0.0;
-        let mut results = Vec::new();
-        for example in &test.examples {
-            let activations = self.evaluate(&example.input);
-            sum += loss.loss(&activations, &example.output).get(&[]).unwrap();
-            results.push(TestResult { example: example.clone(), activations });
-        }
-        let loss = sum / test.examples.len() as f64;
-        return TestResults {
-            avg_loss: loss,
-            results,
-        };
-    }
-
-    pub fn evaluate(&self, input: &CPUTensor) -> CPUTensor {
-        let mut current = input.clone();
-        for axon in &self.axons {
-            current = axon.forward(&current)
-        }
-        current
-    }
-
+impl <T: TensorIO> NeuralNetwork<T> {
     pub fn read(read: &mut impl Read) -> io::Result<Self> {
         let mut signature = [0u8; 8];
         read.read(&mut signature)?;
@@ -138,31 +143,31 @@ impl NeuralNetwork {
 }
 
 #[derive(Clone)]
-pub struct Example {
-    pub input: CPUTensor,
-    pub output: CPUTensor,
+pub struct Example<T: Tensor> {
+    pub input: T,
+    pub output: T,
 }
 
 #[derive(Clone)]
-pub struct Train {
-    pub examples: Vec<Example>,
+pub struct Train<T: Tensor> {
+    pub examples: Vec<Example<T>>,
 }
 
-impl Train {
-    fn batch(&self, size: usize) -> Vec<Example> {
+impl <T: Tensor> Train<T> {
+    fn batch(&self, size: usize) -> Vec<Example<T>> {
         let mut examples = self.examples.clone();
         examples.shuffle(&mut rand::rng());
         self.examples
             .chunks(size)
             .map(|examples| {
-                let input = CPUTensor::tensor(Th::C(
+                let input = T::tensor(Th::C(
                     examples
                         .iter()
                         .map(|e| Th::R(e.input.iter().cloned().collect()))
                         .collect::<Vec<Th>>(),
                 ))
                 .unwrap();
-                let output = CPUTensor::tensor(Th::C(
+                let output = T::tensor(Th::C(
                     examples
                         .iter()
                         .map(|e| Th::R(e.output.iter().cloned().collect()))
@@ -175,31 +180,31 @@ impl Train {
     }
 }
 
-pub trait TrainingSetup {
-    fn train(&self) -> &Train;
-    fn report(&self, epoch: Option<u64>, loss: &impl Loss, nn: &NeuralNetwork) -> io::Result<()>;
+pub trait TrainingSetup<T: Tensor> {
+    fn train(&self) -> &Train<T>;
+    fn report(&self, epoch: Option<u64>, loss: &impl Loss, nn: &NeuralNetwork<T>) -> io::Result<()>;
 }
 
-pub struct NoReporting<'a>(pub &'a Train);
+pub struct NoReporting<'a, T: Tensor>(pub &'a Train<T>);
 
-impl <'a> TrainingSetup for NoReporting<'a> {
-    fn train(&self) -> &Train {
+impl <'a, T: Tensor> TrainingSetup<T> for NoReporting<'a, T> {
+    fn train(&self) -> &Train<T> {
         &self.0
     }
 
-    fn report(&self, _: Option<u64>, _: &impl Loss, _: &NeuralNetwork) -> io::Result<()> {
+    fn report(&self, _: Option<u64>, _: &impl Loss, _: &NeuralNetwork<T>) -> io::Result<()> {
         Ok(())
     }
 }
 
-pub struct Checkpoint<'a, R: TrainingSetup>(pub &'a R, pub PathBuf);
+pub struct Checkpoint<'a, T: TensorIO, R: TrainingSetup<T>>(pub &'a R, pub PathBuf, pub PhantomData<T>);
 
-impl <'a, R: TrainingSetup> TrainingSetup for Checkpoint<'a, R> {
-    fn train(&self) -> &Train {
+impl <'a,  T: TensorIO, R: TrainingSetup<T>> TrainingSetup<T> for Checkpoint<'a, T, R> {
+    fn train(&self) -> &Train<T> {
         self.0.train()
     }
 
-    fn report(&self, epoch: Option<u64>, loss: &impl Loss, nn: &NeuralNetwork) -> io::Result<()> {
+    fn report(&self, epoch: Option<u64>, loss: &impl Loss, nn: &NeuralNetwork<T>) -> io::Result<()> {
         self.0.report(epoch,  loss, nn)?;
         let path = self.1.join(Path::new(&format!["{}.nn", epoch.map(|e| (e + 1).to_string()).unwrap_or_else(|| "init".to_string())]));
         println!("{}: writing nn to {}", "checkpoint".red(), path.display().to_string());
@@ -215,18 +220,18 @@ pub struct Hyperparams {
     pub learning_rate: f64
 }
 
-pub struct Test {
-    pub examples: Vec<Example>,
+pub struct Test<T: Tensor> {
+    pub examples: Vec<Example<T>>,
 }
 
-pub struct TestResults {
+pub struct TestResults<T: Tensor> {
     pub avg_loss: f64,
-    pub results: Vec<TestResult>,
+    pub results: Vec<TestResult<T>>,
 }
 
-pub struct TestResult {
-    pub example: Example,
-    pub activations: CPUTensor
+pub struct TestResult<T: Tensor> {
+    pub example: Example<T>,
+    pub activations: T
 }
 
 pub static NORMAL: LazyLock<Normal<f64>> =

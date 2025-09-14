@@ -1,9 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::{marker::PhantomData, path::{Path, PathBuf}};
 
 use crate::{
     activation::Activation,
     loss::MSE,
-    nn::{Checkpoint, Hyperparams, Layer, NeuralNetwork},
+    nn::{Checkpoint, Hyperparams, Layer, NeuralNetwork}, tensor::CPUTensor,
 };
 
 mod activation;
@@ -17,7 +17,7 @@ mod mnist;
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() {
-    let mnist = mnist::mnist(Path::new("data/mnist")).unwrap();
+    let mnist = mnist::mnist::<CPUTensor>(Path::new("data/mnist")).unwrap();
     let mut nn = NeuralNetwork::new(&[
         Layer::Dense {
             neurons: 784,
@@ -39,7 +39,7 @@ fn main() {
         learning_rate: 3.0
     };
     nn.train(
-        &Checkpoint(&mnist, PathBuf::from("data/mnist_checkpts")),
+        &Checkpoint::<_, _>(&mnist, PathBuf::from("data/mnist_checkpts"), PhantomData),
         hyperparams,
         &MSE,
     )

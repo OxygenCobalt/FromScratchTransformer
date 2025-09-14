@@ -5,25 +5,26 @@ use colored::Colorize;
 use parquet::arrow::arrow_reader::ArrowReaderBuilder;
 
 use crate::{
-    loss::{Loss, MSE}, nn::{Example, Test, Train, TrainingSetup}, tensor::{CPUTensor, Tensor}
+    loss::Loss, nn::{Example, NeuralNetwork, Test, Train, TrainingSetup}, tensor::Tensor
 };
 
-pub struct MNIST {
-    train: Train,
-    test: Test
+pub struct MNIST<T: Tensor> {
+    train: Train<T>,
+    test: Test<T>
 }
 
-impl TrainingSetup for MNIST {
-    fn train(&self) -> &Train {
+impl <T: Tensor> TrainingSetup<T> for MNIST<T> {
+    fn train(&self) -> &Train<T> {
         &self.train
     }
 
-    fn report(&self, _: Option<u64>, loss: &impl Loss, nn: &crate::nn::NeuralNetwork) -> std::io::Result<()> {
+    fn report(&self, _: Option<u64>, loss: &impl Loss, nn: &NeuralNetwork<T>) -> std::io::Result<()> {
+        fn argmax<T: Tensor>(tensor: &T) -> usize {
+            tensor.iter().enumerate().max_by(|(_, x), (_, y)| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)).unwrap().0
+        }
         let results = nn.test(&self.test, loss);
         let successes = results.results.iter().filter(|result| {
-            let expected_argmax = result.example.output.iter().enumerate().max_by(|(_, x), (_, y)| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)).unwrap().0;
-            let activations_argmax = result.activations.iter().enumerate().max_by(|(_, x), (_, y)| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)).unwrap().0;
-            expected_argmax == activations_argmax
+            argmax(&result.example.output) == argmax(&result.activations)
         }).count();
         let percent = (successes as f64 / results.results.len() as f64) * 100.0;
         println!("{}: avg loss = {:.3}, success = {} / {} ({:.2}%)", "mnist".green(), results.avg_loss, successes, results.results.len(), percent);
@@ -31,7 +32,7 @@ impl TrainingSetup for MNIST {
     }
 }
 
-pub fn mnist(at: &Path) -> Result<MNIST, parquet::errors::ParquetError> {
+pub fn mnist<T: Tensor>(at: &Path) -> Result<MNIST<T>, parquet::errors::ParquetError> {
     let train = load_mnist(&at.join("mnist/train-00000-of-00001.parquet"))?;
     let test = load_mnist(&at.join("./mnist/test-00000-of-00001.parquet"))?;
     println!(
@@ -51,11 +52,11 @@ pub fn mnist(at: &Path) -> Result<MNIST, parquet::errors::ParquetError> {
     Ok(dataset)
 }
 
-fn load_mnist(path: &Path) -> Result<Vec<Example>, parquet::errors::ParquetError> {
+fn load_mnist<T: Tensor>(path: &Path) -> Result<Vec<Example<T>>, parquet::errors::ParquetError> {
     let train = File::open(path)?;
     let parquet = ArrowReaderBuilder::try_new(train)?.build()?;
-    let mut images: Vec<CPUTensor> = Vec::new();
-    let mut labels: Vec<CPUTensor> = Vec::new();
+    let mut images: Vec<T> = Vec::new();
+    let mut labels: Vec<T> = Vec::new();
     for item in parquet {
         let record_batch = item.unwrap();
         let image_column = record_batch
@@ -87,13 +88,13 @@ fn load_mnist(path: &Path) -> Result<Vec<Example>, parquet::errors::ParquetError
             reader.next_frame(&mut buf).unwrap();
             let pixels: Vec<f64> = buf.iter().map(|&b| b as f64 / 255.0).collect();
 
-            let image_matrix = Tensor::vector(pixels).unwrap();
+            let image_matrix = T::vector(pixels).unwrap();
             images.push(image_matrix);
 
             let label = label_array.value(i);
             let mut label_vec = vec![0.0; 10];
             label_vec[label as usize] = 1.0;
-            let label_matrix = Tensor::vector(label_vec).unwrap();
+            let label_matrix = T::vector(label_vec).unwrap();
             labels.push(label_matrix);
         }
     }
