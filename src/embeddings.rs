@@ -1,41 +1,97 @@
-use std::collections::HashMap;
+use std::{collections::{HashMap, HashSet}, io::{self, Write}, num::NonZeroUsize};
 
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+use ordered_float::OrderedFloat;
+use rand::{rngs::StdRng, Rng, SeedableRng};
+use sha2::{Digest, Sha256};
 
-use crate::tensor::Tensor;
+use crate::tensor::{CPUTensor, Tensor, TensorIO};
 
-pub struct LookupEmbeddings {
-    mapping: HashMap<String, usize>,
-    shape: usize
+pub trait EmbeddingsBuilder {
+    fn vocabulary_size(&self) -> usize;
+    fn add(&mut self, word: String);
+    fn build(self) -> Embeddings;
 }
 
-impl LookupEmbeddings {
-    pub fn train<'a>(words: impl Iterator<Item=&'a str>, len: usize) -> Self {
-        let mut mapping: HashMap<String, usize> = HashMap::new();
-        let i = 0;
-        let sgd_bar = ProgressBar::new(len as u64)
-            .with_style(ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}] {msg}")
-                            .unwrap()
-                            .progress_chars("=> "))
-            .with_prefix("training embeddings".purple().to_string());
-        for word in words {
-            if mapping.contains_key(word) {
-                continue;
-            }
-            sgd_bar.set_message(format!["/ shape: {}", i + 1]);
-            mapping.insert(word.to_string(), i);
-        }
+pub struct HashedEmbeddings {
+    words: HashSet<String>,
+    size: NonZeroUsize,
+}
+
+impl HashedEmbeddings {
+    pub fn new(size: NonZeroUsize) -> Self {
         Self {
-            mapping,
-            shape: i + 1
+            words: HashSet::new(),
+            size
         }
     }
+}
 
-    pub fn test<T: Tensor>(&self, word: String) -> Option<T> {
-        let idx = *self.mapping.get(&word)?;
-        let mut embedding = vec![0.0; self.shape];
-        embedding[idx] = 1.0;
-        T::vector(embedding)
+impl EmbeddingsBuilder for HashedEmbeddings  {
+    fn vocabulary_size(&self) -> usize {
+        self.words.len()
+    }
+    
+    fn add(&mut self, word: String) {
+        self.words.insert(word);
+    }
+
+    fn build(self) -> Embeddings {
+        println!("{:?}", self.words.iter().take(10).collect::<Vec<&String>>());
+        let test_progress = ProgressBar::new(self.words.len() as u64)
+            .with_style(ProgressStyle::with_template("{prefix}: training {bar:40} {pos:>4}/{len:4} [{eta_precise}]").unwrap())
+            .with_prefix("hashed embeddings".red().to_string());
+        let word_amount = self.words.len();
+        let hashes: HashMap<Vec<OrderedFloat<f64>>, String> = self.words.into_iter().map(|w| {
+            let mut seed = Sha256::new();
+            seed.write(w.as_bytes()).unwrap();
+            let mut rng = StdRng::from_seed(seed.finalize().into());
+            let mut vector = Vec::new();
+            for _ in 0..self.size.get() {
+                vector.push(OrderedFloat(rng.random_range(0.0..1.0)));
+            }
+            test_progress.inc(1);
+            (vector, w)
+        }).collect();
+        test_progress.finish();
+        if hashes.len() != word_amount {
+            panic!("embedding collission! reduce embedding size {} {}", hashes.len(), word_amount)
+        }
+        let to_vecs = hashes.iter().map(|(k, v)| (v.clone(), k.clone())).collect();
+        Embeddings { to_vecs, to_words: hashes }
+    }
+} 
+
+pub struct Embeddings {
+    to_vecs: HashMap<String, Vec<OrderedFloat<f64>>>,
+    to_words: HashMap<Vec<OrderedFloat<f64>>, String>
+}
+
+impl Embeddings {
+    pub fn to_vec<T: Tensor>(&self, word: impl AsRef<str>) -> Option<T> {
+        self.to_vecs.get(word.as_ref()).and_then(|v| 
+            T::vector(v.iter().cloned().map(|x| x.0).collect::<Vec<f64>>()))
+    }
+
+    pub fn to_words<T: Tensor>(&self, vector: &T) -> Option<&str> {
+        let key: Vec<OrderedFloat<f64>> = vector.iter().cloned().map(|x| OrderedFloat(x)).collect();
+        self.to_words.get(&key).map(|s| s.as_str())
+    }
+
+    pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
+        write.write_all(b"Embedngs")?;
+        write.write_all(&self.to_vecs.len().to_le_bytes())?;
+        let write_progress = ProgressBar::new(self.to_vecs.len() as u64)
+            .with_style(ProgressStyle::with_template("{prefix}: writing {bar:40} {pos:>4}/{len:4} [{eta_precise}]").unwrap())
+            .with_prefix("embeddings".red().to_string());
+        for (word, vec) in &self.to_vecs {
+            write.write_all(&word.len().to_le_bytes())?;
+            write.write_all(word.as_bytes())?;
+            CPUTensor::vector(vec.iter().cloned().map(|x| x.0).collect::<Vec<f64>>()).unwrap().write(write)?;
+            write_progress.inc(1);
+        }
+        write_progress.finish();
+        Ok(())
     }
 }

@@ -1,7 +1,7 @@
-use std::{marker::PhantomData, path::{Path, PathBuf}};
+use std::{marker::PhantomData, num::NonZeroUsize, path::{Path, PathBuf}};
 
 use crate::{
-    activation::Activation, loss::MSE, nn::{Checkpoint, Hyperparams, Layer, NeuralNetwork}, obw::one_billion_words, tensor::CPUTensor
+    activation::Activation, embeddings::HashedEmbeddings, loss::MSE, nn::{Checkpoint, Hyperparams, Layer, NeuralNetwork}, obw::one_billion_words, tensor::CPUTensor
 };
 
 mod activation;
@@ -17,7 +17,7 @@ mod embeddings;
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() {
-    let obw = one_billion_words::<CPUTensor>(Path::new("data/1-billion-word-language-modeling-benchmark-r13output")).unwrap();
+    let obw = one_billion_words::<CPUTensor>(Path::new("data/1-billion-word-language-modeling-benchmark-r13output"), HashedEmbeddings::new(NonZeroUsize::new(100).unwrap())).unwrap();
     println!("{}", obw.train.len());
     // let mnist = mnist::mnist::<CPUTensor>(Path::new("data/mnist")).unwrap();
     // let mut nn = NeuralNetwork::new(&[
