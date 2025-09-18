@@ -2,6 +2,7 @@ use std::{fs::File, path::Path};
 
 use arrow::array::{Array, BinaryArray, Int64Array, StructArray};
 use colored::Colorize;
+use indicatif::{ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ArrowReaderBuilder;
 
 use crate::{
@@ -53,6 +54,10 @@ pub fn mnist<T: Tensor>(at: &Path) -> Result<MNIST<T>, parquet::errors::ParquetE
 }
 
 fn load_mnist<T: Tensor>(path: &Path) -> Result<Vec<Example<T>>, parquet::errors::ParquetError> {
+    let load_progress = ProgressBar::new_spinner()
+        .with_style(ProgressStyle::with_template("{prefix}: loading {msg} {pos:>4}").unwrap())
+        .with_prefix("mnist".green().to_string())
+        .with_message(path.file_name().unwrap().to_string_lossy().to_string());
     let train = File::open(path)?;
     let parquet = ArrowReaderBuilder::try_new(train)?.build()?;
     let mut images: Vec<T> = Vec::new();
@@ -96,8 +101,10 @@ fn load_mnist<T: Tensor>(path: &Path) -> Result<Vec<Example<T>>, parquet::errors
             label_vec[label as usize] = 1.0;
             let label_matrix = T::vector(label_vec).unwrap();
             labels.push(label_matrix);
+            load_progress.inc(1);
         }
     }
+    load_progress.finish();
     let examples = images
         .into_iter()
         .zip(labels.into_iter())

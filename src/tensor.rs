@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::{fmt::Debug, io::{self, Read, Write}};
 
 pub trait Tensor
 where
@@ -185,6 +185,21 @@ impl CPUTensor {
             break;
         }
         Some(new)
+    }
+
+
+    fn debug_shape(&self, f: &mut std::fmt::Formatter<'_>, point: Vec<usize>) -> std::fmt::Result {
+        if point.len() == self.ndim() {
+            write![f, "{} ", self.get(point.as_slice()).unwrap()]?;
+        }
+        write![f, "["]?;
+        for i in 0..self.shape[point.len()] {
+            let mut new_point = point.clone();
+            new_point.push(i);
+            self.debug_shape(f, new_point)?;
+        }
+        write![f, "]\n"]?;
+        Ok(())
     }
 }
 
@@ -440,5 +455,11 @@ impl TensorIO for CPUTensor {
             write.write_all(&x.to_be_bytes())?;
         }
         Ok(())
+    }
+}
+
+impl Debug for CPUTensor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.debug_shape(f, Vec::with_capacity(self.shape.len()))
     }
 }

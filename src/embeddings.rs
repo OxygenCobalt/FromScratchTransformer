@@ -8,8 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::tensor::{CPUTensor, Tensor, TensorIO};
 
-pub trait EmbeddingsBuilder {
-    fn vocabulary_size(&self) -> usize;
+pub trait TrainEmbeddings {
     fn add(&mut self, word: String);
     fn build(self) -> Embeddings;
 }
@@ -28,18 +27,13 @@ impl HashedEmbeddings {
     }
 }
 
-impl EmbeddingsBuilder for HashedEmbeddings  {
-    fn vocabulary_size(&self) -> usize {
-        self.words.len()
-    }
-    
+impl TrainEmbeddings for HashedEmbeddings  {
     fn add(&mut self, word: String) {
         self.words.insert(word);
     }
 
     fn build(self) -> Embeddings {
-        println!("{:?}", self.words.iter().take(10).collect::<Vec<&String>>());
-        let test_progress = ProgressBar::new(self.words.len() as u64)
+        let train_progress = ProgressBar::new(self.words.len() as u64)
             .with_style(ProgressStyle::with_template("{prefix}: training {bar:40} {pos:>4}/{len:4} [{eta_precise}]").unwrap())
             .with_prefix("hashed embeddings".red().to_string());
         let word_amount = self.words.len();
@@ -51,12 +45,12 @@ impl EmbeddingsBuilder for HashedEmbeddings  {
             for _ in 0..self.size.get() {
                 vector.push(OrderedFloat(rng.random_range(0.0..1.0)));
             }
-            test_progress.inc(1);
+            train_progress.inc(1);
             (vector, w)
         }).collect();
-        test_progress.finish();
+        train_progress.finish();
         if hashes.len() != word_amount {
-            panic!("embedding collission! reduce embedding size {} {}", hashes.len(), word_amount)
+            panic!("embedding collission! you should increase the embedding size.")
         }
         let to_vecs = hashes.iter().map(|(k, v)| (v.clone(), k.clone())).collect();
         Embeddings { to_vecs, to_words: hashes }
