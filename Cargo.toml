@@ -21,3 +21,7 @@ panic = 'abort'
 codegen-units = 1
 lto = 'fat'
 opt-level = 3
+
+[profile.benchmark]
+inherits = 'release'
+debug = true

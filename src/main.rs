@@ -1,7 +1,9 @@
-use std::{marker::PhantomData, num::NonZeroUsize, path::{Path, PathBuf}};
+use std::{marker::PhantomData, num::NonZeroUsize, path::{Path, PathBuf}, sync::LazyLock};
+
+use rand_distr::{Distribution, Normal};
 
 use crate::{
-    activation::Activation, embeddings::{HashedEmbeddings, TrainEmbeddings}, loss::MSE, nn::{Checkpoint, Hyperparams, Layer, NeuralNetwork}, tensor::CPUTensor, wikitext::WikiText103
+    activation::Activation, embeddings::{HashedEmbeddings, TrainEmbeddings}, loss::MSE, nn::{Checkpoint, Hyperparams, Layer, NeuralNetwork}, tensor::{CPUTensor, Fill, Generate, Tensor}, wikitext::WikiText103
 };
 
 mod activation;
@@ -16,7 +18,16 @@ mod wikitext;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+static NORMAL2: LazyLock<Normal<f64>> =
+    std::sync::LazyLock::new(|| Normal::new(0.0, 1.0).unwrap());
+
+
 fn main() {
+    // for i in 0..1000 {
+    //     let a = CPUTensor::tensor(Generate { shape: vec![1023, 381], with: || NORMAL2.sample(&mut rand::rng()) }).unwrap();
+    //     let b = CPUTensor::tensor(Generate { shape: vec![381, 12], with: || NORMAL2.sample(&mut rand::rng()) }).unwrap();
+    //     a.dot(&b, 1).unwrap();
+    // }
     // let wt = WikiText103::load(&Path::new("./data/wikitext")).unwrap();
     // let mut train_embeddings = HashedEmbeddings::new(NonZeroUsize::new(50).unwrap());
     // for word in &wt.train {
@@ -44,7 +55,7 @@ fn main() {
         },
     ]);
     let hyperparams = Hyperparams {
-        epochs: 30,
+        epochs: 1,
         batch_size: 10,
         learning_rate: 3.0
     };

@@ -128,12 +128,21 @@ impl CPUTensor {
         if of.len() != self.shape.len() {
             return None;
         }
-        let mut idx = 0;
-        let mut mult = 1;
-        for (i, p) in of.iter().enumerate() {
-            idx += mult * p;
-            mult *= self.shape[i];
-        }
+        let idx = match of.len() {
+            // some fast cases for common tensor dimensions
+            2 => {
+                self.shape[0] * of[1] + of[0]
+            },
+            _ => {
+                let mut idx = 0;
+                let mut mult = 1;
+                for i in 0..of.len() {
+                    idx += mult * of[i];
+                    mult *= self.shape[i];
+                }
+                idx
+            }
+        };
         Some(idx)
     }
 
@@ -176,9 +185,10 @@ impl CPUTensor {
                 other.get(&rhs_point).unwrap(),
             );
             for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
-                let o = *p;
-                *p = (*p + 1) % s;
-                if *p > o {
+                if *p == *s - 1 {
+                    *p = 0;
+                } else {
+                    *p += 1;
                     continue 'iterate;
                 }
             }
@@ -273,7 +283,7 @@ impl Tensor for CPUTensor {
         if lhs_contraction != rhs_contraction {
             return None;
         }
-        let contraction_shape = lhs_contraction.to_vec();
+        let contraction_shape = lhs_contraction;
         let lhs_survivors = &self.shape[..self.shape.len() - depth];
         let rhs_survivors = &other.shape[depth..];
         let mut new_shape: Vec<usize> = lhs_survivors.to_vec();
@@ -285,29 +295,22 @@ impl Tensor for CPUTensor {
         };
 
         let mut new_point = vec![0; new.shape.len()];
+        let null = vec![0; depth];
+
         let mut lhs_point = vec![0; self.ndim()];
+        let lhs_contraction_point = lhs_point.len() - depth;
+        let lhs_survival_point = depth;
+
         let mut rhs_point = vec![0; other.ndim()];
+        let rhs_contraction_point = depth;
+        // if i dont force the evaluation of (new_point.len() - lhs_survivors.len()) first ill underflow
+        let rhs_survival_point = rhs_point.len() - (new_point.len() - depth);
+
         'iterate: loop {
-            lhs_point
-                .iter_mut()
-                .rev()
-                .take(lhs_contraction.len())
-                .for_each(|x| *x = 0);
-            lhs_point
-                .iter_mut()
-                .take(lhs_survivors.len())
-                .zip(&new_point)
-                .for_each(|(x, y)| *x = *y);
-            rhs_point
-                .iter_mut()
-                .take(lhs_contraction.len())
-                .for_each(|x| *x = 0);
-            rhs_point
-                .iter_mut()
-                .rev()
-                .take(new_point.len() - lhs_survivors.len())
-                .zip(new_point.iter().rev())
-                .for_each(|(x, y)| *x = *y);
+            lhs_point[lhs_contraction_point..].copy_from_slice(&null);
+            lhs_point[..lhs_survival_point].copy_from_slice(&new_point[..depth]);
+            rhs_point[..rhs_contraction_point].copy_from_slice(&null);
+            rhs_point[rhs_survival_point..].copy_from_slice(&new_point[depth..]);
             let mut sum = 0.0;
             'summate: loop {
                 sum += *self.get(&lhs_point).unwrap() * *other.get(&rhs_point).unwrap();
@@ -319,11 +322,12 @@ impl Tensor for CPUTensor {
                     .zip(rhs_point.iter_mut().take(lhs_contraction.len()))
                     .zip(contraction_shape.iter())
                 {
-                    let o_rhs = *p_rhs;
-                    *p_rhs = (*p_rhs + 1) % s;
-                    *p_lhs = (*p_lhs + 1) % s;
-                    if *p_rhs > o_rhs {
-                        // both points should be synchronized so we can just check for the change in one
+                    if *p_rhs == *s - 1 {
+                        *p_rhs = 0;
+                        *p_lhs = 0;
+                    } else {
+                        *p_rhs += 1;
+                        *p_lhs += 1;
                         continue 'summate;
                     }
                 }
@@ -334,9 +338,10 @@ impl Tensor for CPUTensor {
             *new.get_mut(&new_point).unwrap() = sum;
 
             for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
-                let o = *p;
-                *p = (*p + 1) % s;
-                if *p > o {
+                if *p == *s - 1 {
+                    *p = 0;
+                } else {
+                    *p += 1;
                     continue 'iterate;
                 }
             }
@@ -389,14 +394,18 @@ impl SharpTensor for CPUTensor {
         };
 
         let mut point = vec![0; self.shape.len()];
+        let mut new_point = vec![0; new.shape.len()];
         'iterate: loop {
-            let new_point: Vec<usize> = axes.iter().map(|i| point[*i]).collect();
             *new.get_mut(&new_point).unwrap() = *self.get(&point.as_slice()).unwrap();
 
-            for (p, s) in point.iter_mut().zip(self.shape.iter()) {
-                let o = *p;
-                *p = (*p + 1) % s;
-                if *p > o {
+            for i in 0..self.ndim() {
+                let (p, np, s) = (&mut point[i], &mut new_point[axes[i]], self.shape[i]);
+                if *p == s - 1 {
+                    *p = 0;
+                    *np = 0;
+                } else {
+                    *p += 1;
+                    *np += 1;
                     continue 'iterate;
                 }
             }

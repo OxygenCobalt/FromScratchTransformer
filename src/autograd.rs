@@ -218,9 +218,10 @@ impl<T: SharpTensor> Operation<T> {
             *rhs_grad.get_mut(&rhs_point).unwrap() += rhs_lgrad * bgrad;
 
             for (p, s) in new_point.iter_mut().zip(grad.shape()) {
-                let o = *p;
-                *p = (*p + 1) % s;
-                if *p > o {
+                if *p == *s - 1 {
+                    *p = 0;
+                } else {
+                    *p += 1;
                     continue 'iterate;
                 }
             }
