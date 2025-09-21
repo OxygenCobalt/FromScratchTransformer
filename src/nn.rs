@@ -76,14 +76,13 @@ impl <T: SharpTensor> NeuralNetwork<T> {
         train.report(None, loss, self)?;
         for epoch in 0..hyperparams.epochs {
             let batches = train.train().batch(hyperparams.batch_size);
-            let batch_len = batches.len();
             let sgd_bar = ProgressBar::new(batches.len() as u64)
                 .with_style(ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}] / avg batch loss = {msg}")
                                 .unwrap()
                                 .progress_chars("=> "))
                 .with_prefix(format!["epoch {}", epoch + 1].blue().to_string());
-            let mut avg_loss = 0.0;
-            for batch in batches {
+            let mut total_loss = 0.0;
+            for (i, batch) in batches.into_iter().enumerate() {
                 let auto_axons: Vec<Axon<Autograd<T>>> =
                     self.axons.iter_mut().map(|a| a.train()).collect();
                 let mut current = Autograd::new(batch.input);
@@ -91,7 +90,7 @@ impl <T: SharpTensor> NeuralNetwork<T> {
                     current = axon.forward(&current)
                 }
                 let loss = loss.loss(&current, &Autograd::new(batch.output));
-                avg_loss += loss.get(&[]).unwrap() / batch_len as f64;
+                total_loss += loss.get(&[]).unwrap();
                 loss.backward();
                 // this drops the entire computation graph allowing us to move the weight/bias
                 // gradients out w/o a clone
@@ -103,7 +102,7 @@ impl <T: SharpTensor> NeuralNetwork<T> {
                     axon.commit(auto_axon, c);
                 }
                 sgd_bar.inc(1);
-                sgd_bar.set_message(format!["{:.3}", avg_loss]);
+                sgd_bar.set_message(format!["{:.3}", total_loss / (i + 1) as f64]);
             }
             sgd_bar.finish();
             train.report(Some(epoch), loss, self)?;

@@ -1,4 +1,6 @@
-use std::{fmt::Debug, io::{self, Read, Write}};
+use std::{cell::{Cell, UnsafeCell}, fmt::Debug, io::{self, Read, Write}, iter};
+
+use rayon::prelude::*;
 
 pub trait Tensor
 where
@@ -167,19 +169,17 @@ impl CPUTensor {
             shape: new_shape,
         };
         let mut new_point = vec![0; new.shape.len()];
+        let mut lhs_point = vec![0; self.shape.len()];
+        let mut rhs_point = vec![0; other.shape.len()];
         'iterate: loop {
-            let lhs_point: Vec<usize> = new_point
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i < self.shape.len())
-                .map(|(i, x)| x % self.shape[i])
-                .collect();
-            let rhs_point: Vec<usize> = new_point
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i < other.shape.len())
-                .map(|(i, x)| x % other.shape[i])
-                .collect();
+            for (i, v) in new_point.iter().enumerate() {
+                if i < lhs_point.len() {
+                    lhs_point[i] = v % self.shape[i];
+                }
+                if i < rhs_point.len() {
+                    rhs_point[i] = v % other.shape[i];
+                }
+            }
             *new.get_mut(&new_point).unwrap() = op(
                 self.get(&lhs_point).unwrap(),
                 other.get(&rhs_point).unwrap(),
@@ -197,6 +197,55 @@ impl CPUTensor {
         Some(new)
     }
 
+    fn populate(shape: Vec<usize>, op: impl Fn(&[usize]) -> f64 + Sync) -> Self {
+
+        let new = Self {
+            data: vec![0.0; Self::len(&shape)],
+            shape,
+        };
+
+        let mut new_point = vec![0; new.shape.len()];
+        let mut point_iter: Vec<Vec<usize>> = Vec::new();
+        point_iter.resize_with(Self::len(&new.shape), || {
+            let this_point = new_point.clone();
+            for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
+                if *p == *s - 1 {
+                    *p = 0;
+                } else {
+                    *p += 1;
+                    break;
+                }
+            }
+            this_point
+        });
+
+        struct SyncWorkaroundNeverUseThis<T>(UnsafeCell<T>);
+        unsafe impl<T> Sync for SyncWorkaroundNeverUseThis<T> {}
+
+        impl<T> SyncWorkaroundNeverUseThis<T> {
+            fn new(value: T) -> Self {
+                Self(UnsafeCell::new(value))
+            }
+            
+            unsafe fn get(&self) -> *mut T {
+                self.0.get()
+            }
+
+            fn into_inner(self) -> T {
+                self.0.into_inner()
+            }
+        }
+
+        let new_ref = SyncWorkaroundNeverUseThis::new(new);
+        point_iter.into_par_iter().for_each(|new_point| {
+            let x = op(&new_point);
+            unsafe {
+                *new_ref.get().as_mut().unwrap().get_mut(&new_point).unwrap() = x;
+            }
+        });
+
+        new_ref.into_inner()
+    }
 
     fn debug_shape(&self, f: &mut std::fmt::Formatter<'_>, point: Vec<usize>) -> std::fmt::Result {
         if point.len() == self.ndim() {
@@ -289,7 +338,7 @@ impl Tensor for CPUTensor {
         let mut new_shape: Vec<usize> = lhs_survivors.to_vec();
         new_shape.extend_from_slice(rhs_survivors);
 
-        let mut new = Self {
+        let new = Self {
             data: vec![0.0; Self::len(new_shape.as_slice())],
             shape: new_shape,
         };
@@ -297,16 +346,49 @@ impl Tensor for CPUTensor {
         let mut new_point = vec![0; new.shape.len()];
         let null = vec![0; depth];
 
-        let mut lhs_point = vec![0; self.ndim()];
-        let lhs_contraction_point = lhs_point.len() - depth;
-        let lhs_survival_point = depth;
+        let mut point_iter: Vec<Vec<usize>> = Vec::new();
+        point_iter.resize_with(Self::len(&new.shape), || {
+            let this_point = new_point.clone();
+            for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
+                if *p == *s - 1 {
+                    *p = 0;
+                } else {
+                    *p += 1;
+                    break;
+                }
+            }
+            this_point
+        });
 
-        let mut rhs_point = vec![0; other.ndim()];
-        let rhs_contraction_point = depth;
-        // if i dont force the evaluation of (new_point.len() - lhs_survivors.len()) first ill underflow
-        let rhs_survival_point = rhs_point.len() - (new_point.len() - depth);
+        use std::cell::UnsafeCell;
 
-        'iterate: loop {
+        struct SyncWorkaroundNeverUseThis<T>(UnsafeCell<T>);
+        unsafe impl<T> Sync for SyncWorkaroundNeverUseThis<T> {}
+
+        impl<T> SyncWorkaroundNeverUseThis<T> {
+            fn new(value: T) -> Self {
+                Self(UnsafeCell::new(value))
+            }
+            
+            unsafe fn get(&self) -> *mut T {
+                self.0.get()
+            }
+
+            fn into_inner(self) -> T {
+                self.0.into_inner()
+            }
+        }
+
+        let new_ref = SyncWorkaroundNeverUseThis::new(new);
+        point_iter.into_par_iter().for_each(|new_point| {
+            let mut lhs_point = vec![0; self.ndim()];
+            let mut rhs_point = vec![0; other.ndim()];
+            let lhs_contraction_point = lhs_point.len() - depth;
+            let lhs_survival_point = depth;
+
+            let rhs_contraction_point = depth;
+            // if i dont force the evaluation of (new_point.len() - lhs_survivors.len()) first ill underflow
+            let rhs_survival_point = rhs_point.len() - (new_point.len() - depth);
             lhs_point[lhs_contraction_point..].copy_from_slice(&null);
             lhs_point[..lhs_survival_point].copy_from_slice(&new_point[..depth]);
             rhs_point[..rhs_contraction_point].copy_from_slice(&null);
@@ -314,14 +396,12 @@ impl Tensor for CPUTensor {
             let mut sum = 0.0;
             'summate: loop {
                 sum += *self.get(&lhs_point).unwrap() * *other.get(&rhs_point).unwrap();
+                
+                for (i, s) in contraction_shape.iter().enumerate() {
+                    let last = lhs_point.len() - i - 1;
+                    let p_lhs = &mut lhs_point[last];
+                    let p_rhs = &mut rhs_point[i];
 
-                for ((p_rhs, p_lhs), s) in lhs_point
-                    .iter_mut()
-                    .rev()
-                    .take(lhs_contraction.len())
-                    .zip(rhs_point.iter_mut().take(lhs_contraction.len()))
-                    .zip(contraction_shape.iter())
-                {
                     if *p_rhs == *s - 1 {
                         *p_rhs = 0;
                         *p_lhs = 0;
@@ -335,21 +415,12 @@ impl Tensor for CPUTensor {
                 break;
             }
 
-            *new.get_mut(&new_point).unwrap() = sum;
-
-            for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
-                if *p == *s - 1 {
-                    *p = 0;
-                } else {
-                    *p += 1;
-                    continue 'iterate;
-                }
+            unsafe {
+                *new_ref.get().as_mut().unwrap().get_mut(&new_point).unwrap() = sum;
             }
+        });
 
-            break;
-        }
-
-        Some(new)
+        Some(new_ref.into_inner())
     }
 
     fn sum(&self) -> Self {
@@ -357,27 +428,27 @@ impl Tensor for CPUTensor {
     }
 
     fn ln(mut self) -> Self {
-        self.data.iter_mut().for_each(|x| *x = x.ln());
+        self.data.par_iter_mut().for_each(|x| *x = x.ln());
         self
     }
 
     fn exp(mut self) -> Self {
-        self.data.iter_mut().for_each(|x| *x = x.exp());
+        self.data.par_iter_mut().for_each(|x| *x = x.exp());
         self
     }
 
     fn pow(mut self, i: i32) -> Self {
-        self.data.iter_mut().for_each(|x| *x = x.powi(i));
+        self.data.par_iter_mut().for_each(|x| *x = x.powi(i));
         self
     }
 
     fn neg(mut self) -> Self {
-        self.data.iter_mut().for_each(|x| *x = -*x);
+        self.data.par_iter_mut().for_each(|x| *x = -*x);
         self
     }
 
     fn max(mut self, y: f64) -> Self {
-        self.data.iter_mut().for_each(|x| *x = x.max(y));
+        self.data.par_iter_mut().for_each(|x| *x = x.max(y));
         self
     }
 }

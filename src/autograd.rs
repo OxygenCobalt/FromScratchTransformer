@@ -196,19 +196,17 @@ impl<T: SharpTensor> Operation<T> {
         .unwrap();
 
         let mut new_point = vec![0; grad.ndim()];
+        let mut lhs_point = vec![0; lhs.tensor.ndim()];
+        let mut rhs_point = vec![0; rhs.tensor.ndim()];
         'iterate: loop {
-            let lhs_point: Vec<usize> = new_point
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i < lhs.tensor.ndim())
-                .map(|(i, x)| x % lhs.tensor.shape()[i])
-                .collect();
-            let rhs_point: Vec<usize> = new_point
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i < rhs.tensor.ndim())
-                .map(|(i, x)| x % rhs.tensor.shape()[i])
-                .collect();
+            for (i, v) in new_point.iter().enumerate() {
+                if i < lhs_point.len() {
+                    lhs_point[i] = v % lhs.tensor.shape()[i];
+                }
+                if i < rhs_point.len() {
+                    rhs_point[i] = v % rhs.tensor.shape()[i];
+                }
+            }
             let (lhs_lgrad, rhs_lgrad) = op(
                 lhs.tensor.get(&lhs_point).unwrap(),
                 rhs.tensor.get(&rhs_point).unwrap(),

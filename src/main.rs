@@ -1,6 +1,8 @@
 use std::{marker::PhantomData, num::NonZeroUsize, path::{Path, PathBuf}, sync::LazyLock};
 
+use colored::Colorize;
 use rand_distr::{Distribution, Normal};
+use rayon::{ThreadPool, ThreadPoolBuilder};
 
 use crate::{
     activation::Activation, embeddings::{HashedEmbeddings, TrainEmbeddings}, loss::MSE, nn::{Checkpoint, Hyperparams, Layer, NeuralNetwork}, tensor::{CPUTensor, Fill, Generate, Tensor}, wikitext::WikiText103
@@ -23,6 +25,9 @@ static NORMAL2: LazyLock<Normal<f64>> =
 
 
 fn main() {
+    let threads = std::thread::available_parallelism().unwrap().get() / 4;
+    println!("{}: using {} threads", "init".white(), threads);
+    ThreadPoolBuilder::new().num_threads(threads).build_global().unwrap();
     // for i in 0..1000 {
     //     let a = CPUTensor::tensor(Generate { shape: vec![1023, 381], with: || NORMAL2.sample(&mut rand::rng()) }).unwrap();
     //     let b = CPUTensor::tensor(Generate { shape: vec![381, 12], with: || NORMAL2.sample(&mut rand::rng()) }).unwrap();
@@ -55,7 +60,7 @@ fn main() {
         },
     ]);
     let hyperparams = Hyperparams {
-        epochs: 1,
+        epochs: 30,
         batch_size: 10,
         learning_rate: 3.0
     };
