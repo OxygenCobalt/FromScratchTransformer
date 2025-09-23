@@ -6,7 +6,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ArrowReaderBuilder;
 
 use crate::{
-    loss::Loss, nn::{Example, NeuralNetwork, Test, Train, TrainingSetup}, tensor::Tensor
+    loss::Loss, nn::{Example, NeuralNetwork, Reporting, Test, Train, TrainingSet}, tensor::Tensor
 };
 
 pub struct MNIST<T: Tensor> {
@@ -14,12 +14,36 @@ pub struct MNIST<T: Tensor> {
     test: Test<T>
 }
 
-impl <T: Tensor> TrainingSetup<T> for MNIST<T> {
-    fn train(&self) -> &Train<T> {
-        &self.train
+impl <T: Tensor> MNIST<T> {
+    pub fn load(at: &Path) -> Result<Self, parquet::errors::ParquetError> {
+        let train = load_mnist(&at.join("mnist/train-00000-of-00001.parquet"))?;
+        let test = load_mnist(&at.join("./mnist/test-00000-of-00001.parquet"))?;
+        println!(
+            "{}: {} / {}",
+            "mnist".green(),
+            format!["{} train examples", train.len()],
+            format!["{} test examples", test.len()]
+        );
+        let dataset = MNIST {
+            train: Train {
+                examples: train,
+            },
+            test: Test {
+                examples: test,
+            }
+        };
+        Ok(dataset)
     }
+}
 
-    fn report(&self, _: Option<u64>, loss: &impl Loss, nn: &NeuralNetwork<T>) -> std::io::Result<()> {
+impl <T: Tensor> TrainingSet<T> for MNIST<T> {
+    fn get(&self) -> std::io::Result<Train<T>> {
+        Ok(self.train.clone())
+    }
+}
+
+impl <'a, T: Tensor> Reporting<T> for MNIST<T> {
+    fn report(&self, nn: &NeuralNetwork<T>, loss: &impl Loss, _: Option<u64>) -> std::io::Result<()> {
         fn argmax<T: Tensor>(tensor: &T) -> usize {
             tensor.iter().enumerate().max_by(|(_, x), (_, y)| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)).unwrap().0
         }
@@ -31,26 +55,6 @@ impl <T: Tensor> TrainingSetup<T> for MNIST<T> {
         println!("{}: avg loss = {:.3}, success = {} / {} ({:.2}%)", "mnist".green(), results.avg_loss, successes, results.results.len(), percent);
         Ok(())
     }
-}
-
-pub fn mnist<T: Tensor>(at: &Path) -> Result<MNIST<T>, parquet::errors::ParquetError> {
-    let train = load_mnist(&at.join("mnist/train-00000-of-00001.parquet"))?;
-    let test = load_mnist(&at.join("./mnist/test-00000-of-00001.parquet"))?;
-    println!(
-        "{}: {} / {}",
-        "mnist".green(),
-        format!["{} train examples", train.len()],
-        format!["{} test examples", test.len()]
-    );
-    let dataset = MNIST {
-        train: Train {
-            examples: train,
-        },
-        test: Test {
-            examples: test,
-        }
-    };
-    Ok(dataset)
 }
 
 fn load_mnist<T: Tensor>(path: &Path) -> Result<Vec<Example<T>>, parquet::errors::ParquetError> {

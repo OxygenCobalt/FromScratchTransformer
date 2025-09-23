@@ -1,4 +1,4 @@
-use std::{cell::{Cell, UnsafeCell}, fmt::Debug, io::{self, Read, Write}, iter};
+use std::{fmt::Debug, io::{self, Read, Write}};
 
 use rayon::prelude::*;
 
@@ -195,56 +195,6 @@ impl CPUTensor {
             break;
         }
         Some(new)
-    }
-
-    fn populate(shape: Vec<usize>, op: impl Fn(&[usize]) -> f64 + Sync) -> Self {
-
-        let new = Self {
-            data: vec![0.0; Self::len(&shape)],
-            shape,
-        };
-
-        let mut new_point = vec![0; new.shape.len()];
-        let mut point_iter: Vec<Vec<usize>> = Vec::new();
-        point_iter.resize_with(Self::len(&new.shape), || {
-            let this_point = new_point.clone();
-            for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
-                if *p == *s - 1 {
-                    *p = 0;
-                } else {
-                    *p += 1;
-                    break;
-                }
-            }
-            this_point
-        });
-
-        struct SyncWorkaroundNeverUseThis<T>(UnsafeCell<T>);
-        unsafe impl<T> Sync for SyncWorkaroundNeverUseThis<T> {}
-
-        impl<T> SyncWorkaroundNeverUseThis<T> {
-            fn new(value: T) -> Self {
-                Self(UnsafeCell::new(value))
-            }
-            
-            unsafe fn get(&self) -> *mut T {
-                self.0.get()
-            }
-
-            fn into_inner(self) -> T {
-                self.0.into_inner()
-            }
-        }
-
-        let new_ref = SyncWorkaroundNeverUseThis::new(new);
-        point_iter.into_par_iter().for_each(|new_point| {
-            let x = op(&new_point);
-            unsafe {
-                *new_ref.get().as_mut().unwrap().get_mut(&new_point).unwrap() = x;
-            }
-        });
-
-        new_ref.into_inner()
     }
 
     fn debug_shape(&self, f: &mut std::fmt::Formatter<'_>, point: Vec<usize>) -> std::fmt::Result {
@@ -503,7 +453,7 @@ impl TensorIO for CPUTensor {
         if &signature != b"CPUTensr" {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
-                "invalid tesnor signature",
+                "invalid tensor signature",
             ));
         }
         let mut ndimb = [0u8; 8];
@@ -513,9 +463,9 @@ impl TensorIO for CPUTensor {
         for s in &mut shape {
             let mut dim = [0u8; 8];
             read.read(&mut dim)?;
-            *s = usize::from_le_bytes(ndimb);
+            *s = usize::from_le_bytes(dim);
         }
-        let size = Self::len(shape.as_slice()) * 8;
+        let size = Self::len(shape.as_slice());
         let mut data = vec![0.0; size];
         for d in &mut data {
             let mut x = [0u8; 8];
@@ -529,10 +479,10 @@ impl TensorIO for CPUTensor {
         write.write_all(b"CPUTensr")?;
         write.write_all(&self.shape.len().to_le_bytes())?;
         for s in &self.shape {
-            write.write_all(&s.to_be_bytes())?;
+            write.write_all(&s.to_le_bytes())?;
         }
         for x in &self.data {
-            write.write_all(&x.to_be_bytes())?;
+            write.write_all(&x.to_le_bytes())?;
         }
         Ok(())
     }

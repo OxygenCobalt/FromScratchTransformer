@@ -17,22 +17,10 @@ use super::{
 };
 
 pub struct NeuralNetwork<T: Tensor> {
-    axons: Vec<Axon<T>>,
+    axons: Vec<Axon<T>>
 }
 
 impl <T: Tensor> NeuralNetwork<T> {
-    pub fn new(layers: &[Layer]) -> Self {
-        if layers.len() < 2 {
-            panic!("not enough layers");
-        }
-        let mut axons = vec![];
-        for i in 0..(layers.len() - 1) {
-            axons.push(layers[i].axon(&layers[i + 1]));
-        }
-
-        Self { axons }
-    }
-
     pub fn test(
         &self,
         test: &Test<T>,
@@ -63,19 +51,26 @@ impl <T: Tensor> NeuralNetwork<T> {
 
 impl <T: SharpTensor> NeuralNetwork<T> {
     pub fn train(
-        &mut self,
-        train: &impl TrainingSetup<T>,
-        hyperparams: Hyperparams,
+        setup: &impl Setup<T>,
+        reporting: &impl Reporting<T>,
+        training_set: &impl TrainingSet<T>,
+        hyperparams: &Hyperparams,
         loss: &impl Loss,
-    ) -> io::Result<()> {
+    ) -> io::Result<Self> {
         println!("{}: epochs = {} / batch size = {} / learning rate = {}", 
             "train".cyan(),
             hyperparams.epochs,
             hyperparams.batch_size,
             hyperparams.learning_rate);
-        train.report(None, loss, self)?;
-        for epoch in 0..hyperparams.epochs {
-            let batches = train.train().batch(hyperparams.batch_size);
+        let mut init = setup.setup()?;
+        let start = init.at_epoch.unwrap_or(0);
+        if start > hyperparams.epochs {
+            return Err(io::Error::new(io::ErrorKind::Other, "invalid setup, epoch exceeds training parameters"))
+        }
+        println!("{}: starting w/nn @ {}", "train".cyan(), init.at_epoch.map(|e| format!["epoch {}", e + 1]).unwrap_or_else(|| "init".to_string()));
+        reporting.report(&init.nn, loss, None)?;
+        for epoch in init.at_epoch.unwrap_or(0)..hyperparams.epochs {
+            let batches = training_set.get()?.batch(hyperparams.batch_size);
             let sgd_bar = ProgressBar::new(batches.len() as u64)
                 .with_style(ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}] / avg batch loss = {msg}")
                                 .unwrap()
@@ -84,7 +79,7 @@ impl <T: SharpTensor> NeuralNetwork<T> {
             let mut total_loss = 0.0;
             for (i, batch) in batches.into_iter().enumerate() {
                 let auto_axons: Vec<Axon<Autograd<T>>> =
-                    self.axons.iter_mut().map(|a| a.train()).collect();
+                    init.nn.axons.iter_mut().map(|a| a.train()).collect();
                 let mut current = Autograd::new(batch.input);
                 for axon in &auto_axons {
                     current = axon.forward(&current)
@@ -98,16 +93,16 @@ impl <T: SharpTensor> NeuralNetwork<T> {
                 std::mem::drop(current);
 
                 let c = hyperparams.learning_rate / hyperparams.batch_size as f64;
-                for (axon, auto_axon) in self.axons.iter_mut().zip(auto_axons.into_iter()) {
+                for (axon, auto_axon) in init.nn.axons.iter_mut().zip(auto_axons.into_iter()) {
                     axon.commit(auto_axon, c);
                 }
                 sgd_bar.inc(1);
                 sgd_bar.set_message(format!["{:.3}", total_loss / (i + 1) as f64]);
             }
             sgd_bar.finish();
-            train.report(Some(epoch), loss, self)?;
+            reporting.report(&init.nn, loss, Some(epoch))?;
         }
-        Ok(())
+        Ok(init.nn)
     }
 }
 
@@ -179,33 +174,96 @@ impl <T: Tensor> Train<T> {
     }
 }
 
-pub trait TrainingSetup<T: Tensor> {
-    fn train(&self) -> &Train<T>;
-    fn report(&self, epoch: Option<u64>, loss: &impl Loss, nn: &NeuralNetwork<T>) -> io::Result<()>;
+pub trait Setup<T: Tensor> {
+    fn setup(&self) -> io::Result<Init<T>>;
 }
 
-pub struct NoReporting<'a, T: Tensor>(pub &'a Train<T>);
+pub trait Reporting<T: Tensor> {
+    fn report(&self, nn: &NeuralNetwork<T>, loss: &impl Loss, epoch: Option<u64>) -> io::Result<()>;
+}
 
-impl <'a, T: Tensor> TrainingSetup<T> for NoReporting<'a, T> {
-    fn train(&self) -> &Train<T> {
-        &self.0
-    }
+pub trait TrainingSet<T: Tensor> {
+    fn get(&self) -> io::Result<Train<T>>;
+}
 
-    fn report(&self, _: Option<u64>, _: &impl Loss, _: &NeuralNetwork<T>) -> io::Result<()> {
-        Ok(())
+pub struct Init<T: Tensor> {
+    nn: NeuralNetwork<T>,
+    at_epoch: Option<u64>
+}
+
+
+pub struct Layers(Vec<Layer>);
+
+impl Layers {
+    pub fn new(layers: Vec<Layer>) -> Option<Self> {
+        if layers.len() < 2 {
+            return None;
+        }
+        Some(Self(layers))
     }
 }
 
-pub struct Checkpoint<'a, T: TensorIO, R: TrainingSetup<T>>(pub &'a R, pub PathBuf, pub PhantomData<T>);
+impl <T: Tensor> Setup<T> for Layers {
+    fn setup(&self) -> io::Result<Init<T>> {
+        let mut axons = vec![];
+        for i in 0..(self.0.len() - 1) {
+            axons.push(self.0[i].axon(&self.0[i + 1]));
+        }
+        Ok(Init {
+            nn: NeuralNetwork { axons },
+            at_epoch: None
+        })
+    }
+}
 
-impl <'a,  T: TensorIO, R: TrainingSetup<T>> TrainingSetup<T> for Checkpoint<'a, T, R> {
-    fn train(&self) -> &Train<T> {
-        self.0.train()
+pub struct Checkpoint<'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> {
+    setup: &'a S,
+    reporting: &'a R,
+    path: &'a Path,
+    data: PhantomData<T>
+}
+
+impl <'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Checkpoint<'a, T, S, R> {
+    pub fn new(setup: &'a S, reporting: &'a R, path: &'a Path) -> Self {
+        Self {
+            setup,
+            reporting,
+            path,
+            data: PhantomData
+        }
     }
 
-    fn report(&self, epoch: Option<u64>, loss: &impl Loss, nn: &NeuralNetwork<T>) -> io::Result<()> {
-        self.0.report(epoch,  loss, nn)?;
-        let path = self.1.join(Path::new(&format!["{}.nn", epoch.map(|e| (e + 1).to_string()).unwrap_or_else(|| "init".to_string())]));
+    fn checkpoint_path(&self, epoch: Option<u64>) -> PathBuf {
+        self.path.join(Path::new(&format!["{}.nn", epoch.map(|e| (e + 1).to_string()).unwrap_or_else(|| "init".to_string())]))
+    }
+}
+
+impl <'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Setup<T> for Checkpoint<'a, T, S, R> {
+    fn setup(&self) -> io::Result<Init<T>> {
+        fn open<T: TensorIO>(path: PathBuf) -> io::Result<NeuralNetwork<T>> {
+            let mut file = File::open(path)?;
+            let nn = NeuralNetwork::read(&mut file)?;
+            Ok(nn)
+        }
+        let amount = self.path.read_dir()?.count();
+        for epoch in (0..amount).map(|i| Some(i as u64)).rev().chain(std::iter::once(None)) {
+            let path = self.checkpoint_path(epoch);
+            if let Ok(nn) = open(path) {
+                println!("{}: located checkpointed nn at epoch {}", "checkpoint".red(), epoch.map(|e| (e + 1).to_string()).unwrap_or_else(|| "init".to_string()));
+                return Ok(Init {
+                    nn,
+                    at_epoch: epoch
+                })
+            }
+        }
+        self.setup.setup()
+    }
+}
+
+impl <'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Reporting<T> for Checkpoint<'a, T, S, R> {
+    fn report(&self, nn: &NeuralNetwork<T>, loss: &impl Loss, epoch: Option<u64>) -> io::Result<()> {
+        self.reporting.report(nn, loss, epoch)?;
+        let path = self.checkpoint_path(epoch);
         println!("{}: writing nn to {}", "checkpoint".red(), path.display().to_string());
         let mut file = File::create(path)?;
         nn.write(&mut file)?;
