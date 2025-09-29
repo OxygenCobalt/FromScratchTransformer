@@ -4,7 +4,7 @@ use colored::Colorize;
 use rayon::ThreadPoolBuilder;
 
 use crate::{
-    activation::Activation, loss::MSE, mnist::MNIST, nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork}, tensor::CPUTensor
+    activation::Activation, loss::MSE, mnist::MNIST, nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork}, tensor::{CPUTensor, Field}
 };
 
 mod activation;
@@ -28,17 +28,15 @@ fn main() {
     let mnist = MNIST::<CPUTensor>::load(Path::new("data/mnist")).unwrap();
     let layers = Layers::new(
 vec![
-            Layer::Dense {
-                neurons: 784,
-                activation: Activation::Sigmoid,
+            Layer::Conv2D {
+                input_size: 28,
+                field: Field { size: 5, stride: 1},
+                filters: 20,
+                activation: Activation::ReLU,
             },
-            Layer::Dropout {
+            Layer::Dense {
                 neurons: 100,
-                activation: Activation::Sigmoid,
-                rate: 0.01
-            },
-            Layer::Dense {
-                neurons: 10,
+                // TODO: softmax
                 activation: Activation::Sigmoid,
             },
         ]

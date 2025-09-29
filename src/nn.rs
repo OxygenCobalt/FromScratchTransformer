@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use std::io::{self, Read, Write};
 use rand::seq::SliceRandom;
 
-use crate::tensor::{Generate, SharpTensor, Tensor, TensorIO, Th};
+use crate::tensor::{Field, Generate, Tensor, TensorIO, TensorMut, Th};
 
 use super::{
     activation::Activation,
@@ -49,7 +49,7 @@ impl <T: Tensor> NeuralNetwork<T> {
     }
 }
 
-impl <T: SharpTensor> NeuralNetwork<T> {
+impl <T: TensorMut> NeuralNetwork<T> {
     pub fn train(
         setup: &impl Setup<T>,
         reporting: &impl Reporting<T>,
@@ -291,7 +291,7 @@ pub struct TestResult<T: Tensor> {
     pub activations: T
 }
 
-pub static NORMAL: LazyLock<Normal<f64>> =
+static NORMAL: LazyLock<Normal<f64>> =
     std::sync::LazyLock::new(|| Normal::new(0.0, 1.0).unwrap());
 
 pub enum Layer {
@@ -304,6 +304,15 @@ pub enum Layer {
         rate: f64,
         activation: Activation,
     },
+    Conv2D {
+        input_size: usize,
+        field: Field,
+        filters: usize,
+        activation: Activation
+    }
+}
+pub enum Pooling {
+    Max
 }
 
 impl Layer {
@@ -323,6 +332,9 @@ impl Layer {
                 ff: FeedForward::new(last.activation_shape()[0], *neurons, *activation),
                 rate: *rate,
             },
+            Self::Conv2D { field, filters, activation, .. } => {
+                Axon::Conv2D { conv: Conv2D::new(*field, *filters, *activation) }
+            }
         }
     }
 
@@ -330,78 +342,17 @@ impl Layer {
         match self {
             Self::Dense { neurons, .. } => vec![*neurons],
             Self::Dropout { neurons, .. } => vec![*neurons],
+            // todo: validate locations_on during layer creation, also stop calling it twice
+            Self::Conv2D  { input_size, field, filters, .. } => vec![*filters, field.locations_on(*input_size).unwrap(), field.locations_on(*input_size).unwrap()]
         }
-    }
-}
-
-struct FeedForward<T: Tensor> {
-    weights: T,
-    biases: T,
-    activation: Activation,
-}
-
-impl<T: Tensor> FeedForward<T> {
-    fn new(last: usize, next: usize, activation: Activation) -> Self {
-        Self {
-            weights: T::tensor(Generate {
-                shape: vec![last, next],
-                with: || NORMAL.sample(&mut rand::rng()),
-            })
-            .unwrap(),
-            biases: T::tensor(Generate {
-                shape: vec![last],
-                with: || NORMAL.sample(&mut rand::rng()),
-            })
-            .unwrap(),
-            activation,
-        }
-    }
-
-    fn forward(&self, activations: &T) -> T {
-        self.activation.activate(
-            self.weights
-                .dot(&activations, 1)
-                .unwrap()
-                .add(&self.biases)
-                .unwrap(),
-        )
-    }
-}
-
-impl<T: TensorIO> FeedForward<T> {
-    fn read(read: &mut impl Read) -> io::Result<Self> {
-        let mut signature = [0u8; 8];
-        read.read(&mut signature)?;
-        if &signature != b"FeedFrwd" {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "invalid feedforward signature",
-            ));
-        }
-        let mut activation_id = [0u8; 8];
-        read.read(&mut activation_id)?;
-        let activation = Activation::from_id(&activation_id)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "invalid feedforward signature"))?;
-        let weights = T::read(read)?;
-        let biases = T::read(read)?;
-        Ok(Self {
-            activation,
-            weights,
-            biases,
-        })
-    }
-
-    fn write(&self, write: &mut impl Write) -> io::Result<()> {
-        write.write_all(b"FeedFrwd")?;
-        write.write_all(self.activation.id())?;
-        self.weights.write(write)?;
-        self.biases.write(write)
     }
 }
 
 enum Axon<T: Tensor> {
     Dense { ff: FeedForward<T> },
     Dropout { ff: FeedForward<T>, rate: f64 },
+    Conv2D { conv: Conv2D<T> },
+
 }
 
 impl<T: Tensor> Axon<T> {
@@ -409,11 +360,12 @@ impl<T: Tensor> Axon<T> {
         match self {
             Self::Dense { ff } => ff.forward(activations),
             Self::Dropout { ff, .. } => ff.forward(activations),
+            Self::Conv2D { conv } => conv.forward(activations)
         }
     }
 }
 
-impl<T: SharpTensor> Axon<T> {
+impl<T: TensorMut> Axon<T> {
     fn train<'a>(&'a mut self) -> Axon<Autograd<T>> {
         match self {
             Self::Dense { ff } => Axon::Dense {
@@ -440,6 +392,9 @@ impl<T: SharpTensor> Axon<T> {
                         activation: ff.activation,
                     },
                 }
+            },
+            Self::Conv2D { conv } => {
+                Axon::Conv2D { conv: Conv2D { filters: Autograd::new(conv.filters.clone()), field: conv.field, activation: conv.activation } }
             }
         }
     }
@@ -506,7 +461,97 @@ impl<T: TensorIO> Axon<T> {
                 write.write_all(b"AxonDrop")?;
                 write.write_all(&rate.to_le_bytes())?;
                 ff.write(write)
+            },
+            Self::Conv2D { conv } => {
+                todo!()
             }
         }
+    }
+}
+
+
+struct FeedForward<T: Tensor> {
+    weights: T,
+    biases: T,
+    activation: Activation,
+}
+
+impl<T: Tensor> FeedForward<T> {
+    fn new(last: usize, next: usize, activation: Activation) -> Self {
+        Self {
+            weights: T::tensor(Generate {
+                shape: vec![last, next],
+                with: || NORMAL.sample(&mut rand::rng()),
+            })
+            .unwrap(),
+            biases: T::tensor(Generate {
+                shape: vec![last],
+                with: || NORMAL.sample(&mut rand::rng()),
+            })
+            .unwrap(),
+            activation,
+        }
+    }
+
+    fn forward(&self, activations: &T) -> T {
+        self.activation.activate(
+            self.weights
+                .dot(&activations, 1)
+                .unwrap()
+                .add(&self.biases)
+                .unwrap(),
+        )
+    }
+}
+
+impl<T: TensorIO> FeedForward<T> {
+    fn read(read: &mut impl Read) -> io::Result<Self> {
+        let mut signature = [0u8; 8];
+        read.read(&mut signature)?;
+        if &signature != b"FeedFrwd" {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "invalid feedforward signature",
+            ));
+        }
+        let mut activation_id = [0u8; 8];
+        read.read(&mut activation_id)?;
+        let activation = Activation::from_id(&activation_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "invalid feedforward signature"))?;
+        let weights = T::read(read)?;
+        let biases = T::read(read)?;
+        Ok(Self {
+            activation,
+            weights,
+            biases,
+        })
+    }
+
+    fn write(&self, write: &mut impl Write) -> io::Result<()> {
+        write.write_all(b"FeedFrwd")?;
+        write.write_all(self.activation.id())?;
+        self.weights.write(write)?;
+        self.biases.write(write)
+    }
+}
+
+struct Conv2D<T: Tensor> {
+    filters: T,
+    field: Field,
+    activation: Activation
+}
+
+impl <T: Tensor> Conv2D<T> {
+    fn new(field: Field, filters: usize, activation: Activation) -> Self {
+        // dont have anything to make column-wise tensors just yet, instead hack around
+        // w/a transpose lol
+        Self {
+            filters: T::tensor(Generate { shape: vec![field.size, field.size, filters], with: || NORMAL.sample(&mut rand::rng()) }).unwrap(),
+            field,
+            activation
+        }
+    }
+    fn forward(&self, activations: &T) -> T {
+        activations.conv2d(&self.filters, self.field.stride).unwrap()
     }
 }

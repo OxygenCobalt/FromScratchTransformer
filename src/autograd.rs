@@ -1,13 +1,13 @@
 use std::{cell::RefCell, rc::Rc};
 
-use crate::tensor::{Fill, TensorInit};
+use crate::tensor::{Field, Fill, TensorInit};
 
-use super::tensor::{SharpTensor, Tensor};
+use super::tensor::{TensorMut, Tensor};
 
 #[derive(Clone)]
-pub struct Autograd<T: SharpTensor>(AutogradNode<T>);
+pub struct Autograd<T: TensorMut>(AutogradNode<T>);
 
-impl<T: SharpTensor> Autograd<T> {
+impl<T: TensorMut> Autograd<T> {
     pub fn new(matrix: T) -> Self {
         Self(Rc::new(Computation {
             tensor: matrix,
@@ -25,7 +25,7 @@ impl<T: SharpTensor> Autograd<T> {
     }
 }
 
-impl<T: SharpTensor> Tensor for Autograd<T> {
+impl<T: TensorMut> Tensor for Autograd<T> {
     fn scalar(c: impl Into<f64>) -> Self {
         Self::new(T::scalar(c))
     }
@@ -110,17 +110,21 @@ impl<T: SharpTensor> Tensor for Autograd<T> {
     fn max(self, y: f64) -> Self {
         Operation::Max { t: self.0, u: y }.forward().unwrap()
     }
+
+    fn conv2d(&self, filter: &Self, stride: usize) -> Option<Self> {
+        Operation::Conv2d { t: self.0.clone(), filters: filter.0.clone(), stride }.forward()
+    }
 }
 
 type AutogradNode<T> = Rc<Computation<T>>;
 
-struct Computation<T: SharpTensor> {
+struct Computation<T: TensorMut> {
     tensor: T,
     grad: RefCell<Option<T>>,
     op: Option<Operation<T>>,
 }
 
-impl<T: SharpTensor> Computation<T> {
+impl<T: TensorMut> Computation<T> {
     fn backward_init(&self) {
         self.backward(T::scalar(1.0));
     }
@@ -137,7 +141,7 @@ impl<T: SharpTensor> Computation<T> {
     }
 }
 
-enum Operation<T: SharpTensor> {
+enum Operation<T: TensorMut> {
     Add {
         lhs: AutogradNode<T>,
         rhs: AutogradNode<T>,
@@ -175,9 +179,14 @@ enum Operation<T: SharpTensor> {
         t: AutogradNode<T>,
         u: f64,
     },
+    Conv2d {
+        t: AutogradNode<T>,
+        filters: AutogradNode<T>,
+        stride: usize
+    }
 }
 
-impl<T: SharpTensor> Operation<T> {
+impl<T: TensorMut> Operation<T> {
     fn arithmetic_backward(
         lhs: &AutogradNode<T>,
         rhs: &AutogradNode<T>,
@@ -241,6 +250,7 @@ impl<T: SharpTensor> Operation<T> {
             Self::Pow { t, i } => Some(t.tensor.clone().pow(*i)),
             Self::Neg { t } => Some(t.tensor.clone().neg()),
             Self::Max { t, u } => Some(t.tensor.clone().max(*u)),
+            Self::Conv2d { t, filters, stride } => t.tensor.clone().conv2d(&filters.tensor, *stride)
         };
         tensor.map(|tensor| {
             Autograd(Rc::new(Computation {
@@ -268,7 +278,7 @@ impl<T: SharpTensor> Operation<T> {
                 rhs_axes.rotate_right(lhs_shift);
                 lhs.backward(
                     grad
-                        .dot(&rhs.tensor.tranpose(&rhs_axes).unwrap(), lhs_shift)
+                        .dot(&rhs.tensor.transpose(&rhs_axes).unwrap(), lhs_shift)
                         .unwrap(),
                 );
 
@@ -277,7 +287,7 @@ impl<T: SharpTensor> Operation<T> {
                 lhs_axes.rotate_left(rhs_shift);
                 rhs.backward(
                     lhs.tensor
-                        .tranpose(&lhs_axes)
+                        .transpose(&lhs_axes)
                         .unwrap()
                         .dot(grad, rhs_shift)
                         .unwrap(),
@@ -315,6 +325,42 @@ impl<T: SharpTensor> Operation<T> {
                 loc.iter_mut()
                     .for_each(|x| *x = if *x >= *u { 1.0 } else { 0.0 });
                 t.backward(loc.mul(grad).unwrap());
+            },
+            Self::Conv2d { t, filters, stride } => {
+                let mut new_point = vec![0; grad.shape().len()];
+                let numer = t.tensor.shape()[0] - filters.tensor.shape()[0];
+                let denom = stride + 1;
+                let size = numer / denom;
+
+                let mut t_grad = T::tensor(Fill { shape: t.tensor.shape().to_vec(), with: 0.0 }).unwrap();
+                let mut filters_grad = T::tensor(Fill { shape: t.tensor.shape().to_vec(), with: 0.0 }).unwrap();
+                
+                'iterate: loop {
+                    let center = [new_point[0] * stride, new_point[1] * stride];
+                    let half = stride / 2;
+                    let mut point = [0, 0];
+                    for i in 0..size {
+                        point[0] = center[0] - half + i;
+                        for j in 0..size {
+                            point[1] = center[1] - half + j;
+                            *t_grad.get_mut(&point).unwrap() += filters.tensor.get(&[i, j, new_point[2]]).unwrap() * grad.get(&new_point).unwrap();
+                            *filters_grad.get_mut(&point).unwrap() += t.tensor.get(&point).unwrap_or(&0.0) * *grad.get(&new_point).unwrap();
+                        }
+                    }
+
+                    for i in 0..grad.ndim() {
+                        let (p, s) = (&mut new_point[i], grad.shape()[i]);
+                        if *p == s - 1 {
+                            *p = 0;
+                        } else {
+                            *p += 1;
+                            continue 'iterate;
+                        }
+                    }
+
+                    break;
+                }
+
             }
         }
     }

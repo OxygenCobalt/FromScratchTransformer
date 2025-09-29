@@ -23,20 +23,34 @@ where
     fn sum(&self) -> Self;
     fn neg(self) -> Self;
     fn max(self, y: f64) -> Self;
+    fn conv2d(&self, filter: &Self, stride: usize) -> Option<Self>;
+}
+
+#[derive(Clone, Copy)]
+pub struct Field {
+    pub size: usize,
+    pub stride: usize
+}
+
+impl Field {
+    pub fn locations_on(&self, size: usize) -> Option<usize> {
+        let numer = size - self.size;
+        let denom = self.stride + 1;
+        if numer % denom != 0 {
+            return None
+        }
+        Some((size - self.size) / (self.stride + 1))
+    }
 }
 
 pub trait TensorInit {
     fn make(self) -> Option<(Vec<usize>, Vec<f64>)>;
 }
 
-/// a "sharp tensor" is just an extension of non-differentiable
-/// tensor methods. well, in practice things like transpose
-/// *are* differentiable, but nothing im working on needs the
-/// gradient of a transpose yet so it's also here.
-pub trait SharpTensor: Tensor {
-    fn tranpose(&self, axes: &[usize]) -> Option<Self>;
+pub trait TensorMut: Tensor {
     fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64>;
     fn iter_mut(&mut self) -> impl Iterator<Item = &mut f64>;
+    fn transpose(&self, axes: &[usize]) -> Option<Self>;
 }
 
 pub trait TensorIO: Tensor {
@@ -401,10 +415,68 @@ impl Tensor for CPUTensor {
         self.data.par_iter_mut().for_each(|x| *x = x.max(y));
         self
     }
+
+    fn conv2d(&self, filters: &Self, stride: usize) -> Option<Self> {
+        if self.ndim() != 2 || self.shape[0] != self.shape[1] {
+            return None;
+        }
+        if filters.ndim() != 3 || filters.shape[0] != filters.shape[1] {
+            return None;
+        }
+        let numer = self.shape[0] - filters.shape[0];
+        let denom = stride + 1;
+        if numer % denom != 0 {
+            return None
+        }
+        let size = numer / denom;
+        let new_shape = vec![size, size, filters.shape[2]];
+        let mut new = Self {
+            data: vec![0.0; Self::len(&new_shape)],
+            shape: new_shape
+        };
+        let mut new_point = vec![0; new.shape.len()];
+        
+        'iterate: loop {
+            let center = [new_point[0] * stride, new_point[1] * stride];
+            let half = stride / 2;
+            let mut point = [0, 0];
+            let mut sum = 0.0;
+            for i in 0..size {
+                point[0] = center[0] - half + i;
+                for j in 0..size {
+                    point[1] = center[1] - half + j;
+                    sum += self.get(&point).unwrap_or(&0.0) * filters.get(&[i, j, new_point[2]]).unwrap();
+                }
+            }
+            *new.get_mut(&new_point).unwrap() = sum;
+
+            for i in 0..self.ndim() {
+                let (p, s) = (&mut new_point[i], new.shape()[i]);
+                if *p == s - 1 {
+                    *p = 0;
+                } else {
+                    *p += 1;
+                    continue 'iterate;
+                }
+            }
+
+            break;
+        }
+
+        Some(new)
+    }
 }
 
-impl SharpTensor for CPUTensor {
-    fn tranpose(&self, axes: &[usize]) -> Option<Self> {
+impl TensorMut for CPUTensor {
+    fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64> {
+        self.point_index(point).and_then(|i| self.data.get_mut(i))
+    }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut f64> {
+        self.data.iter_mut()
+    }
+
+    fn transpose(&self, axes: &[usize]) -> Option<Self> {
         if self.shape.len() != axes.len() || axes.iter().any(|i| *i > self.shape.len()) {
             return None;
         }
@@ -435,14 +507,6 @@ impl SharpTensor for CPUTensor {
         }
 
         Some(new)
-    }
-
-    fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64> {
-        self.point_index(point).and_then(|i| self.data.get_mut(i))
-    }
-
-    fn iter_mut(&mut self) -> impl Iterator<Item = &mut f64> {
-        self.data.iter_mut()
     }
 }
 
