@@ -1,6 +1,6 @@
 use std::{cell::RefCell, rc::Rc};
 
-use crate::tensor::{Field, Fill, TensorInit};
+use crate::tensor::{Field, Fill, Generate, TensorInit};
 
 use super::tensor::{TensorMut, Tensor};
 
@@ -111,8 +111,20 @@ impl<T: TensorMut> Tensor for Autograd<T> {
         Operation::Max { t: self.0, u: y }.forward().unwrap()
     }
 
-    fn conv2d(&self, filter: &Self, stride: usize) -> Option<Self> {
-        Operation::Conv2d { t: self.0.clone(), filters: filter.0.clone(), stride }.forward()
+    fn colify(&self, field: Field) -> Option<Self> {
+        Operation::Colify { t: self.0.clone(), field }.forward()
+    }
+
+    fn colmax(&self) -> Option<Self> {
+        Operation::Colmax { t: self.0.clone() }.forward()
+    }
+
+    fn reshape(self, shape: &[usize]) -> Option<Self> {
+        Operation::Reshape { t: self.0.clone(), shape: shape.to_vec() }.forward()
+    }
+
+    fn transpose(&self, axes: &[usize]) -> Option<Self> {
+        Operation::Transpose { t: self.0.clone(), axes: axes.to_vec() }.forward()
     }
 }
 
@@ -179,10 +191,20 @@ enum Operation<T: TensorMut> {
         t: AutogradNode<T>,
         u: f64,
     },
-    Conv2d {
+    Colify {
         t: AutogradNode<T>,
-        filters: AutogradNode<T>,
-        stride: usize
+        field: Field,
+    },
+    Colmax {
+        t: AutogradNode<T>
+    },
+    Reshape {
+        t: AutogradNode<T>,
+        shape: Vec<usize>
+    },
+    Transpose {
+        t: AutogradNode<T>,
+        axes: Vec<usize>
     }
 }
 
@@ -250,7 +272,10 @@ impl<T: TensorMut> Operation<T> {
             Self::Pow { t, i } => Some(t.tensor.clone().pow(*i)),
             Self::Neg { t } => Some(t.tensor.clone().neg()),
             Self::Max { t, u } => Some(t.tensor.clone().max(*u)),
-            Self::Conv2d { t, filters, stride } => t.tensor.clone().conv2d(&filters.tensor, *stride)
+            Self::Colify { t, field } => t.tensor.colify(*field),
+            Self::Colmax { t } => t.tensor.colmax(),
+            Self::Reshape { t, shape } => t.tensor.clone().reshape(shape),
+            Self::Transpose { t, axes } => t.tensor.transpose(&axes)
         };
         tensor.map(|tensor| {
             Autograd(Rc::new(Computation {
@@ -326,41 +351,74 @@ impl<T: TensorMut> Operation<T> {
                     .for_each(|x| *x = if *x >= *u { 1.0 } else { 0.0 });
                 t.backward(loc.mul(grad).unwrap());
             },
-            Self::Conv2d { t, filters, stride } => {
-                let mut new_point = vec![0; grad.shape().len()];
-                let numer = t.tensor.shape()[0] - filters.tensor.shape()[0];
-                let denom = stride + 1;
-                let size = numer / denom;
-
+            Self::Colify { t, field } => {
                 let mut t_grad = T::tensor(Fill { shape: t.tensor.shape().to_vec(), with: 0.0 }).unwrap();
-                let mut filters_grad = T::tensor(Fill { shape: t.tensor.shape().to_vec(), with: 0.0 }).unwrap();
-                
+                let locations = field.locations_on(*t.tensor.shape().last().unwrap()).unwrap();
+                let new_shape = grad.shape();
+                let mut new_point = vec![0; new_shape.len()];
+                let mut old_point = vec![0; t.tensor.ndim()];
+                let jump = field.stride / 2;
                 'iterate: loop {
-                    let center = [new_point[0] * stride, new_point[1] * stride];
-                    let half = stride / 2;
-                    let mut point = [0, 0];
-                    for i in 0..size {
-                        point[0] = center[0] - half + i;
-                        for j in 0..size {
-                            point[1] = center[1] - half + j;
-                            *t_grad.get_mut(&point).unwrap() += filters.tensor.get(&[i, j, new_point[2]]).unwrap() * grad.get(&new_point).unwrap();
-                            *filters_grad.get_mut(&point).unwrap() += t.tensor.get(&point).unwrap_or(&0.0) * *grad.get(&new_point).unwrap();
-                        }
+                    let location_idx = new_point[new_point.len() - 2];
+                    let field_idx = new_point[new_point.len() - 1];
+                    old_point[0..new_point.len() - 2].copy_from_slice(&new_point[0..new_point.len() - 2]);
+                    old_point[new_point.len() - 2] = ((location_idx % locations) * field.stride) - jump + (field_idx % field.size);
+                    old_point[new_point.len() - 1] = ((location_idx / locations) * field.stride) - jump + (field_idx / field.size);
+                    if let Some(x) = t_grad.get_mut(&old_point) {
+                        *x = *grad.get(&new_point).unwrap();
                     }
-
-                    for i in 0..grad.ndim() {
-                        let (p, s) = (&mut new_point[i], grad.shape()[i]);
-                        if *p == s - 1 {
+                    for (p, s) in new_point.iter_mut().zip(grad.shape().iter()) {
+                        if *p == *s - 1 {
                             *p = 0;
                         } else {
                             *p += 1;
                             continue 'iterate;
                         }
                     }
-
                     break;
                 }
-
+                t.backward(t_grad);
+            },
+            Self::Colmax { t } => {
+                let mut t_grad = T::tensor(Fill { shape: t.tensor.shape().to_vec(), with: 0.0 }).unwrap();
+                let mut grad_point = vec![0; grad.ndim()];
+                let mut column_point = vec![0; t.tensor.ndim()];
+                'iterate: loop {
+                    column_point[0..grad.ndim()].copy_from_slice(&grad_point);
+                    let mut max_idx = 0;
+                    let mut max_value = f64::MIN; 
+                    for i in 0..*t.tensor.shape().last().unwrap() {
+                        *column_point.last_mut().unwrap() = i;
+                        let cur_value = t.tensor.get(&column_point).unwrap();
+                        if *cur_value > max_value {
+                            max_idx = i;
+                            max_value = *cur_value;
+                        }
+                    }
+                    *column_point.last_mut().unwrap() = max_idx;
+                    // max point, frwd here
+                    *t_grad.get_mut(&column_point).unwrap() = *grad.get(&grad_point).unwrap();
+                    for (p, s) in grad_point.iter_mut().zip(grad.shape().iter()) {
+                        if *p == *s - 1 {
+                            *p = 0;
+                        } else {
+                            *p += 1;
+                            continue 'iterate;
+                        }
+                    }
+                    break;
+                }
+                t.backward(t_grad);
+            },
+            Self::Reshape { t, .. } => {
+                t.backward(grad.clone().reshape(t.tensor.shape()).unwrap())
+            },
+            Self::Transpose { t, axes } => {
+                let mut rev_axes = vec![0; axes.len()];
+                for i in 0..axes.len() {
+                    rev_axes[axes[i]] = i;
+                }
+                t.backward(grad.transpose(&rev_axes).unwrap());
             }
         }
     }

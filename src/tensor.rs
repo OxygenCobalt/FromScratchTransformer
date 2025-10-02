@@ -23,7 +23,10 @@ where
     fn sum(&self) -> Self;
     fn neg(self) -> Self;
     fn max(self, y: f64) -> Self;
-    fn conv2d(&self, filter: &Self, stride: usize) -> Option<Self>;
+    fn colify(&self, field: Field) -> Option<Self>;
+    fn colmax(&self) -> Option<Self>;
+    fn reshape(self, shape: &[usize]) -> Option<Self>;
+    fn transpose(&self, axes: &[usize]) -> Option<Self>;
 }
 
 #[derive(Clone, Copy)]
@@ -50,7 +53,6 @@ pub trait TensorInit {
 pub trait TensorMut: Tensor {
     fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64>;
     fn iter_mut(&mut self) -> impl Iterator<Item = &mut f64>;
-    fn transpose(&self, axes: &[usize]) -> Option<Self>;
 }
 
 pub trait TensorIO: Tensor {
@@ -133,7 +135,7 @@ pub struct CPUTensor {
 }
 
 impl CPUTensor {
-    fn len(shape: &[usize]) -> usize {
+    pub fn len(shape: &[usize]) -> usize {
         if shape.is_empty() {
             return 1;
         }
@@ -416,64 +418,84 @@ impl Tensor for CPUTensor {
         self
     }
 
-    fn conv2d(&self, filters: &Self, stride: usize) -> Option<Self> {
-        if self.ndim() != 2 || self.shape[0] != self.shape[1] {
+    fn colify(&self, field: Field) -> Option<Self> {
+        if self.ndim() < 2 {
             return None;
         }
-        if filters.ndim() != 3 || filters.shape[0] != filters.shape[1] {
+        // TODO: remove invariant for square imgs
+        if *self.shape.last().unwrap() != self.shape[self.shape.len() - 2] {
             return None;
         }
-        let numer = self.shape[0] - filters.shape[0];
-        let denom = stride + 1;
-        if numer % denom != 0 {
-            return None
-        }
-        let size = numer / denom;
-        let new_shape = vec![size, size, filters.shape[2]];
+        let locations = field.locations_on(*self.shape.last().unwrap())?;
+        let new_shape: Vec<usize> = self.shape.iter().cloned().take(self.shape.len() - 2)
+            .chain([locations * locations, field.size * field.size].into_iter())
+            .collect();
         let mut new = Self {
             data: vec![0.0; Self::len(&new_shape)],
-            shape: new_shape
+            shape: new_shape.clone(),
         };
-        let mut new_point = vec![0; new.shape.len()];
-        
+        let mut new_point = vec![0; new_shape.len()];
+        let mut old_point = vec![0; self.ndim()];
+        let jump = field.stride / 2;
         'iterate: loop {
-            let center = [new_point[0] * stride, new_point[1] * stride];
-            let half = stride / 2;
-            let mut point = [0, 0];
-            let mut sum = 0.0;
-            for i in 0..size {
-                point[0] = center[0] - half + i;
-                for j in 0..size {
-                    point[1] = center[1] - half + j;
-                    sum += self.get(&point).unwrap_or(&0.0) * filters.get(&[i, j, new_point[2]]).unwrap();
-                }
-            }
-            *new.get_mut(&new_point).unwrap() = sum;
+            let location_idx = new_point[new_point.len() - 2];
+            let field_idx = new_point[new_point.len() - 1];
+            old_point[0..new_point.len() - 2].copy_from_slice(&new_point[0..new_point.len() - 2]);
+            old_point[new_point.len() - 2] = ((location_idx % locations) * field.stride) - jump + (field_idx % field.size);
+            old_point[new_point.len() - 1] = ((location_idx / locations) * field.stride) - jump + (field_idx / field.size);
+            *new.get_mut(&new_point).unwrap() = *self.get(&old_point).unwrap_or(&0.0);
 
-            for i in 0..self.ndim() {
-                let (p, s) = (&mut new_point[i], new.shape()[i]);
-                if *p == s - 1 {
+            for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
+                if *p == *s - 1 {
                     *p = 0;
                 } else {
                     *p += 1;
                     continue 'iterate;
                 }
             }
-
             break;
         }
-
         Some(new)
     }
-}
 
-impl TensorMut for CPUTensor {
-    fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64> {
-        self.point_index(point).and_then(|i| self.data.get_mut(i))
+    fn colmax(&self) -> Option<Self> {
+        if self.ndim() == 0 {
+            return None;
+        }
+        let new_shape: Vec<usize> = self.shape.iter().cloned().take(self.shape.len() - 1).collect();
+        let mut new = Self {
+            data: vec![0.0; Self::len(&new_shape)],
+            shape: new_shape.clone(),
+        };
+        let mut new_point = vec![0; new_shape.len()];
+        let mut column_point = vec![0; self.shape.len()];
+        'iterate: loop {
+            column_point[0..new_shape.len() ].copy_from_slice(&new_point);
+            for i in 0..*self.shape.last().unwrap() {
+                *column_point.last_mut().unwrap() = i;
+                if *self.get(&column_point).unwrap() > *new.get(&new_point).unwrap() {
+                    *new.get_mut(&new_point).unwrap() = *self.get(&column_point).unwrap();
+                }
+            }
+            for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
+                if *p == *s - 1 {
+                    *p = 0;
+                } else {
+                    *p += 1;
+                    continue 'iterate;
+                }
+            }
+            break;
+        }
+        Some(new)
     }
 
-    fn iter_mut(&mut self) -> impl Iterator<Item = &mut f64> {
-        self.data.iter_mut()
+    fn reshape(mut self, shape: &[usize]) -> Option<Self> {
+        if Self::len(shape) != Self::len(&self.shape) {
+            return None;
+        }
+        self.shape = shape.to_vec();
+        Some(self)
     }
 
     fn transpose(&self, axes: &[usize]) -> Option<Self> {
@@ -507,6 +529,16 @@ impl TensorMut for CPUTensor {
         }
 
         Some(new)
+    }
+}
+
+impl TensorMut for CPUTensor {
+    fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64> {
+        self.point_index(point).and_then(|i| self.data.get_mut(i))
+    }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut f64> {
+        self.data.iter_mut()
     }
 }
 

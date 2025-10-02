@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use std::io::{self, Read, Write};
 use rand::seq::SliceRandom;
 
-use crate::tensor::{Field, Generate, Tensor, TensorIO, TensorMut, Th};
+use crate::tensor::{CPUTensor, Field, Generate, Tensor, TensorIO, TensorMut, Th};
 
 use super::{
     activation::Activation,
@@ -43,7 +43,7 @@ impl <T: Tensor> NeuralNetwork<T> {
     pub fn evaluate(&self, input: &T) -> T {
         let mut current = input.clone();
         for axon in &self.axons {
-            current = axon.forward(&current)
+            current = axon.forward(current)
         }
         current
     }
@@ -82,7 +82,7 @@ impl <T: TensorMut> NeuralNetwork<T> {
                     init.nn.axons.iter_mut().map(|a| a.train()).collect();
                 let mut current = Autograd::new(batch.input);
                 for axon in &auto_axons {
-                    current = axon.forward(&current)
+                    current = axon.forward(current)
                 }
                 let loss = loss.loss(&current, &Autograd::new(batch.output));
                 total_loss += loss.get(&[]).unwrap();
@@ -309,10 +309,11 @@ pub enum Layer {
         field: Field,
         filters: usize,
         activation: Activation
+    },
+    Pool2D {
+        input_size: usize,
+        field: Field,
     }
-}
-pub enum Pooling {
-    Max
 }
 
 impl Layer {
@@ -322,18 +323,21 @@ impl Layer {
                 neurons,
                 activation,
             } => Axon::Dense {
-                ff: FeedForward::new(last.activation_shape()[0], *neurons, *activation),
+                ff: FeedForward::new(&last.activation_shape(), *neurons, *activation),
             },
             Self::Dropout {
                 neurons,
                 rate,
                 activation,
             } => Axon::Dropout {
-                ff: FeedForward::new(last.activation_shape()[0], *neurons, *activation),
+                ff: FeedForward::new(&last.activation_shape(), *neurons, *activation),
                 rate: *rate,
             },
             Self::Conv2D { field, filters, activation, .. } => {
                 Axon::Conv2D { conv: Conv2D::new(*field, *filters, *activation) }
+            },
+            Self::Pool2D { field, .. } => {
+                Axon::Pool2D { pool: Pool2D::new(*field) }
             }
         }
     }
@@ -343,7 +347,8 @@ impl Layer {
             Self::Dense { neurons, .. } => vec![*neurons],
             Self::Dropout { neurons, .. } => vec![*neurons],
             // todo: validate locations_on during layer creation, also stop calling it twice
-            Self::Conv2D  { input_size, field, filters, .. } => vec![*filters, field.locations_on(*input_size).unwrap(), field.locations_on(*input_size).unwrap()]
+            Self::Conv2D  { input_size, field, filters, .. } => vec![field.locations_on(*input_size).unwrap(), field.locations_on(*input_size).unwrap(), *filters],
+            Self::Pool2D { input_size, field } => vec![field.locations_on(*input_size).unwrap(), field.locations_on(*input_size).unwrap()]
         }
     }
 }
@@ -352,15 +357,16 @@ enum Axon<T: Tensor> {
     Dense { ff: FeedForward<T> },
     Dropout { ff: FeedForward<T>, rate: f64 },
     Conv2D { conv: Conv2D<T> },
-
+    Pool2D { pool: Pool2D<T> }
 }
 
 impl<T: Tensor> Axon<T> {
-    pub fn forward(&self, activations: &T) -> T {
+    pub fn forward(&self, activations: T) -> T {
         match self {
             Self::Dense { ff } => ff.forward(activations),
             Self::Dropout { ff, .. } => ff.forward(activations),
-            Self::Conv2D { conv } => conv.forward(activations)
+            Self::Conv2D { conv } => conv.forward(&activations),
+            Self::Pool2D { pool } => pool.forward(activations)
         }
     }
 }
@@ -394,7 +400,10 @@ impl<T: TensorMut> Axon<T> {
                 }
             },
             Self::Conv2D { conv } => {
-                Axon::Conv2D { conv: Conv2D { filters: Autograd::new(conv.filters.clone()), field: conv.field, activation: conv.activation } }
+                Axon::Conv2D { conv: Conv2D { weights: Autograd::new(conv.weights.clone()), field: conv.field, activation: conv.activation } }
+            },
+            Self::Pool2D { pool } => {
+                Axon::Pool2D { pool: Pool2D { field: pool.field, phantom: PhantomData } }
             }
         }
     }
@@ -464,6 +473,9 @@ impl<T: TensorIO> Axon<T> {
             },
             Self::Conv2D { conv } => {
                 todo!()
+            },
+            Self::Pool2D { pool } => {
+                todo!()
             }
         }
     }
@@ -477,15 +489,16 @@ struct FeedForward<T: Tensor> {
 }
 
 impl<T: Tensor> FeedForward<T> {
-    fn new(last: usize, next: usize, activation: Activation) -> Self {
+    fn new(last: &[usize], next: usize, activation: Activation) -> Self {
+        // todo: break off len obj into sep
         Self {
             weights: T::tensor(Generate {
-                shape: vec![last, next],
+                shape: vec![CPUTensor::len(last), next],
                 with: || NORMAL.sample(&mut rand::rng()),
             })
             .unwrap(),
             biases: T::tensor(Generate {
-                shape: vec![last],
+                shape: vec![CPUTensor::len(last)],
                 with: || NORMAL.sample(&mut rand::rng()),
             })
             .unwrap(),
@@ -493,10 +506,11 @@ impl<T: Tensor> FeedForward<T> {
         }
     }
 
-    fn forward(&self, activations: &T) -> T {
+    fn forward(&self, activations: T) -> T {
+        let flattened_shape = &[CPUTensor::len(activations.shape())];
         self.activation.activate(
             self.weights
-                .dot(&activations, 1)
+                .dot(&activations.reshape(flattened_shape).unwrap(), 1)
                 .unwrap()
                 .add(&self.biases)
                 .unwrap(),
@@ -536,22 +550,58 @@ impl<T: TensorIO> FeedForward<T> {
 }
 
 struct Conv2D<T: Tensor> {
-    filters: T,
+    weights: T,
     field: Field,
     activation: Activation
 }
 
 impl <T: Tensor> Conv2D<T> {
     fn new(field: Field, filters: usize, activation: Activation) -> Self {
-        // dont have anything to make column-wise tensors just yet, instead hack around
-        // w/a transpose lol
+        let weights = T::tensor(
+            Generate {
+                shape: vec![filters, field.size * field.size],
+                with: || NORMAL.sample(&mut rand::rng())
+            }
+        ).unwrap();
         Self {
-            filters: T::tensor(Generate { shape: vec![field.size, field.size, filters], with: || NORMAL.sample(&mut rand::rng()) }).unwrap(),
+            weights,
             field,
             activation
         }
     }
+
     fn forward(&self, activations: &T) -> T {
-        activations.conv2d(&self.filters, self.field.stride).unwrap()
+        let locs = self.field.locations_on(*activations.shape().last().unwrap()).unwrap();
+        let colified = activations.colify(self.field).unwrap();
+        let convovled = self.weights.dot(&colified, 1).unwrap();
+        let mut axes: Vec<usize> = (0..convovled.ndim()).collect();
+        axes.swap(convovled.ndim() - 1, convovled.ndim() - 2);
+        let fixed = convovled.transpose(&axes).unwrap();
+        let shape: Vec<usize> = fixed.shape().iter().cloned().take(fixed.ndim() - 2).chain([locs, locs].into_iter()).collect();
+        fixed.reshape(&shape).unwrap()
+    }
+}
+
+struct Pool2D<T: Tensor> {
+    field: Field,
+    phantom: PhantomData<T>
+}
+
+impl <T: Tensor> Pool2D<T> {
+    fn new(field: Field) -> Self {
+        Self {
+            field,
+            phantom: PhantomData
+        }
+    }
+}
+
+impl <T: Tensor> Pool2D<T> {
+    fn forward(&self, activations: T) -> T {
+        let locs = self.field.locations_on(*activations.shape().last().unwrap()).unwrap();
+        let colified = activations.colify(self.field).unwrap();
+        let maxed = colified.colmax().unwrap();
+        let shape: Vec<usize> = maxed.shape().iter().cloned().take(maxed.ndim() - 2).chain([locs, locs].into_iter()).collect();
+        maxed.reshape(&shape).unwrap()
     }
 }

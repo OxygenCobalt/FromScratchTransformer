@@ -34,6 +34,10 @@ vec![
                 filters: 20,
                 activation: Activation::ReLU,
             },
+            Layer::Pool2D {
+                input_size: 20,
+                field: Field { size: 2, stride: 1 }
+            },
             Layer::Dense {
                 neurons: 100,
                 // TODO: softmax
