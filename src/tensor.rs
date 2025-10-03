@@ -39,6 +39,7 @@ impl Field {
     pub fn locations_on(&self, size: usize) -> Option<usize> {
         let numer = size - self.size;
         let denom = self.stride + 1;
+        println!("{} {}", numer, denom);
         if numer % denom != 0 {
             return None
         }
@@ -428,7 +429,7 @@ impl Tensor for CPUTensor {
         }
         let locations = field.locations_on(*self.shape.last().unwrap())?;
         let new_shape: Vec<usize> = self.shape.iter().cloned().take(self.shape.len() - 2)
-            .chain([locations * locations, field.size * field.size].into_iter())
+            .chain([field.size * field.size, locations * locations].into_iter())
             .collect();
         let mut new = Self {
             data: vec![0.0; Self::len(&new_shape)],

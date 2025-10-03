@@ -93,11 +93,12 @@ fn load_mnist<T: Tensor>(path: &Path) -> Result<Vec<Example<T>>, parquet::errors
             let image_bytes = image_bytes_array.value(i);
             let decoder = png::Decoder::new(image_bytes);
             let mut reader = decoder.read_info().unwrap();
+            let (w, h) = reader.info().size();
             let mut buf = vec![0; reader.output_buffer_size()];
             reader.next_frame(&mut buf).unwrap();
             let pixels: Vec<f64> = buf.iter().map(|&b| b as f64 / 255.0).collect();
 
-            let image_matrix = T::vector(pixels).unwrap();
+            let image_matrix = T::vector(pixels).unwrap().reshape(&[w as usize, h as usize]).unwrap();
             images.push(image_matrix);
 
             let label = label_array.value(i);

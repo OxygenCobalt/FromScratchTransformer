@@ -8,6 +8,7 @@ pub struct MSE;
 
 impl Loss for MSE {
     fn loss<T: Tensor>(&self, batch_activations: &T, output: &T) -> T {
+        println!("{:?} {:?}", batch_activations.shape(), output.shape());
         batch_activations.sub(output).unwrap().pow(2).sum()
     }
 }

@@ -30,7 +30,7 @@ fn main() {
 vec![
             Layer::Conv2D {
                 input_size: 28,
-                field: Field { size: 5, stride: 1},
+                field: Field { size: 4, stride: 1},
                 filters: 20,
                 activation: Activation::ReLU,
             },
@@ -45,11 +45,11 @@ vec![
             },
         ]
     ).unwrap();
-    let checkpointing = Checkpoint::new(&layers, &mnist, Path::new("data/checkpoints/mnist"));
+    // let checkpointing = Checkpoint::new(&layers, &mnist, Path::new("data/checkpoints/mnist"));
     let hyperparams = Hyperparams {
         epochs: 30,
         batch_size: 10,
         learning_rate: 3.0
     };
-    NeuralNetwork::train(&checkpointing, &checkpointing, &mnist, &hyperparams, &MSE).unwrap();
+    NeuralNetwork::train(&layers, &mnist, &mnist, &hyperparams, &MSE).unwrap();
 }

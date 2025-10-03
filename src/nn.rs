@@ -486,11 +486,11 @@ struct FeedForward<T: Tensor> {
     weights: T,
     biases: T,
     activation: Activation,
+    last_shape: Vec<usize>
 }
 
 impl<T: Tensor> FeedForward<T> {
     fn new(last: &[usize], next: usize, activation: Activation) -> Self {
-        // todo: break off len obj into sep
         Self {
             weights: T::tensor(Generate {
                 shape: vec![CPUTensor::len(last), next],
@@ -503,11 +503,12 @@ impl<T: Tensor> FeedForward<T> {
             })
             .unwrap(),
             activation,
+            last_shape: last.to_vec()
         }
     }
 
     fn forward(&self, activations: T) -> T {
-        let flattened_shape = &[CPUTensor::len(activations.shape())];
+        let flattened_shape = &[activations.shape()[0], CPUTensor::len(&activations.shape()[1..])];
         self.activation.activate(
             self.weights
                 .dot(&activations.reshape(flattened_shape).unwrap(), 1)
@@ -571,14 +572,14 @@ impl <T: Tensor> Conv2D<T> {
     }
 
     fn forward(&self, activations: &T) -> T {
+        println!("{:?}", activations.shape());
         let locs = self.field.locations_on(*activations.shape().last().unwrap()).unwrap();
         let colified = activations.colify(self.field).unwrap();
+        println!("{:?} {:?}", self.weights.shape(), colified.shape());
         let convovled = self.weights.dot(&colified, 1).unwrap();
-        let mut axes: Vec<usize> = (0..convovled.ndim()).collect();
-        axes.swap(convovled.ndim() - 1, convovled.ndim() - 2);
-        let fixed = convovled.transpose(&axes).unwrap();
-        let shape: Vec<usize> = fixed.shape().iter().cloned().take(fixed.ndim() - 2).chain([locs, locs].into_iter()).collect();
-        fixed.reshape(&shape).unwrap()
+        let shape: Vec<usize> = convovled.shape().iter().cloned().take(convovled.ndim() - 2).chain([self.weights.shape()[0], locs, locs].into_iter()).collect();
+        println!("{:?} {:?}", convovled.shape(), shape);
+        convovled.reshape(&shape).unwrap()
     }
 }
 
@@ -599,9 +600,15 @@ impl <T: Tensor> Pool2D<T> {
 impl <T: Tensor> Pool2D<T> {
     fn forward(&self, activations: T) -> T {
         let locs = self.field.locations_on(*activations.shape().last().unwrap()).unwrap();
+        println!("{:?}", activations.shape());
         let colified = activations.colify(self.field).unwrap();
-        let maxed = colified.colmax().unwrap();
-        let shape: Vec<usize> = maxed.shape().iter().cloned().take(maxed.ndim() - 2).chain([locs, locs].into_iter()).collect();
+        println!("{:?}", colified.shape());
+        let mut axes: Vec<usize> = (0..colified.ndim()).collect();
+        axes.swap(colified.ndim() - 1, colified.ndim() - 2);
+        let fixed = colified.transpose(&axes).unwrap();
+        let maxed = fixed.colmax().unwrap();
+        let shape: Vec<usize> = maxed.shape().iter().cloned().take(maxed.ndim() - 2).chain([activations.shape()[0], locs, locs].into_iter()).collect();
+        println!("{:?} {:?}", maxed.shape(), shape);
         maxed.reshape(&shape).unwrap()
     }
 }
