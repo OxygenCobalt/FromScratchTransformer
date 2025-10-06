@@ -39,7 +39,7 @@ impl Field {
     pub fn locations_on(&self, size: usize) -> Option<usize> {
         let numer = size - self.size;
         let denom = self.stride + 1;
-        println!("{} {}", numer, denom);
+        // println!("{} {}", numer, denom);
         if numer % denom != 0 {
             return None
         }

@@ -35,11 +35,11 @@ vec![
                 activation: Activation::ReLU,
             },
             Layer::Pool2D {
-                input_size: 20,
+                input_size: 12,
                 field: Field { size: 2, stride: 1 }
             },
             Layer::Dense {
-                neurons: 100,
+                neurons: 10,
                 // TODO: softmax
                 activation: Activation::Sigmoid,
             },
