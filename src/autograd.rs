@@ -353,17 +353,17 @@ impl<T: TensorMut> Operation<T> {
             },
             Self::Colify { t, field } => {
                 let mut t_grad = T::tensor(Fill { shape: t.tensor.shape().to_vec(), with: 0.0 }).unwrap();
-                let locations = field.locations_on(*t.tensor.shape().last().unwrap()).unwrap();
+                let locations = field.locations_on(*t.tensor.shape().first().unwrap()).unwrap();
                 let new_shape = grad.shape();
                 let mut new_point = vec![0; new_shape.len()];
                 let mut old_point = vec![0; t.tensor.ndim()];
                 let jump = field.stride / 2;
                 'iterate: loop {
-                    let location_idx = new_point[new_point.len() - 2];
-                    let field_idx = new_point[new_point.len() - 1];
-                    old_point[0..new_point.len() - 2].copy_from_slice(&new_point[0..new_point.len() - 2]);
-                    old_point[new_point.len() - 2] = ((location_idx % locations) * field.stride) - jump + (field_idx % field.size);
-                    old_point[new_point.len() - 1] = ((location_idx / locations) * field.stride) - jump + (field_idx / field.size);
+                    let location_idx = new_point[0];
+                    let field_idx = new_point[1];
+                    old_point[2..].copy_from_slice(&new_point[2..]);
+                    old_point[0] = ((location_idx % locations) * field.stride) - jump + (field_idx % field.size);
+                    old_point[1] = ((location_idx / locations) * field.stride) - jump + (field_idx / field.size);
                     if let Some(x) = t_grad.get_mut(&old_point) {
                         *x = *grad.get(&new_point).unwrap();
                     }
@@ -384,18 +384,18 @@ impl<T: TensorMut> Operation<T> {
                 let mut grad_point = vec![0; grad.ndim()];
                 let mut column_point = vec![0; t.tensor.ndim()];
                 'iterate: loop {
-                    column_point[0..grad.ndim()].copy_from_slice(&grad_point);
+                    column_point[1..].copy_from_slice(&grad_point);
                     let mut max_idx = 0;
                     let mut max_value = f64::MIN; 
-                    for i in 0..*t.tensor.shape().last().unwrap() {
-                        *column_point.last_mut().unwrap() = i;
+                    for i in 0..t.tensor.shape()[0] {
+                        column_point[0] = i;
                         let cur_value = t.tensor.get(&column_point).unwrap();
                         if *cur_value > max_value {
                             max_idx = i;
                             max_value = *cur_value;
                         }
                     }
-                    *column_point.last_mut().unwrap() = max_idx;
+                    column_point[0] = max_idx;
                     // max point, frwd here
                     *t_grad.get_mut(&column_point).unwrap() = *grad.get(&grad_point).unwrap();
                     for (p, s) in grad_point.iter_mut().zip(grad.shape().iter()) {
@@ -410,7 +410,7 @@ impl<T: TensorMut> Operation<T> {
                 }
                 t.backward(t_grad);
             },
-            Self::Reshape { t, .. } => {
+            Self::Reshape { t, shape } => {
                 t.backward(grad.clone().reshape(t.tensor.shape()).unwrap())
             },
             Self::Transpose { t, axes } => {

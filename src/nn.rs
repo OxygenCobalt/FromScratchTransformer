@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use std::io::{self, Read, Write};
 use rand::seq::SliceRandom;
 
-use crate::tensor::{CPUTensor, Field, Generate, Tensor, TensorIO, TensorMut, Th};
+use crate::tensor::{CPUTensor, Field, Generate, Tensor, TensorIO, TensorMut, Th, Tt};
 
 use super::{
     activation::Activation,
@@ -154,18 +154,18 @@ impl <T: Tensor> Train<T> {
         self.examples
             .chunks(size)
             .map(|examples| {
-                let input = T::tensor(Th::C(
+                let input = T::tensor(Tt(
                     examples
                         .iter()
-                        .map(|e| Th::R(e.input.iter().cloned().collect()))
-                        .collect::<Vec<Th>>(),
+                        .map(|e| e.input.clone())
+                        .collect::<Vec<T>>(),
                 ))
                 .unwrap();
-                let output = T::tensor(Th::C(
+                let output = T::tensor(Tt(
                     examples
                         .iter()
-                        .map(|e| Th::R(e.output.iter().cloned().collect()))
-                        .collect::<Vec<Th>>(),
+                        .map(|e| e.output.clone())
+                        .collect::<Vec<T>>(),
                 ))
                 .unwrap();
                 Example { input, output }
@@ -313,6 +313,7 @@ pub enum Layer {
     Pool2D {
         input_size: usize,
         field: Field,
+        filters: usize,
     }
 }
 
@@ -348,9 +349,8 @@ impl Layer {
             Self::Dropout { neurons, .. } => vec![*neurons],
             // todo: validate locations_on during layer creation, also stop calling it twice
             Self::Conv2D  { input_size, field, filters, .. } => vec![ *filters, field.locations_on(*input_size).unwrap(), field.locations_on(*input_size).unwrap()],
-            Self::Pool2D { input_size, field } => {
-                println!("pool2d {:?}", input_size);
-                vec![20, field.locations_on(*input_size).unwrap(), field.locations_on(*input_size).unwrap()]
+            Self::Pool2D { input_size, field, filters } => {
+                vec![*filters, field.locations_on(*input_size).unwrap(), field.locations_on(*input_size).unwrap()]
             }
         }
     }
@@ -379,10 +379,11 @@ impl<T: TensorMut> Axon<T> {
         match self {
             Self::Dense { ff } => Axon::Dense {
                 ff: FeedForward {
-                    last_shape: ff.last_shape.clone(),
                     weights: Autograd::new(ff.weights.clone()),
                     biases: Autograd::new(ff.biases.clone()),
                     activation: ff.activation,
+                    flattened_input_ndim: ff.flattened_input_ndim,
+                    flattened_input_shape: ff.flattened_input_shape,
                 },
             },
             Self::Dropout { ff, rate } => {
@@ -397,10 +398,11 @@ impl<T: TensorMut> Axon<T> {
                 }
                 Axon::Dense {
                     ff: FeedForward {
-                        last_shape: ff.last_shape.clone(),
                         weights: Autograd::new(dropped_weights),
                         biases: Autograd::new(ff.biases.clone()),
                         activation: ff.activation,
+                        flattened_input_ndim: ff.flattened_input_ndim,
+                        flattened_input_shape: ff.flattened_input_shape,
                     },
                 }
             },
@@ -491,14 +493,17 @@ struct FeedForward<T: Tensor> {
     weights: T,
     biases: T,
     activation: Activation,
-    last_shape: Vec<usize>
+    flattened_input_shape: usize,
+    flattened_input_ndim: usize
 }
 
 impl<T: Tensor> FeedForward<T> {
     fn new(last: Option<&Layer>, neurons: usize, activation: Activation) -> Self {
+        let input_shape = last.unwrap().activation_shape();
+        let flattened = CPUTensor::len(&input_shape);
         Self {
             weights: T::tensor(Generate {
-                shape: vec![neurons, CPUTensor::len(&last.unwrap().activation_shape())],
+                shape: vec![neurons, flattened],
                 with: || NORMAL.sample(&mut rand::rng()),
             })
             .unwrap(),
@@ -508,12 +513,15 @@ impl<T: Tensor> FeedForward<T> {
             })
             .unwrap(),
             activation,
-            last_shape: last.unwrap().activation_shape().to_vec()
+            flattened_input_shape: flattened,
+            flattened_input_ndim: input_shape.len()
         }
     }
 
     fn forward(&self, activations: T) -> T {
-        let flattened_shape = [CPUTensor::len(&activations.shape())];
+        // we ignore any additional batching parameters that would be appended to the activation shape
+        let mut flattened_shape = vec![self.flattened_input_shape];
+        flattened_shape.extend_from_slice(&activations.shape()[self.flattened_input_ndim..]);
         //println!("{:?} {:?} {:?} {:?}", self.last_shape, self.weights.shape(), activations.shape(), &flattened_shape);
         self.activation.activate(
             self.weights
@@ -541,12 +549,13 @@ impl<T: TensorIO> FeedForward<T> {
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "invalid feedforward signature"))?;
         let weights = T::read(read)?;
         let biases = T::read(read)?;
-        Ok(Self {
-            last_shape: todo!(),
-            activation,
-            weights,
-            biases,
-        })
+        todo!()
+        // Ok(Self {
+            
+        //     activation,
+        //     weights,
+        //     biases,
+        // })
     }
 
     fn write(&self, write: &mut impl Write) -> io::Result<()> {
@@ -579,14 +588,20 @@ impl <T: Tensor> Conv2D<T> {
     }
 
     fn forward(&self, activations: &T) -> T {
-        //println!("{:?}", activations.shape());
-        let locs = self.field.locations_on(*activations.shape().last().unwrap()).unwrap();
+        let locs = self.field.locations_on(*activations.shape().first().unwrap()).unwrap();
         let colified = activations.colify(self.field).unwrap();
-        //println!("{:?} {:?}", self.weights.shape(), colified.shape());
+        // println!("{:?} {:?}", self.weights.shape(), colified.shape());
         let convovled = self.weights.dot(&colified, 1).unwrap();
-        let shape: Vec<usize> = convovled.shape().iter().cloned().take(convovled.ndim() - 2).chain([self.weights.shape()[0], locs, locs].into_iter()).collect();
-        //println!("{:?} {:?}", convovled.shape(), shape);
-        convovled.reshape(&shape).unwrap()
+        let shape: Vec<usize> = [locs, locs, self.weights.shape()[0]].into_iter().chain(activations.shape()[2..].iter().cloned()).collect();
+        // println!("{:?}", colified.shape());
+        // TODO(human): Fix the axes computation - should be based on convovled.ndim(), not colified.ndim()
+        let mut axes: Vec<usize> = (0..convovled.ndim()).collect();
+        axes.swap(0, 1);
+        let fixed = convovled.transpose(&axes).unwrap();
+        // println!("{:?}", fixed.shape());
+        let shaped = fixed.reshape(&shape).unwrap();
+        // println!("{:?}", shaped.shape());
+        shaped
     }
 }
 
@@ -606,16 +621,12 @@ impl <T: Tensor> Pool2D<T> {
 
 impl <T: Tensor> Pool2D<T> {
     fn forward(&self, activations: T) -> T {
-        let locs = self.field.locations_on(*activations.shape().last().unwrap()).unwrap();
+        let locs = self.field.locations_on(*activations.shape().first().unwrap()).unwrap();
         // println!("conv {:?}", activations.shape());
         let colified = activations.colify(self.field).unwrap();
-        //println!("{:?}", colified.shape());
-        let mut axes: Vec<usize> = (0..colified.ndim()).collect();
-        axes.swap(colified.ndim() - 1, colified.ndim() - 2);
-        let fixed = colified.transpose(&axes).unwrap();
-        let maxed = fixed.colmax().unwrap();
-        let shape: Vec<usize> = maxed.shape().iter().cloned().take(maxed.ndim() - 2).chain([activations.shape()[0], locs, locs].into_iter()).collect();
-        //println!("{:?} {:?}", maxed.shape(), shape);
+        let maxed = colified.colmax().unwrap();
+        let shape: Vec<usize> = [locs, locs].into_iter().chain(activations.shape()[2..].iter().cloned()).collect();
+        // println!("{:?} {:?}", maxed.shape(), shape);
         maxed.reshape(&shape).unwrap()
     }
 }

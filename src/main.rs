@@ -36,7 +36,8 @@ vec![
             },
             Layer::Pool2D {
                 input_size: 12,
-                field: Field { size: 2, stride: 1 }
+                field: Field { size: 2, stride: 1 },
+                filters: 20
             },
             Layer::Dense {
                 neurons: 10,

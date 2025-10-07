@@ -61,6 +61,23 @@ pub trait TensorIO: Tensor {
     fn write(&self, write: &mut impl Write) -> io::Result<()>;
 }
 
+pub struct Tt<T: Tensor>(pub Vec<T>);
+
+impl <T: Tensor> TensorInit for Tt<T> {
+    fn make(self) -> Option<(Vec<usize>, Vec<f64>)> {
+        if self.0.is_empty() {
+            return None;
+        }
+        let mut shape = self.0.first().unwrap().shape().to_vec();
+        if self.0.iter().any(|t| t.shape() != shape) {
+            return None;
+        }
+        shape.push(self.0.len());
+        let data = self.0.iter().map(|t| t.iter()).flatten().cloned().collect();
+        Some((shape, data))
+    }
+}
+
 #[derive(Clone)]
 pub enum Th {
     R(Vec<f64>),
@@ -300,6 +317,7 @@ impl Tensor for CPUTensor {
             return None;
         }
         let contraction_shape = lhs_contraction;
+        // println!("{} {:?}", depth, contraction_shape);
         let lhs_survivors = &self.shape[..self.shape.len() - depth];
         let rhs_survivors = &other.shape[depth..];
         let mut new_shape: Vec<usize> = lhs_survivors.to_vec();
@@ -347,7 +365,7 @@ impl Tensor for CPUTensor {
         }
 
         let new_ref = SyncWorkaroundNeverUseThis::new(new);
-        point_iter.into_par_iter().for_each(|new_point| {
+        point_iter.into_iter().for_each(|new_point| {
             let mut lhs_point = vec![0; self.ndim()];
             let mut rhs_point = vec![0; other.ndim()];
             let lhs_contraction_point = lhs_point.len() - depth;
@@ -360,21 +378,21 @@ impl Tensor for CPUTensor {
             lhs_point[..lhs_survival_point].copy_from_slice(&new_point[..depth]);
             rhs_point[..rhs_contraction_point].copy_from_slice(&null);
             rhs_point[rhs_survival_point..].copy_from_slice(&new_point[depth..]);
+            let mut contraction_point = vec![0; contraction_shape.len()];
             let mut sum = 0.0;
             'summate: loop {
-                sum += *self.get(&lhs_point).unwrap() * *other.get(&rhs_point).unwrap();
+                rhs_point[..contraction_point.len()].copy_from_slice(&contraction_point);
+                lhs_point[lhs_contraction_point..].iter_mut().enumerate().for_each(|(i, x)| {
+                    *x = contraction_point[i]
+                });
+                sum += *self.get(&lhs_point).unwrap() * 
+                    *other.get(&rhs_point).unwrap();
                 
-                for (i, s) in contraction_shape.iter().enumerate() {
-                    let last = lhs_point.len() - i - 1;
-                    let p_lhs = &mut lhs_point[last];
-                    let p_rhs = &mut rhs_point[i];
-
-                    if *p_rhs == *s - 1 {
-                        *p_rhs = 0;
-                        *p_lhs = 0;
+                for (p, s) in contraction_point.iter_mut().zip(contraction_shape.iter()) {
+                    if *p == *s - 1 {
+                        *p = 0;
                     } else {
-                        *p_rhs += 1;
-                        *p_lhs += 1;
+                        *p += 1;
                         continue 'summate;
                     }
                 }
@@ -424,12 +442,12 @@ impl Tensor for CPUTensor {
             return None;
         }
         // TODO: remove invariant for square imgs
-        if *self.shape.last().unwrap() != self.shape[self.shape.len() - 2] {
+        if self.shape[0] != self.shape[1] {
             return None;
         }
-        let locations = field.locations_on(*self.shape.last().unwrap())?;
-        let new_shape: Vec<usize> = self.shape.iter().cloned().take(self.shape.len() - 2)
-            .chain([field.size * field.size, locations * locations].into_iter())
+        let locations = field.locations_on(*self.shape.first().unwrap())?;
+        let new_shape: Vec<usize> =[field.size * field.size, locations * locations].into_iter()
+            .chain(self.shape[2..].iter().cloned())
             .collect();
         let mut new = Self {
             data: vec![0.0; Self::len(&new_shape)],
@@ -439,11 +457,11 @@ impl Tensor for CPUTensor {
         let mut old_point = vec![0; self.ndim()];
         let jump = field.stride / 2;
         'iterate: loop {
-            let location_idx = new_point[new_point.len() - 2];
-            let field_idx = new_point[new_point.len() - 1];
-            old_point[0..new_point.len() - 2].copy_from_slice(&new_point[0..new_point.len() - 2]);
-            old_point[new_point.len() - 2] = ((location_idx % locations) * field.stride) - jump + (field_idx % field.size);
-            old_point[new_point.len() - 1] = ((location_idx / locations) * field.stride) - jump + (field_idx / field.size);
+            let location_idx = new_point[0];
+            let field_idx = new_point[1];
+            old_point[2..].copy_from_slice(&new_point[2..]);
+            old_point[0] = ((location_idx % locations) * field.stride) - jump + (field_idx % field.size);
+            old_point[1] = ((location_idx / locations) * field.stride) - jump + (field_idx / field.size);
             *new.get_mut(&new_point).unwrap() = *self.get(&old_point).unwrap_or(&0.0);
 
             for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
@@ -463,7 +481,8 @@ impl Tensor for CPUTensor {
         if self.ndim() == 0 {
             return None;
         }
-        let new_shape: Vec<usize> = self.shape.iter().cloned().take(self.shape.len() - 1).collect();
+        let mut new_shape: Vec<usize> = self.shape.clone();
+        new_shape.remove(0);
         let mut new = Self {
             data: vec![0.0; Self::len(&new_shape)],
             shape: new_shape.clone(),
@@ -471,9 +490,9 @@ impl Tensor for CPUTensor {
         let mut new_point = vec![0; new_shape.len()];
         let mut column_point = vec![0; self.shape.len()];
         'iterate: loop {
-            column_point[0..new_shape.len() ].copy_from_slice(&new_point);
-            for i in 0..*self.shape.last().unwrap() {
-                *column_point.last_mut().unwrap() = i;
+            column_point[1..].copy_from_slice(&new_point);
+            for i in 0..self.shape[0] {
+                column_point[0] = i;
                 if *self.get(&column_point).unwrap() > *new.get(&new_point).unwrap() {
                     *new.get_mut(&new_point).unwrap() = *self.get(&column_point).unwrap();
                 }
@@ -512,16 +531,16 @@ impl Tensor for CPUTensor {
         let mut point = vec![0; self.shape.len()];
         let mut new_point = vec![0; new.shape.len()];
         'iterate: loop {
-            *new.get_mut(&new_point).unwrap() = *self.get(&point.as_slice()).unwrap();
+            new_point.iter_mut().enumerate().for_each(|(i, x)| *x = point[axes[i]]);
+            *new.get_mut(&new_point).unwrap() = 
+                *self.get(&point.as_slice()).unwrap();
 
             for i in 0..self.ndim() {
-                let (p, np, s) = (&mut point[i], &mut new_point[axes[i]], self.shape[i]);
+                let (p, s) = (&mut point[i], self.shape[i]);
                 if *p == s - 1 {
                     *p = 0;
-                    *np = 0;
                 } else {
                     *p += 1;
-                    *np += 1;
                     continue 'iterate;
                 }
             }
