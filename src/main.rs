@@ -41,16 +41,15 @@ vec![
             },
             Layer::Dense {
                 neurons: 10,
-                // TODO: softmax
-                activation: Activation::Sigmoid,
+                activation: Activation::Softmax,
             },
         ]
     ).unwrap();
     // let checkpointing = Checkpoint::new(&layers, &mnist, Path::new("data/checkpoints/mnist"));
     let hyperparams = Hyperparams {
-        epochs: 30,
+        epochs: 60,
         batch_size: 10,
-        learning_rate: 3.0
+        learning_rate:  0.1
     };
     NeuralNetwork::train(&layers, &mnist, &mnist, &hyperparams, &MSE).unwrap();
 }
