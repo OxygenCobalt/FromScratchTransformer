@@ -4,7 +4,7 @@ use colored::Colorize;
 use rayon::ThreadPoolBuilder;
 
 use crate::{
-    activation::Activation, loss::MSE, mnist::MNIST, nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork}, tensor::{CPUTensor, Field}
+    activation::Activation, loss::{LogLikelihood, MSE}, mnist::MNIST, nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork}, tensor::{CPUTensor, Field}
 };
 
 mod activation;
@@ -51,5 +51,5 @@ vec![
         batch_size: 10,
         learning_rate:  0.1
     };
-    NeuralNetwork::train(&layers, &mnist, &mnist, &hyperparams, &MSE).unwrap();
+    NeuralNetwork::train(&layers, &mnist, &mnist, &hyperparams, &LogLikelihood).unwrap();
 }

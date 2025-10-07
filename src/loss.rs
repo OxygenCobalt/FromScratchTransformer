@@ -12,3 +12,11 @@ impl Loss for MSE {
         batch_activations.sub(output).unwrap().pow(2).sum()
     }
 }
+
+pub struct LogLikelihood;
+
+impl Loss for LogLikelihood {
+    fn loss<T: Tensor>(&self, batch_activations: &T, output: &T) -> T {
+        batch_activations.at_argmax(&output).unwrap().ln().neg()
+    }
+}

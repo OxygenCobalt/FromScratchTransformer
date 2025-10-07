@@ -27,6 +27,7 @@ where
     fn colmax(&self) -> Option<Self>;
     fn reshape(self, shape: &[usize]) -> Option<Self>;
     fn transpose(&self, axes: &[usize]) -> Option<Self>;
+    fn at_argmax(&self, of: &Self) -> Option<Self>;
 }
 
 #[derive(Clone, Copy)]
@@ -548,6 +549,39 @@ impl Tensor for CPUTensor {
             break;
         }
 
+        Some(new)
+    }
+
+    fn at_argmax(&self, of: &Self) -> Option<Self> {
+        if of.ndim() != 0 {
+            return None;
+        }
+        fn argmax<T: Tensor>(tensor: &T) -> usize {
+            tensor.iter().enumerate().max_by(|(_, x), (_, y)| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)).unwrap().0
+        }
+        let argmax = argmax(of);
+        let mut new_shape: Vec<usize> = self.shape.clone();
+        new_shape.remove(0);
+        let mut new = Self {
+            data: vec![0.0; Self::len(&new_shape)],
+            shape: new_shape.clone(),
+        };
+        let mut new_point = vec![0; new_shape.len()];
+        let mut column_point = vec![0; self.shape.len()];
+        'iterate: loop {
+            column_point[0] = argmax;
+            column_point[1..].copy_from_slice(&new_point);
+            *new.get_mut(&new_point).unwrap() = *self.get(&column_point).unwrap();
+            for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
+                if *p == *s - 1 {
+                    *p = 0;
+                } else {
+                    *p += 1;
+                    continue 'iterate;
+                }
+            }
+            break;
+        }
         Some(new)
     }
 }
