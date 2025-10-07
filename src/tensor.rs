@@ -365,7 +365,7 @@ impl Tensor for CPUTensor {
         }
 
         let new_ref = SyncWorkaroundNeverUseThis::new(new);
-        point_iter.into_iter().for_each(|new_point| {
+        point_iter.into_par_iter().for_each(|new_point| {
             let mut lhs_point = vec![0; self.ndim()];
             let mut rhs_point = vec![0; other.ndim()];
             let lhs_contraction_point = lhs_point.len() - depth;
