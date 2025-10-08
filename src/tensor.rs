@@ -170,7 +170,9 @@ impl CPUTensor {
         }
         let idx = match of.len() {
             // some fast cases for common tensor dimensions
-            2 => self.shape[0] * of[1] + of[0],
+            2 => 1 * of[0] + self.shape[0] * of[1],
+            3 => 1 * of[0] + self.shape[0] * of[1] + self.shape[0] * self.shape[1] * of[2],
+            4 => 1 * of[0] + self.shape[0] * of[1] + self.shape[0] * self.shape[1] * of[2] + self.shape[0] * self.shape[1] * self.shape[2] * of[3],
             _ => {
                 let mut idx = 0;
                 let mut mult = 1;
@@ -331,7 +333,6 @@ impl Tensor for CPUTensor {
         };
 
         let mut new_point = vec![0; new.shape.len()];
-        let null = vec![0; depth];
 
         let mut point_iter: Vec<Vec<usize>> = Vec::new();
         point_iter.resize_with(Self::len(&new.shape), || {
@@ -367,7 +368,7 @@ impl Tensor for CPUTensor {
         }
 
         let new_ref = SyncWorkaroundNeverUseThis::new(new);
-        point_iter.into_iter().for_each(|new_point| {
+        point_iter.into_par_iter().for_each(|new_point| {
             let mut lhs_point = vec![0; self.ndim()];
             let mut rhs_point = vec![0; other.ndim()];
             let lhs_contraction_point = lhs_point.len() - depth;
@@ -376,18 +377,14 @@ impl Tensor for CPUTensor {
             let rhs_contraction_point = depth;
             // if i dont force the evaluation of (new_point.len() - lhs_survivors.len()) first ill underflow
             let rhs_survival_point = rhs_point.len() - (new_point.len() - depth);
-            lhs_point[lhs_contraction_point..].copy_from_slice(&null);
+            
             lhs_point[..lhs_survival_point].copy_from_slice(&new_point[..depth]);
-            rhs_point[..rhs_contraction_point].copy_from_slice(&null);
             rhs_point[rhs_survival_point..].copy_from_slice(&new_point[depth..]);
             let mut contraction_point = vec![0; contraction_shape.len()];
             let mut sum = 0.0;
             'summate: loop {
-                rhs_point[..contraction_point.len()].copy_from_slice(&contraction_point);
-                lhs_point[lhs_contraction_point..]
-                    .iter_mut()
-                    .enumerate()
-                    .for_each(|(i, x)| *x = contraction_point[i]);
+                rhs_point[..rhs_contraction_point].copy_from_slice(&contraction_point);
+                lhs_point[lhs_contraction_point..].copy_from_slice(&contraction_point);
                 sum += *self.get(&lhs_point).unwrap() * *other.get(&rhs_point).unwrap();
 
                 for (p, s) in contraction_point.iter_mut().zip(contraction_shape.iter()) {
