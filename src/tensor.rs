@@ -49,6 +49,13 @@ impl Field {
         }
         Some((size - self.size) / (self.stride + 1))
     }
+
+    pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
+        write.write_all(b"CnvField")?;
+        write.write_all(&self.size.to_le_bytes())?;
+        write.write_all(&self.stride.to_le_bytes())?;
+        Ok(())
+    }
 }
 
 pub trait TensorInit {

@@ -547,10 +547,12 @@ impl<T: TensorIO> Axon<T> {
                 ff.write(write)
             }
             Self::Conv2D { conv } => {
-                todo!()
+                write.write_all(b"AxonCv2D")?;
+                conv.write(write)
             }
             Self::Pool2D { pool } => {
-                todo!()
+                write.write_all(b"AxonPl2D")?;
+                pool.write(write)
             }
         }
     }
@@ -613,20 +615,28 @@ impl<T: TensorIO> FeedForward<T> {
         read.read(&mut activation_id)?;
         let activation = Activation::from_id(&activation_id)
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "invalid feedforward signature"))?;
+        let mut finb = [0u8; 8];
+        read.read(&mut finb)?;
+        let flattened_input_ndim = usize::from_le_bytes(finb);
+        let mut fisb = [0u8; 8];
+        let flattened_input_shape = usize::from_le_bytes(fisb);
+        read.read(&mut fisb)?;
         let weights = T::read(read)?;
         let biases = T::read(read)?;
-        todo!()
-        // Ok(Self {
-
-        //     activation,
-        //     weights,
-        //     biases,
-        // })
+        Ok(Self {
+            weights,
+            biases,
+            activation,
+            flattened_input_ndim,
+            flattened_input_shape
+        })
     }
 
     fn write(&self, write: &mut impl Write) -> io::Result<()> {
         write.write_all(b"FeedFrwd")?;
         write.write_all(self.activation.id())?;
+        write.write_all(&self.flattened_input_ndim.to_le_bytes())?;
+        write.write_all(&self.flattened_input_shape.to_le_bytes())?;
         self.weights.write(write)?;
         self.biases.write(write)
     }
@@ -672,16 +682,21 @@ impl<T: Tensor> Conv2D<T> {
             .into_iter()
             .chain(activations.shape()[2..].iter().cloned())
             .collect();
-
-        // TODO(human): Fix the axes computation - should be based on convovled.ndim(), not colified.ndim()
         let mut axes: Vec<usize> = (0..convovled.ndim()).collect();
         axes.swap(0, 1);
         let fixed = convovled.transpose(&axes).unwrap();
-
         let shaped = fixed.reshape(&shape).unwrap();
-        // println!("{:?}", shaped.shape());
-
         shaped.add(&self.biases).unwrap()
+    }
+}
+
+impl <T: TensorIO> Conv2D<T> {
+    fn write(&self, write: &mut impl Write) -> io::Result<()> {
+        self.field.write(write)?;
+        write.write_all(self.activation.id())?;
+        self.weights.write(write)?;
+        self.biases.write(write)?;
+        Ok(())
     }
 }
 
@@ -714,5 +729,12 @@ impl<T: Tensor> Pool2D<T> {
             .collect();
 
         maxed.reshape(&shape).unwrap()
+    }
+}
+
+impl <T: TensorIO> Pool2D<T> {
+    fn write(&self, write: &mut impl Write) -> io::Result<()> {
+        self.field.write(write)?;
+        Ok(())
     }
 }

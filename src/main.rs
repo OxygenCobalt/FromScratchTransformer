@@ -50,11 +50,11 @@ fn main() {
         },
     ])
     .unwrap();
-    // let checkpointing = Checkpoint::new(&layers, &mnist, Path::new("data/checkpoints/mnist"));
+    let checkpointing = Checkpoint::new(&layers, &mnist, Path::new("data/checkpoints/mnist"));
     let hyperparams = Hyperparams {
         epochs: 60,
         batch_size: 10,
         learning_rate: 0.1,
     };
-    NeuralNetwork::train(&layers, &mnist, &mnist, &hyperparams, &LogLikelihood).unwrap();
+    NeuralNetwork::train(&layers, &checkpointing, &mnist, &hyperparams, &LogLikelihood).unwrap();
 }
