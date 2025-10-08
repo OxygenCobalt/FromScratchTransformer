@@ -363,9 +363,9 @@ impl Layer {
                 field,
                 filters,
                 activation,
-                ..
+                input_size
             } => Axon::Conv2D {
-                conv: Conv2D::new(*field, *filters, *activation),
+                conv: Conv2D::new(*field, *filters, *activation, *input_size),
             },
             Self::Pool2D { field, .. } => Axon::Pool2D {
                 pool: Pool2D::new(*field),
@@ -456,6 +456,7 @@ impl<T: TensorMut> Axon<T> {
             Self::Conv2D { conv } => Axon::Conv2D {
                 conv: Conv2D {
                     weights: Autograd::new(conv.weights.clone()),
+                    biases: Autograd::new(conv.biases.clone()),
                     field: conv.field,
                     activation: conv.activation,
                 },
@@ -491,6 +492,19 @@ impl<T: TensorMut> Axon<T> {
                     .biases
                     .sub(&autoff.biases.into_grad().unwrap().mul(&scale).unwrap())
                     .unwrap();
+            }
+            (Self::Conv2D { conv }, Axon::<Autograd<T>>::Conv2D { conv: autoconv }) => {
+                conv.weights = conv
+                    .weights
+                    .sub(&autoconv.weights.into_grad().unwrap().mul(&scale).unwrap())
+                    .unwrap();
+                conv.biases = conv
+                    .biases
+                    .sub(&autoconv.biases.into_grad().unwrap().mul(&scale).unwrap())
+                    .unwrap();
+            },
+            (Self::Pool2D { pool }, Axon::<Autograd<T>>::Pool2D { pool: autopool }) => {
+
             }
             _ => return None,
         }
@@ -620,19 +634,27 @@ impl<T: TensorIO> FeedForward<T> {
 
 struct Conv2D<T: Tensor> {
     weights: T,
+    biases: T,
     field: Field,
     activation: Activation,
 }
 
 impl<T: Tensor> Conv2D<T> {
-    fn new(field: Field, filters: usize, activation: Activation) -> Self {
+    fn new(field: Field, filters: usize, activation: Activation, input_size: usize) -> Self {
         let weights = T::tensor(Generate {
             shape: vec![filters, field.size * field.size],
             with: || NORMAL.sample(&mut rand::rng()),
-        })
-        .unwrap();
+        }).unwrap();
+        let locs = field
+            .locations_on(input_size)
+            .unwrap();
+        let biases = T::tensor(Generate {
+            shape: vec![locs, locs, filters],
+            with: || NORMAL.sample(&mut rand::rng()),
+        }).unwrap();
         Self {
             weights,
+            biases,
             field,
             activation,
         }
@@ -657,8 +679,9 @@ impl<T: Tensor> Conv2D<T> {
         let fixed = convovled.transpose(&axes).unwrap();
 
         let shaped = fixed.reshape(&shape).unwrap();
+        // println!("{:?}", shaped.shape());
 
-        shaped
+        shaped.add(&self.biases).unwrap()
     }
 }
 
