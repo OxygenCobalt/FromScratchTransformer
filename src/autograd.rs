@@ -342,13 +342,32 @@ impl<T: TensorMut> Operation<T> {
                         .unwrap(),
                 );
             }
-            Self::Sum { t } => t.backward(
-                T::tensor(Fill {
+            Self::Sum { t } => {
+                let mut t_grad = T::tensor(Fill {
                     shape: t.tensor.shape().to_vec(),
-                    with: *grad.get(&[]).unwrap(),
+                    with: 0.0,
                 })
-                .unwrap(),
-            ),
+                .unwrap();
+                let mut t_grad_point = vec![0; t_grad.shape().len()];
+                let mut grad_point = vec![0; grad.shape().len()];
+                'iterate: loop {
+                    t_grad_point[1..].copy_from_slice(&grad_point);
+                    for i in 0..t.tensor.shape()[0] {
+                        t_grad_point[0] = i;
+                        *t_grad.get_mut(&t_grad_point).unwrap() = *grad.get(&grad_point).unwrap();
+                    }
+                    for (p, s) in grad_point.iter_mut().zip(grad.shape().iter()) {
+                        if *p == *s - 1 {
+                            *p = 0;
+                        } else {
+                            *p += 1;
+                            continue 'iterate;
+                        }
+                    }
+                    break;
+                }
+                t.backward(t_grad);
+            }
             Self::Ln { t } => {
                 t.backward(t.tensor.clone().pow(-1).mul(grad).unwrap());
             }

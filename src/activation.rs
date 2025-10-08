@@ -33,7 +33,9 @@ impl Activation {
             Self::Sigmoid => T::scalar(1.0).add(&y.neg().exp()).unwrap().pow(-1),
             Self::ReLU => y.max(0.0),
             Self::SiLU => y.clone().mul(&Self::Sigmoid.activate(y)).unwrap(),
-            Self::Softmax => y.clone().exp().sum().pow(-1).mul(&y.exp()).unwrap(),
+            Self::Softmax => {
+                y.clone().exp().sum().pow(-1).mul(&y.exp()).unwrap()
+            }
         }
     }
 }

@@ -46,7 +46,7 @@ fn main() {
         },
         Layer::Dense {
             neurons: 10,
-            activation: Activation::Softmax,
+            activation: Activation::Sigmoid,
         },
     ])
     .unwrap();

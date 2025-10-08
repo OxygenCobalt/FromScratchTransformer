@@ -376,7 +376,7 @@ impl Tensor for CPUTensor {
         }
 
         let new_ref = SyncWorkaroundNeverUseThis::new(new);
-        point_iter.into_par_iter().for_each(|new_point| {
+        point_iter.into_iter().for_each(|new_point| {
             let mut lhs_point = vec![0; self.ndim()];
             let mut rhs_point = vec![0; other.ndim()];
             let lhs_contraction_point = lhs_point.len() - depth;
@@ -416,7 +416,36 @@ impl Tensor for CPUTensor {
     }
 
     fn sum(&self) -> Self {
-        Self::scalar(self.data.iter().sum::<f64>())
+        if self.ndim() == 0 {
+            return self.clone();
+        }
+        let mut new_shape: Vec<usize> = self.shape.clone();
+        new_shape.remove(0);
+        let mut new = Self {
+            data: vec![0.0; Self::len(&new_shape)],
+            shape: new_shape.clone(),
+        };
+        let mut new_point = vec![0; new_shape.len()];
+        let mut column_point = vec![0; self.shape.len()];
+        'iterate: loop {
+            let mut sum = 0.0;
+            column_point[1..].copy_from_slice(&new_point);
+            for i in 0..self.shape[0] {
+                column_point[0] = i;
+                sum += *self.get(&column_point).unwrap();
+            }
+            *new.get_mut(&new_point).unwrap() = sum;
+            for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
+                if *p == *s - 1 {
+                    *p = 0;
+                } else {
+                    *p += 1;
+                    continue 'iterate;
+                }
+            }
+            break;
+        }
+        new
     }
 
     fn ln(mut self) -> Self {
