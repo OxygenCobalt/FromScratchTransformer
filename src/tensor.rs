@@ -37,17 +37,17 @@ where
 pub struct Field {
     pub size: usize,
     pub stride: usize,
+    pub padding: usize
 }
 
 impl Field {
     pub fn locations_on(&self, size: usize) -> Option<usize> {
-        let numer = size - self.size;
-        let denom = self.stride + 1;
-
+        let numer = size - self.size + self.padding + self.padding;
+        let denom = self.stride;
         if numer % denom != 0 {
             return None;
         }
-        Some((size - self.size) / (self.stride + 1))
+        Some((numer / denom) + 1)
     }
 
     pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
@@ -245,6 +245,7 @@ impl CPUTensor {
     fn debug_shape(&self, f: &mut std::fmt::Formatter<'_>, point: Vec<usize>) -> std::fmt::Result {
         if point.len() == self.ndim() {
             write![f, "{} ", self.get(point.as_slice()).unwrap()]?;
+            return Ok(())
         }
         write![f, "["]?;
         for i in 0..self.shape[point.len()] {
@@ -452,6 +453,7 @@ impl Tensor for CPUTensor {
             return None;
         }
         let locations = field.locations_on(*self.shape.first().unwrap())?;
+        // let offset = field.offset(*self.shape.first().unwrap());
         let new_shape: Vec<usize> = [field.size * field.size, locations * locations]
             .into_iter()
             .chain(self.shape[2..].iter().cloned())
@@ -462,16 +464,19 @@ impl Tensor for CPUTensor {
         };
         let mut new_point = vec![0; new_shape.len()];
         let mut old_point = vec![0; self.ndim()];
-        let jump = field.stride / 2;
         'iterate: loop {
-            let location_idx = new_point[0];
-            let field_idx = new_point[1];
-            old_point[2..].copy_from_slice(&new_point[2..]);
-            old_point[0] =
-                ((location_idx % locations) * field.stride) - jump + (field_idx % field.size);
-            old_point[1] =
-                ((location_idx / locations) * field.stride) - jump + (field_idx / field.size);
-            *new.get_mut(&new_point).unwrap() = *self.get(&old_point).unwrap_or(&0.0);
+            let field_idx = new_point[0];
+            let location_idx = new_point[1];
+            let x = -(field.padding as i64) + (((location_idx % locations) * field.stride) + (field_idx % field.size)) as i64;
+            let y = -(field.padding as i64) + (((location_idx / locations) * field.stride) + (field_idx / field.size)) as i64;
+            *new.get_mut(&new_point).unwrap() = if x >= 0 && y >= 0 && x < self.shape[0] as i64 && y < self.shape[1] as i64 {
+                old_point[0] = x as usize;
+                old_point[1] = y as usize;
+                old_point[2..].copy_from_slice(&new_point[2..]);
+                *self.get(&old_point).unwrap()
+            } else {
+                0.0
+            };
 
             for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
                 if *p == *s - 1 {
@@ -651,6 +656,139 @@ impl TensorIO for CPUTensor {
             write.write_all(&x.to_le_bytes())?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn field_locations_on_counts_valid_stride_windows() {
+        let field = Field {
+            size: 2,
+            stride: 1,
+            padding: 0,
+        };
+
+        assert_eq!(field.locations_on(4).unwrap(), 3);
+    }
+
+    #[test]
+    fn colify_collects_all_stride_one_patches_without_padding() {
+        let input = CPUTensor {
+            shape: vec![4, 4],
+            data: (0..16).map(|v| v as f64).collect(),
+        };
+        let field = Field {
+            size: 2,
+            stride: 1,
+            padding: 0,
+        };
+
+        let actual = input.colify(field).unwrap();
+
+        assert_eq!(actual.shape(), &[4, 9]);
+
+        let expected_columns = vec![
+            vec![0.0, 1.0, 4.0, 5.0],
+            vec![1.0, 2.0, 5.0, 6.0],
+            vec![2.0, 3.0, 6.0, 7.0],
+            vec![4.0, 5.0, 8.0, 9.0],
+            vec![5.0, 6.0, 9.0, 10.0],
+            vec![6.0, 7.0, 10.0, 11.0],
+            vec![8.0, 9.0, 12.0, 13.0],
+            vec![9.0, 10.0, 13.0, 14.0],
+            vec![10.0, 11.0, 14.0, 15.0],
+        ];
+
+        for (location_idx, column) in expected_columns.iter().enumerate() {
+            for (field_idx, expected_value) in column.iter().enumerate() {
+                println!("{} {} {:?} {:?}", location_idx, field_idx, actual.get(&[field_idx, location_idx]).copied(), Some(*expected_value));
+                assert_eq!(
+                    actual.get(&[field_idx, location_idx]).copied(),
+                    Some(*expected_value)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn colify_obeys_strides_greater_than_one() {
+        let input = CPUTensor {
+            shape: vec![4, 4],
+            data: (0..16).map(|v| v as f64).collect(),
+        };
+        let field = Field {
+            size: 2,
+            stride: 2,
+            padding: 0,
+        };
+
+        let actual = input.colify(field).unwrap();
+
+        assert_eq!(actual.shape(), &[4, 4]);
+
+        let expected_columns = vec![
+            vec![0.0, 1.0, 4.0, 5.0],
+            vec![2.0, 3.0, 6.0, 7.0],
+            vec![8.0, 9.0, 12.0, 13.0],
+            vec![10.0, 11.0, 14.0, 15.0],
+        ];
+
+        for (location_idx, column) in expected_columns.iter().enumerate() {
+                // println!("{} {} {:?} {:?}", location_idx, field_idx, actual.get(&[field_idx, location_idx]).copied(), Some(*expected_value));
+            for (field_idx, expected_value) in column.iter().enumerate() {
+                assert_eq!(
+                    actual.get(&[field_idx, location_idx]).copied(),
+                    Some(*expected_value)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn colify_injects_zero_padding_into_patches() {
+        let input = CPUTensor {
+            shape: vec![2, 2],
+            data: vec![1.0, 2.0, 3.0, 4.0],
+        };
+        let field = Field {
+            size: 2,
+            stride: 1,
+            padding: 1,
+        };
+
+        let actual = input.colify(field).unwrap();
+
+        assert_eq!(actual.shape(), &[4, 9]);
+
+        // [0 0 0 0]
+        // [0 1 2 0]
+        // [0 3 4 0]
+        // [0 0 0 0]
+
+        let expected_columns = vec![
+            vec![0.0, 0.0, 0.0, 1.0],
+            vec![0.0, 0.0, 1.0, 2.0],
+            vec![0.0, 0.0, 2.0, 0.0],
+            vec![0.0, 1.0, 0.0, 3.0],
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![2.0, 0.0, 4.0, 0.0],
+            vec![0.0, 3.0, 0.0, 0.0],
+            vec![3.0, 4.0, 0.0, 0.0],
+            vec![4.0, 0.0, 0.0, 0.0],
+        ];
+
+        for (location_idx, column) in expected_columns.iter().enumerate() {
+            for (field_idx, expected_value) in column.iter().enumerate() {
+                println!("{} {} {:?} {:?}", location_idx, field_idx, actual.get(&[field_idx, location_idx]).copied(), Some(*expected_value));
+                assert_eq!(
+                    actual.get(&[field_idx, location_idx]).copied(),
+                    Some(*expected_value)
+                );
+            }
+        }
     }
 }
 

@@ -8,7 +8,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use crate::tensor::{CPUTensor, Field, Generate, Tensor, TensorIO, TensorMut, Th, Tt};
+use crate::tensor::{CPUTensor, Field, Generate, Tensor, TensorIO, TensorMut, Tt};
 
 use super::{activation::Activation, autograd::Autograd, loss::Loss};
 
@@ -91,7 +91,7 @@ impl<T: TensorMut> NeuralNetwork<T> {
                     current = axon.forward(current)
                 }
                 let loss = loss.loss(&current, &Autograd::new(batch.output));
-                total_loss += loss.iter().sum::<f64>() / loss.shape()[0] as f64;
+                total_loss += loss.iter().sum::<f64>() / *loss.shape().first().unwrap_or(&1) as f64;
                 loss.backward();
                 // this drops the entire computation graph allowing us to move the weight/bias
                 // gradients out w/o a clone
@@ -157,7 +157,7 @@ impl<T: Tensor> Train<T> {
     fn batch(&self, size: usize) -> Vec<Example<T>> {
         let mut examples = self.examples.clone();
         examples.shuffle(&mut rand::rng());
-        self.examples
+        examples
             .chunks(size)
             .map(|examples| {
                 let input = T::tensor(Tt(examples
@@ -676,7 +676,6 @@ impl<T: Tensor> Conv2D<T> {
             .locations_on(*activations.shape().first().unwrap())
             .unwrap();
         let colified = activations.colify(self.field).unwrap();
-
         let convovled = self.weights.dot(&colified, 1).unwrap();
         let shape: Vec<usize> = [locs, locs, self.weights.shape()[0]]
             .into_iter()
@@ -686,7 +685,7 @@ impl<T: Tensor> Conv2D<T> {
         axes.swap(0, 1);
         let fixed = convovled.transpose(&axes).unwrap();
         let shaped = fixed.reshape(&shape).unwrap();
-        shaped.add(&self.biases).unwrap()
+        self.activation.activate(shaped.add(&self.biases).unwrap())
     }
 }
 

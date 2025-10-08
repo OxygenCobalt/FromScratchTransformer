@@ -387,17 +387,16 @@ impl<T: TensorMut> Operation<T> {
                 let new_shape = grad.shape();
                 let mut new_point = vec![0; new_shape.len()];
                 let mut old_point = vec![0; t.tensor.ndim()];
-                let jump = field.stride / 2;
                 'iterate: loop {
-                    let location_idx = new_point[0];
-                    let field_idx = new_point[1];
-                    old_point[2..].copy_from_slice(&new_point[2..]);
-                    old_point[0] = ((location_idx % locations) * field.stride) - jump
-                        + (field_idx % field.size);
-                    old_point[1] = ((location_idx / locations) * field.stride) - jump
-                        + (field_idx / field.size);
-                    if let Some(x) = t_grad.get_mut(&old_point) {
-                        *x = *grad.get(&new_point).unwrap();
+                    let field_idx = new_point[0];
+                    let location_idx = new_point[1];
+                    let x = -(field.padding as i64) + (((location_idx % locations) * field.stride) + (field_idx % field.size)) as i64;
+                    let y = -(field.padding as i64) + (((location_idx / locations) * field.stride) + (field_idx / field.size)) as i64;
+                    if x >= 0 && y >= 0 && x < t.tensor.shape()[0] as i64 && y < t.tensor.shape()[1] as i64 {
+                        old_point[0] = x as usize;
+                        old_point[1] = y as usize;
+                        old_point[2..].copy_from_slice(&new_point[2..]);
+                        *t_grad.get_mut(&old_point).unwrap() += *grad.get(&new_point).unwrap()
                     }
                     for (p, s) in new_point.iter_mut().zip(grad.shape().iter()) {
                         if *p == *s - 1 {
@@ -491,5 +490,35 @@ impl<T: TensorMut> Operation<T> {
                 t.backward(t_grad);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tensor::{CPUTensor, Field, Fill};
+
+    #[test]
+    fn colify_backward_accumulates_overlapping_patches() {
+        let input = Autograd::new(
+            CPUTensor::tensor(Fill {
+                shape: vec![4, 4],
+                with: 1.0,
+            })
+            .unwrap(),
+        );
+        let field = Field {
+            size: 3,
+            stride: 1,
+            padding: 0,
+        };
+
+        let loss = input.colify(field).unwrap().sum();
+        // println!("{:?}", input.colify(field).unwrap().shape());
+        loss.backward();
+        drop(loss);
+
+        let grad = input.into_grad().unwrap();
+        assert_eq!(*grad.get(&[1, 1]).unwrap(), 4.0);
     }
 }

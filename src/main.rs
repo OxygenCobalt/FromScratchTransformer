@@ -35,13 +35,13 @@ fn main() {
     let layers = Layers::new(vec![
         Layer::Conv2D {
             input_size: 28,
-            field: Field { size: 4, stride: 1 },
+            field: Field { size: 5, stride: 1, padding: 0 },
             filters: 20,
             activation: Activation::ReLU,
         },
         Layer::Pool2D {
-            input_size: 12,
-            field: Field { size: 2, stride: 1 },
+            input_size: 24,
+            field: Field { size: 2, stride: 2, padding: 0 },
             filters: 20,
         },
         Layer::Dense {
@@ -52,9 +52,9 @@ fn main() {
     .unwrap();
     let checkpointing = Checkpoint::new(&layers, &mnist, Path::new("data/checkpoints/mnist"));
     let hyperparams = Hyperparams {
-        epochs: 60,
+        epochs: 1,
         batch_size: 10,
         learning_rate: 0.1,
     };
-    NeuralNetwork::train(&layers, &checkpointing, &mnist, &hyperparams, &LogLikelihood).unwrap();
+    NeuralNetwork::train(&layers, &mnist, &mnist, &hyperparams, &LogLikelihood).unwrap();
 }
