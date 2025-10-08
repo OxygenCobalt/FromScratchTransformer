@@ -1,37 +1,32 @@
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+use rand::seq::SliceRandom;
 use rand_distr::{Distribution, Normal};
 use std::fs::File;
+use std::io::{self, Read, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-use std::io::{self, Read, Write};
-use rand::seq::SliceRandom;
 
 use crate::tensor::{CPUTensor, Field, Generate, Tensor, TensorIO, TensorMut, Th, Tt};
 
-use super::{
-    activation::Activation,
-    autograd::Autograd,
-    loss::Loss,
-};
+use super::{activation::Activation, autograd::Autograd, loss::Loss};
 
 pub struct NeuralNetwork<T: Tensor> {
-    axons: Vec<Axon<T>>
+    axons: Vec<Axon<T>>,
 }
 
-impl <T: Tensor> NeuralNetwork<T> {
-    pub fn test(
-        &self,
-        test: &Test<T>,
-        loss: &impl Loss,
-    ) -> TestResults<T> {
+impl<T: Tensor> NeuralNetwork<T> {
+    pub fn test(&self, test: &Test<T>, loss: &impl Loss) -> TestResults<T> {
         let mut sum = 0.0;
         let mut results = Vec::new();
         for example in &test.examples {
             let activations = self.evaluate(&example.input);
             sum += loss.loss(&activations, &example.output).get(&[]).unwrap();
-            results.push(TestResult { example: example.clone(), activations });
+            results.push(TestResult {
+                example: example.clone(),
+                activations,
+            });
         }
         let loss = sum / test.examples.len() as f64;
         return TestResults {
@@ -49,7 +44,7 @@ impl <T: Tensor> NeuralNetwork<T> {
     }
 }
 
-impl <T: TensorMut> NeuralNetwork<T> {
+impl<T: TensorMut> NeuralNetwork<T> {
     pub fn train(
         setup: &impl Setup<T>,
         reporting: &impl Reporting<T>,
@@ -57,17 +52,28 @@ impl <T: TensorMut> NeuralNetwork<T> {
         hyperparams: &Hyperparams,
         loss: &impl Loss,
     ) -> io::Result<Self> {
-        println!("{}: epochs = {} / batch size = {} / learning rate = {}", 
+        println!(
+            "{}: epochs = {} / batch size = {} / learning rate = {}",
             "train".cyan(),
             hyperparams.epochs,
             hyperparams.batch_size,
-            hyperparams.learning_rate);
+            hyperparams.learning_rate
+        );
         let mut init = setup.setup()?;
         let start = init.at_epoch.unwrap_or(0);
         if start > hyperparams.epochs {
-            return Err(io::Error::new(io::ErrorKind::Other, "invalid setup, epoch exceeds training parameters"))
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "invalid setup, epoch exceeds training parameters",
+            ));
         }
-        println!("{}: starting w/nn @ {}", "train".cyan(), init.at_epoch.map(|e| format!["epoch {}", e + 1]).unwrap_or_else(|| "init".to_string()));
+        println!(
+            "{}: starting w/nn @ {}",
+            "train".cyan(),
+            init.at_epoch
+                .map(|e| format!["epoch {}", e + 1])
+                .unwrap_or_else(|| "init".to_string())
+        );
         reporting.report(&init.nn, loss, None)?;
         for epoch in init.at_epoch.unwrap_or(0)..hyperparams.epochs {
             let batches = training_set.get()?.batch(hyperparams.batch_size);
@@ -85,7 +91,7 @@ impl <T: TensorMut> NeuralNetwork<T> {
                     current = axon.forward(current)
                 }
                 let loss = loss.loss(&current, &Autograd::new(batch.output));
-                total_loss += loss.get(&[]).unwrap();
+                total_loss += loss.iter().sum::<f64>() / loss.shape()[0] as f64;
                 loss.backward();
                 // this drops the entire computation graph allowing us to move the weight/bias
                 // gradients out w/o a clone
@@ -106,7 +112,7 @@ impl <T: TensorMut> NeuralNetwork<T> {
     }
 }
 
-impl <T: TensorIO> NeuralNetwork<T> {
+impl<T: TensorIO> NeuralNetwork<T> {
     pub fn read(read: &mut impl Read) -> io::Result<Self> {
         let mut signature = [0u8; 8];
         read.read(&mut signature)?;
@@ -147,26 +153,22 @@ pub struct Train<T: Tensor> {
     pub examples: Vec<Example<T>>,
 }
 
-impl <T: Tensor> Train<T> {
+impl<T: Tensor> Train<T> {
     fn batch(&self, size: usize) -> Vec<Example<T>> {
         let mut examples = self.examples.clone();
         examples.shuffle(&mut rand::rng());
         self.examples
             .chunks(size)
             .map(|examples| {
-                let input = T::tensor(Tt(
-                    examples
-                        .iter()
-                        .map(|e| e.input.clone())
-                        .collect::<Vec<T>>(),
-                ))
+                let input = T::tensor(Tt(examples
+                    .iter()
+                    .map(|e| e.input.clone())
+                    .collect::<Vec<T>>()))
                 .unwrap();
-                let output = T::tensor(Tt(
-                    examples
-                        .iter()
-                        .map(|e| e.output.clone())
-                        .collect::<Vec<T>>(),
-                ))
+                let output = T::tensor(Tt(examples
+                    .iter()
+                    .map(|e| e.output.clone())
+                    .collect::<Vec<T>>()))
                 .unwrap();
                 Example { input, output }
             })
@@ -179,7 +181,8 @@ pub trait Setup<T: Tensor> {
 }
 
 pub trait Reporting<T: Tensor> {
-    fn report(&self, nn: &NeuralNetwork<T>, loss: &impl Loss, epoch: Option<u64>) -> io::Result<()>;
+    fn report(&self, nn: &NeuralNetwork<T>, loss: &impl Loss, epoch: Option<u64>)
+    -> io::Result<()>;
 }
 
 pub trait TrainingSet<T: Tensor> {
@@ -188,9 +191,8 @@ pub trait TrainingSet<T: Tensor> {
 
 pub struct Init<T: Tensor> {
     nn: NeuralNetwork<T>,
-    at_epoch: Option<u64>
+    at_epoch: Option<u64>,
 }
-
 
 pub struct Layers(Vec<Layer>);
 
@@ -203,7 +205,7 @@ impl Layers {
     }
 }
 
-impl <T: Tensor> Setup<T> for Layers {
+impl<T: Tensor> Setup<T> for Layers {
     fn setup(&self) -> io::Result<Init<T>> {
         let mut axons = vec![];
         for i in 0..self.0.len() {
@@ -211,7 +213,7 @@ impl <T: Tensor> Setup<T> for Layers {
         }
         Ok(Init {
             nn: NeuralNetwork { axons },
-            at_epoch: None
+            at_epoch: None,
         })
     }
 }
@@ -220,25 +222,30 @@ pub struct Checkpoint<'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> {
     setup: &'a S,
     reporting: &'a R,
     path: &'a Path,
-    data: PhantomData<T>
+    data: PhantomData<T>,
 }
 
-impl <'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Checkpoint<'a, T, S, R> {
+impl<'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Checkpoint<'a, T, S, R> {
     pub fn new(setup: &'a S, reporting: &'a R, path: &'a Path) -> Self {
         Self {
             setup,
             reporting,
             path,
-            data: PhantomData
+            data: PhantomData,
         }
     }
 
     fn checkpoint_path(&self, epoch: Option<u64>) -> PathBuf {
-        self.path.join(Path::new(&format!["{}.nn", epoch.map(|e| (e + 1).to_string()).unwrap_or_else(|| "init".to_string())]))
+        self.path.join(Path::new(&format![
+            "{}.nn",
+            epoch
+                .map(|e| (e + 1).to_string())
+                .unwrap_or_else(|| "init".to_string())
+        ]))
     }
 }
 
-impl <'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Setup<T> for Checkpoint<'a, T, S, R> {
+impl<'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Setup<T> for Checkpoint<'a, T, S, R> {
     fn setup(&self) -> io::Result<Init<T>> {
         fn open<T: TensorIO>(path: PathBuf) -> io::Result<NeuralNetwork<T>> {
             let mut file = File::open(path)?;
@@ -246,25 +253,44 @@ impl <'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Setup<T> for Checkpoint<'a,
             Ok(nn)
         }
         let amount = self.path.read_dir()?.count();
-        for epoch in (0..amount).map(|i| Some(i as u64)).rev().chain(std::iter::once(None)) {
+        for epoch in (0..amount)
+            .map(|i| Some(i as u64))
+            .rev()
+            .chain(std::iter::once(None))
+        {
             let path = self.checkpoint_path(epoch);
             if let Ok(nn) = open(path) {
-                println!("{}: located checkpointed nn at epoch {}", "checkpoint".red(), epoch.map(|e| (e + 1).to_string()).unwrap_or_else(|| "init".to_string()));
+                println!(
+                    "{}: located checkpointed nn at epoch {}",
+                    "checkpoint".red(),
+                    epoch
+                        .map(|e| (e + 1).to_string())
+                        .unwrap_or_else(|| "init".to_string())
+                );
                 return Ok(Init {
                     nn,
-                    at_epoch: epoch
-                })
+                    at_epoch: epoch,
+                });
             }
         }
         self.setup.setup()
     }
 }
 
-impl <'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Reporting<T> for Checkpoint<'a, T, S, R> {
-    fn report(&self, nn: &NeuralNetwork<T>, loss: &impl Loss, epoch: Option<u64>) -> io::Result<()> {
+impl<'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Reporting<T> for Checkpoint<'a, T, S, R> {
+    fn report(
+        &self,
+        nn: &NeuralNetwork<T>,
+        loss: &impl Loss,
+        epoch: Option<u64>,
+    ) -> io::Result<()> {
         self.reporting.report(nn, loss, epoch)?;
         let path = self.checkpoint_path(epoch);
-        println!("{}: writing nn to {}", "checkpoint".red(), path.display().to_string());
+        println!(
+            "{}: writing nn to {}",
+            "checkpoint".red(),
+            path.display().to_string()
+        );
         let mut file = File::create(path)?;
         nn.write(&mut file)?;
         Ok(())
@@ -274,7 +300,7 @@ impl <'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Reporting<T> for Checkpoint
 pub struct Hyperparams {
     pub epochs: u64,
     pub batch_size: usize,
-    pub learning_rate: f64
+    pub learning_rate: f64,
 }
 
 pub struct Test<T: Tensor> {
@@ -288,11 +314,10 @@ pub struct TestResults<T: Tensor> {
 
 pub struct TestResult<T: Tensor> {
     pub example: Example<T>,
-    pub activations: T
+    pub activations: T,
 }
 
-static NORMAL: LazyLock<Normal<f64>> =
-    std::sync::LazyLock::new(|| Normal::new(0.0, 1.0).unwrap());
+static NORMAL: LazyLock<Normal<f64>> = std::sync::LazyLock::new(|| Normal::new(0.0, 1.0).unwrap());
 
 pub enum Layer {
     Dense {
@@ -308,13 +333,13 @@ pub enum Layer {
         input_size: usize,
         field: Field,
         filters: usize,
-        activation: Activation
+        activation: Activation,
     },
     Pool2D {
         input_size: usize,
         field: Field,
         filters: usize,
-    }
+    },
 }
 
 impl Layer {
@@ -334,12 +359,17 @@ impl Layer {
                 ff: FeedForward::new(last, *neurons, *activation),
                 rate: *rate,
             },
-            Self::Conv2D { field, filters, activation, .. } => {
-                Axon::Conv2D { conv: Conv2D::new(*field, *filters, *activation) }
+            Self::Conv2D {
+                field,
+                filters,
+                activation,
+                ..
+            } => Axon::Conv2D {
+                conv: Conv2D::new(*field, *filters, *activation),
             },
-            Self::Pool2D { field, .. } => {
-                Axon::Pool2D { pool: Pool2D::new(*field) }
-            }
+            Self::Pool2D { field, .. } => Axon::Pool2D {
+                pool: Pool2D::new(*field),
+            },
         }
     }
 
@@ -348,9 +378,26 @@ impl Layer {
             Self::Dense { neurons, .. } => vec![*neurons],
             Self::Dropout { neurons, .. } => vec![*neurons],
             // todo: validate locations_on during layer creation, also stop calling it twice
-            Self::Conv2D  { input_size, field, filters, .. } => vec![ *filters, field.locations_on(*input_size).unwrap(), field.locations_on(*input_size).unwrap()],
-            Self::Pool2D { input_size, field, filters } => {
-                vec![*filters, field.locations_on(*input_size).unwrap(), field.locations_on(*input_size).unwrap()]
+            Self::Conv2D {
+                input_size,
+                field,
+                filters,
+                ..
+            } => vec![
+                *filters,
+                field.locations_on(*input_size).unwrap(),
+                field.locations_on(*input_size).unwrap(),
+            ],
+            Self::Pool2D {
+                input_size,
+                field,
+                filters,
+            } => {
+                vec![
+                    *filters,
+                    field.locations_on(*input_size).unwrap(),
+                    field.locations_on(*input_size).unwrap(),
+                ]
             }
         }
     }
@@ -360,7 +407,7 @@ enum Axon<T: Tensor> {
     Dense { ff: FeedForward<T> },
     Dropout { ff: FeedForward<T>, rate: f64 },
     Conv2D { conv: Conv2D<T> },
-    Pool2D { pool: Pool2D<T> }
+    Pool2D { pool: Pool2D<T> },
 }
 
 impl<T: Tensor> Axon<T> {
@@ -369,7 +416,7 @@ impl<T: Tensor> Axon<T> {
             Self::Dense { ff } => ff.forward(activations),
             Self::Dropout { ff, .. } => ff.forward(activations),
             Self::Conv2D { conv } => conv.forward(&activations),
-            Self::Pool2D { pool } => pool.forward(activations)
+            Self::Pool2D { pool } => pool.forward(activations),
         }
     }
 }
@@ -405,13 +452,20 @@ impl<T: TensorMut> Axon<T> {
                         flattened_input_shape: ff.flattened_input_shape,
                     },
                 }
-            },
-            Self::Conv2D { conv } => {
-                Axon::Conv2D { conv: Conv2D { weights: Autograd::new(conv.weights.clone()), field: conv.field, activation: conv.activation } }
-            },
-            Self::Pool2D { pool } => {
-                Axon::Pool2D { pool: Pool2D { field: pool.field, phantom: PhantomData } }
             }
+            Self::Conv2D { conv } => Axon::Conv2D {
+                conv: Conv2D {
+                    weights: Autograd::new(conv.weights.clone()),
+                    field: conv.field,
+                    activation: conv.activation,
+                },
+            },
+            Self::Pool2D { pool } => Axon::Pool2D {
+                pool: Pool2D {
+                    field: pool.field,
+                    phantom: PhantomData,
+                },
+            },
         }
     }
 
@@ -477,10 +531,10 @@ impl<T: TensorIO> Axon<T> {
                 write.write_all(b"AxonDrop")?;
                 write.write_all(&rate.to_le_bytes())?;
                 ff.write(write)
-            },
+            }
             Self::Conv2D { conv } => {
                 todo!()
-            },
+            }
             Self::Pool2D { pool } => {
                 todo!()
             }
@@ -488,13 +542,12 @@ impl<T: TensorIO> Axon<T> {
     }
 }
 
-
 struct FeedForward<T: Tensor> {
     weights: T,
     biases: T,
     activation: Activation,
     flattened_input_shape: usize,
-    flattened_input_ndim: usize
+    flattened_input_ndim: usize,
 }
 
 impl<T: Tensor> FeedForward<T> {
@@ -514,7 +567,7 @@ impl<T: Tensor> FeedForward<T> {
             .unwrap(),
             activation,
             flattened_input_shape: flattened,
-            flattened_input_ndim: input_shape.len()
+            flattened_input_ndim: input_shape.len(),
         }
     }
 
@@ -522,7 +575,6 @@ impl<T: Tensor> FeedForward<T> {
         // we ignore any additional batching parameters that would be appended to the activation shape
         let mut flattened_shape = vec![self.flattened_input_shape];
         flattened_shape.extend_from_slice(&activations.shape()[self.flattened_input_ndim..]);
-        //println!("{:?} {:?} {:?} {:?}", self.last_shape, self.weights.shape(), activations.shape(), &flattened_shape);
         self.activation.activate(
             self.weights
                 .dot(&activations.reshape(&flattened_shape).unwrap(), 1)
@@ -551,7 +603,7 @@ impl<T: TensorIO> FeedForward<T> {
         let biases = T::read(read)?;
         todo!()
         // Ok(Self {
-            
+
         //     activation,
         //     weights,
         //     biases,
@@ -569,64 +621,75 @@ impl<T: TensorIO> FeedForward<T> {
 struct Conv2D<T: Tensor> {
     weights: T,
     field: Field,
-    activation: Activation
+    activation: Activation,
 }
 
-impl <T: Tensor> Conv2D<T> {
+impl<T: Tensor> Conv2D<T> {
     fn new(field: Field, filters: usize, activation: Activation) -> Self {
-        let weights = T::tensor(
-            Generate {
-                shape: vec![filters, field.size * field.size],
-                with: || NORMAL.sample(&mut rand::rng())
-            }
-        ).unwrap();
+        let weights = T::tensor(Generate {
+            shape: vec![filters, field.size * field.size],
+            with: || NORMAL.sample(&mut rand::rng()),
+        })
+        .unwrap();
         Self {
             weights,
             field,
-            activation
+            activation,
         }
     }
 
     fn forward(&self, activations: &T) -> T {
-        let locs = self.field.locations_on(*activations.shape().first().unwrap()).unwrap();
+        let locs = self
+            .field
+            .locations_on(*activations.shape().first().unwrap())
+            .unwrap();
         let colified = activations.colify(self.field).unwrap();
-        // println!("{:?} {:?}", self.weights.shape(), colified.shape());
+
         let convovled = self.weights.dot(&colified, 1).unwrap();
-        let shape: Vec<usize> = [locs, locs, self.weights.shape()[0]].into_iter().chain(activations.shape()[2..].iter().cloned()).collect();
-        // println!("{:?}", colified.shape());
+        let shape: Vec<usize> = [locs, locs, self.weights.shape()[0]]
+            .into_iter()
+            .chain(activations.shape()[2..].iter().cloned())
+            .collect();
+
         // TODO(human): Fix the axes computation - should be based on convovled.ndim(), not colified.ndim()
         let mut axes: Vec<usize> = (0..convovled.ndim()).collect();
         axes.swap(0, 1);
         let fixed = convovled.transpose(&axes).unwrap();
-        // println!("{:?}", fixed.shape());
+
         let shaped = fixed.reshape(&shape).unwrap();
-        // println!("{:?}", shaped.shape());
+
         shaped
     }
 }
 
 struct Pool2D<T: Tensor> {
     field: Field,
-    phantom: PhantomData<T>
+    phantom: PhantomData<T>,
 }
 
-impl <T: Tensor> Pool2D<T> {
+impl<T: Tensor> Pool2D<T> {
     fn new(field: Field) -> Self {
         Self {
             field,
-            phantom: PhantomData
+            phantom: PhantomData,
         }
     }
 }
 
-impl <T: Tensor> Pool2D<T> {
+impl<T: Tensor> Pool2D<T> {
     fn forward(&self, activations: T) -> T {
-        let locs = self.field.locations_on(*activations.shape().first().unwrap()).unwrap();
-        // println!("conv {:?}", activations.shape());
+        let locs = self
+            .field
+            .locations_on(*activations.shape().first().unwrap())
+            .unwrap();
+
         let colified = activations.colify(self.field).unwrap();
         let maxed = colified.colmax().unwrap();
-        let shape: Vec<usize> = [locs, locs].into_iter().chain(activations.shape()[2..].iter().cloned()).collect();
-        // println!("{:?} {:?}", maxed.shape(), shape);
+        let shape: Vec<usize> = [locs, locs]
+            .into_iter()
+            .chain(activations.shape()[2..].iter().cloned())
+            .collect();
+
         maxed.reshape(&shape).unwrap()
     }
 }

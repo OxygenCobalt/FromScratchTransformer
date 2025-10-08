@@ -2,7 +2,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::tensor::{Field, Fill, Generate, TensorInit};
 
-use super::tensor::{TensorMut, Tensor};
+use super::tensor::{Tensor, TensorMut};
 
 #[derive(Clone)]
 pub struct Autograd<T: TensorMut>(AutogradNode<T>);
@@ -112,7 +112,11 @@ impl<T: TensorMut> Tensor for Autograd<T> {
     }
 
     fn colify(&self, field: Field) -> Option<Self> {
-        Operation::Colify { t: self.0.clone(), field }.forward()
+        Operation::Colify {
+            t: self.0.clone(),
+            field,
+        }
+        .forward()
     }
 
     fn colmax(&self) -> Option<Self> {
@@ -120,15 +124,27 @@ impl<T: TensorMut> Tensor for Autograd<T> {
     }
 
     fn reshape(self, shape: &[usize]) -> Option<Self> {
-        Operation::Reshape { t: self.0.clone(), shape: shape.to_vec() }.forward()
+        Operation::Reshape {
+            t: self.0.clone(),
+            shape: shape.to_vec(),
+        }
+        .forward()
     }
 
     fn transpose(&self, axes: &[usize]) -> Option<Self> {
-        Operation::Transpose { t: self.0.clone(), axes: axes.to_vec() }.forward()
+        Operation::Transpose {
+            t: self.0.clone(),
+            axes: axes.to_vec(),
+        }
+        .forward()
     }
 
     fn at_argmax(&self, of: &Self) -> Option<Self> {
-        Operation::AtArgmax { t: self.0.clone(), of: of.0.clone() }.forward()
+        Operation::AtArgmax {
+            t: self.0.clone(),
+            of: of.0.clone(),
+        }
+        .forward()
     }
 }
 
@@ -200,20 +216,20 @@ enum Operation<T: TensorMut> {
         field: Field,
     },
     Colmax {
-        t: AutogradNode<T>
+        t: AutogradNode<T>,
     },
     Reshape {
         t: AutogradNode<T>,
-        shape: Vec<usize>
+        shape: Vec<usize>,
     },
     Transpose {
         t: AutogradNode<T>,
-        axes: Vec<usize>
+        axes: Vec<usize>,
     },
     AtArgmax {
         t: AutogradNode<T>,
-        of: AutogradNode<T>
-    }
+        of: AutogradNode<T>,
+    },
 }
 
 impl<T: TensorMut> Operation<T> {
@@ -284,7 +300,7 @@ impl<T: TensorMut> Operation<T> {
             Self::Colmax { t } => t.tensor.colmax(),
             Self::Reshape { t, shape } => t.tensor.clone().reshape(shape),
             Self::Transpose { t, axes } => t.tensor.transpose(&axes),
-            Self::AtArgmax { t, of } => t.tensor.at_argmax(&of.tensor)
+            Self::AtArgmax { t, of } => t.tensor.at_argmax(&of.tensor),
         };
         tensor.map(|tensor| {
             Autograd(Rc::new(Computation {
@@ -311,8 +327,7 @@ impl<T: TensorMut> Operation<T> {
                 let mut rhs_axes: Vec<usize> = (0..rhs.tensor.ndim()).collect();
                 rhs_axes.rotate_right(lhs_shift);
                 lhs.backward(
-                    grad
-                        .dot(&rhs.tensor.transpose(&rhs_axes).unwrap(), lhs_shift)
+                    grad.dot(&rhs.tensor.transpose(&rhs_axes).unwrap(), lhs_shift)
                         .unwrap(),
                 );
 
@@ -359,10 +374,16 @@ impl<T: TensorMut> Operation<T> {
                 loc.iter_mut()
                     .for_each(|x| *x = if *x >= *u { 1.0 } else { 0.0 });
                 t.backward(loc.mul(grad).unwrap());
-            },
+            }
             Self::Colify { t, field } => {
-                let mut t_grad = T::tensor(Fill { shape: t.tensor.shape().to_vec(), with: 0.0 }).unwrap();
-                let locations = field.locations_on(*t.tensor.shape().first().unwrap()).unwrap();
+                let mut t_grad = T::tensor(Fill {
+                    shape: t.tensor.shape().to_vec(),
+                    with: 0.0,
+                })
+                .unwrap();
+                let locations = field
+                    .locations_on(*t.tensor.shape().first().unwrap())
+                    .unwrap();
                 let new_shape = grad.shape();
                 let mut new_point = vec![0; new_shape.len()];
                 let mut old_point = vec![0; t.tensor.ndim()];
@@ -371,8 +392,10 @@ impl<T: TensorMut> Operation<T> {
                     let location_idx = new_point[0];
                     let field_idx = new_point[1];
                     old_point[2..].copy_from_slice(&new_point[2..]);
-                    old_point[0] = ((location_idx % locations) * field.stride) - jump + (field_idx % field.size);
-                    old_point[1] = ((location_idx / locations) * field.stride) - jump + (field_idx / field.size);
+                    old_point[0] = ((location_idx % locations) * field.stride) - jump
+                        + (field_idx % field.size);
+                    old_point[1] = ((location_idx / locations) * field.stride) - jump
+                        + (field_idx / field.size);
                     if let Some(x) = t_grad.get_mut(&old_point) {
                         *x = *grad.get(&new_point).unwrap();
                     }
@@ -387,15 +410,19 @@ impl<T: TensorMut> Operation<T> {
                     break;
                 }
                 t.backward(t_grad);
-            },
+            }
             Self::Colmax { t } => {
-                let mut t_grad = T::tensor(Fill { shape: t.tensor.shape().to_vec(), with: 0.0 }).unwrap();
+                let mut t_grad = T::tensor(Fill {
+                    shape: t.tensor.shape().to_vec(),
+                    with: 0.0,
+                })
+                .unwrap();
                 let mut grad_point = vec![0; grad.ndim()];
                 let mut column_point = vec![0; t.tensor.ndim()];
                 'iterate: loop {
                     column_point[1..].copy_from_slice(&grad_point);
                     let mut max_idx = 0;
-                    let mut max_value = f64::MIN; 
+                    let mut max_value = f64::MIN;
                     for i in 0..t.tensor.shape()[0] {
                         column_point[0] = i;
                         let cur_value = t.tensor.get(&column_point).unwrap();
@@ -418,36 +445,39 @@ impl<T: TensorMut> Operation<T> {
                     break;
                 }
                 t.backward(t_grad);
-            },
+            }
             Self::Reshape { t, shape } => {
                 t.backward(grad.clone().reshape(t.tensor.shape()).unwrap())
-            },
+            }
             Self::Transpose { t, axes } => {
                 let mut rev_axes = vec![0; axes.len()];
                 for i in 0..axes.len() {
                     rev_axes[axes[i]] = i;
                 }
                 t.backward(grad.transpose(&rev_axes).unwrap());
-            },
-            Self::AtArgmax { t, of } => {                
-                fn argmax<T: Tensor>(tensor: &T) -> usize {
-                    tensor.iter().enumerate().max_by(|(_, x), (_, y)| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)).unwrap().0
-                }
-                let argmax = argmax(&of.tensor);
+            }
+            Self::AtArgmax { t, of } => {
                 let mut t_grad = T::tensor(Fill {
                     shape: t.tensor.shape().to_vec(),
-                    with: 0.0
-                }).unwrap();
+                    with: 0.0,
+                })
+                .unwrap();
                 let mut t_grad_point = vec![0; t_grad.shape().len()];
                 let mut grad_point = vec![0; grad.shape().len()];
                 'iterate: loop {
+                    let mut argmax = 0;
+                    let mut max = 0.0;
+                    t_grad_point[1..].copy_from_slice(&grad_point);
                     for i in 0..t.tensor.shape()[0] {
                         t_grad_point[0] = i;
-                        t_grad_point[1..].copy_from_slice(&grad_point);
-                        if i == argmax {
-                            *t_grad.get_mut(&t_grad_point).unwrap() = *grad.get(&grad_point).unwrap();
+                        let x = *of.tensor.get(&t_grad_point).unwrap();
+                        if x > max {
+                            argmax = i;
+                            max = x;
                         }
                     }
+                    t_grad_point[0] = argmax;
+                    *t_grad.get_mut(&t_grad_point).unwrap() = *grad.get(&grad_point).unwrap();
                     for (p, s) in grad_point.iter_mut().zip(grad.shape().iter()) {
                         if *p == *s - 1 {
                             *p = 0;

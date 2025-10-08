@@ -5,7 +5,7 @@ pub enum Activation {
     Sigmoid,
     ReLU,
     SiLU,
-    Softmax
+    Softmax,
 }
 
 impl Activation {
@@ -14,7 +14,7 @@ impl Activation {
             Self::Sigmoid => b"ActvSigm",
             Self::ReLU => b"ActvReLU",
             Self::SiLU => b"ActvSiLU",
-            Self::Softmax => b"ActvSfmx"
+            Self::Softmax => b"ActvSfmx",
         }
     }
 
@@ -33,7 +33,7 @@ impl Activation {
             Self::Sigmoid => T::scalar(1.0).add(&y.neg().exp()).unwrap().pow(-1),
             Self::ReLU => y.max(0.0),
             Self::SiLU => y.clone().mul(&Self::Sigmoid.activate(y)).unwrap(),
-            Self::Softmax => y.clone().exp().sum().pow(-1).mul(&y.exp()).unwrap()
+            Self::Softmax => y.clone().exp().sum().pow(-1).mul(&y.exp()).unwrap(),
         }
     }
 }

@@ -3,20 +3,24 @@ use std::{fs::File, path::Path};
 use arrow::array::{Array, StringArray};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
-use parquet::{arrow::arrow_reader::ArrowReaderBuilder};
+use parquet::arrow::arrow_reader::ArrowReaderBuilder;
 
 pub struct WikiText103 {
     pub train: Vec<String>,
     pub test: Vec<String>,
-    pub validation: Vec<String>
+    pub validation: Vec<String>,
 }
 
 impl WikiText103 {
     pub fn load(path: &Path) -> Result<Self, parquet::errors::ParquetError> {
-        let mut train = load_wikitext(&path.join("wikitext-103-raw-v1/train-00000-of-00002.parquet"))?;
-        train.extend(load_wikitext(&path.join("wikitext-103-raw-v1/train-00001-of-00002.parquet"))?);
+        let mut train =
+            load_wikitext(&path.join("wikitext-103-raw-v1/train-00000-of-00002.parquet"))?;
+        train.extend(load_wikitext(
+            &path.join("wikitext-103-raw-v1/train-00001-of-00002.parquet"),
+        )?);
         let test = load_wikitext(&path.join("wikitext-103-raw-v1/test-00000-of-00001.parquet"))?;
-        let validation = load_wikitext(&path.join("wikitext-103-raw-v1/validation-00000-of-00001.parquet"))?;
+        let validation =
+            load_wikitext(&path.join("wikitext-103-raw-v1/validation-00000-of-00001.parquet"))?;
         println!(
             "{}: {} / {}/ {}",
             "wikitext".green(),
@@ -24,7 +28,11 @@ impl WikiText103 {
             format!["{} test examples", test.len()],
             format!["{} validation examples", test.len()]
         );
-        Ok(Self { train, test, validation })
+        Ok(Self {
+            train,
+            test,
+            validation,
+        })
     }
 }
 
