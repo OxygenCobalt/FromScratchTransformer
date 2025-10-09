@@ -24,7 +24,7 @@ mod wikitext;
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() {
-    let threads = std::thread::available_parallelism().unwrap().get() / 4;
+    let threads = std::thread::available_parallelism().unwrap().get();
     println!("{}: using {} threads", "init".white(), threads);
     ThreadPoolBuilder::new()
         .num_threads(threads)
@@ -46,7 +46,7 @@ fn main() {
         },
         Layer::Dense {
             neurons: 10,
-            activation: Activation::Sigmoid,
+            activation: Activation::Softmax,
         },
     ])
     .unwrap();

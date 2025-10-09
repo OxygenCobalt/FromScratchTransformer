@@ -83,7 +83,7 @@ fn load_mnist<T: Tensor>(path: &Path) -> Result<Vec<Example<T>>, parquet::errors
     let parquet = ArrowReaderBuilder::try_new(train)?.build()?;
     let mut images: Vec<T> = Vec::new();
     let mut labels: Vec<T> = Vec::new();
-    for item in parquet.take(1) {
+    for item in parquet {
         let record_batch = item.unwrap();
         let image_column = record_batch
             .column_by_name("image")

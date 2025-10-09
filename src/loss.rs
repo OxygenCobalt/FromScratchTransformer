@@ -16,8 +16,12 @@ pub struct LogLikelihood;
 
 impl Loss for LogLikelihood {
     fn loss<T: Tensor>(&self, batch_activations: &T, output: &T) -> T {
-        // dbg!(batch_activations.iter().cloned().collect::<Vec<f64>>());
-        // dbg!(output.iter().cloned().collect::<Vec<f64>>());
-        batch_activations.at_argmax(&output).unwrap().ln().neg()
+        let max = batch_activations.colmax().unwrap();
+        let mut shape = vec![1];
+        shape.extend_from_slice(batch_activations.shape()[1..].into());
+        let max_broadcast = max.clone().reshape(&shape).unwrap();
+        let shifted = batch_activations.clone().sub(&max_broadcast).unwrap();
+        let log_sum_exp = shifted.clone().exp().sum().ln().add(&max).unwrap();
+        log_sum_exp.sub(&batch_activations.at_argmax(&output).unwrap()).unwrap()
     }
 }

@@ -1,3 +1,4 @@
+use core::f64;
 use std::{
     fmt::Debug,
     io::{self, Read, Write},
@@ -335,84 +336,72 @@ impl Tensor for CPUTensor {
         let mut new_shape: Vec<usize> = lhs_survivors.to_vec();
         new_shape.extend_from_slice(rhs_survivors);
 
-        let new = Self {
+        let mut new = Self {
             data: vec![0.0; Self::len(new_shape.as_slice())],
             shape: new_shape,
         };
 
         let mut new_point = vec![0; new.shape.len()];
 
-        let mut point_iter: Vec<Vec<usize>> = Vec::new();
-        point_iter.resize_with(Self::len(&new.shape), || {
-            let this_point = new_point.clone();
-            for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
-                if *p == *s - 1 {
-                    *p = 0;
-                } else {
-                    *p += 1;
-                    break;
-                }
-            }
-            this_point
-        });
+        let mut lhs_point = vec![0; self.ndim()];
+        let mut rhs_point = vec![0; other.ndim()];
+        let lhs_contraction_point = lhs_point.len() - depth;
+        // if i dont force the evaluation of (new_point.len() - lhs_survivors.len()) first ill underflow
+        let rhs_survival_point = rhs_point.len() - (new_point.len() - depth);
+        let mut contraction_point = vec![0; contraction_shape.len()];
+        'iterate: loop {
+            // lhs_point[..lhs_survival_point].copy_from_slice(&new_point[..depth]);
+            // rhs_point[rhs_survival_point..].copy_from_slice(&new_point[depth..]);
 
-        use std::cell::UnsafeCell;
-
-        struct SyncWorkaroundNeverUseThis<T>(UnsafeCell<T>);
-        unsafe impl<T> Sync for SyncWorkaroundNeverUseThis<T> {}
-
-        impl<T> SyncWorkaroundNeverUseThis<T> {
-            fn new(value: T) -> Self {
-                Self(UnsafeCell::new(value))
-            }
-
-            unsafe fn get(&self) -> *mut T {
-                self.0.get()
-            }
-
-            fn into_inner(self) -> T {
-                self.0.into_inner()
-            }
-        }
-
-        let new_ref = SyncWorkaroundNeverUseThis::new(new);
-        point_iter.into_iter().for_each(|new_point| {
-            let mut lhs_point = vec![0; self.ndim()];
-            let mut rhs_point = vec![0; other.ndim()];
-            let lhs_contraction_point = lhs_point.len() - depth;
-            let lhs_survival_point = depth;
-
-            let rhs_contraction_point = depth;
-            // if i dont force the evaluation of (new_point.len() - lhs_survivors.len()) first ill underflow
-            let rhs_survival_point = rhs_point.len() - (new_point.len() - depth);
-            
-            lhs_point[..lhs_survival_point].copy_from_slice(&new_point[..depth]);
-            rhs_point[rhs_survival_point..].copy_from_slice(&new_point[depth..]);
-            let mut contraction_point = vec![0; contraction_shape.len()];
             let mut sum = 0.0;
             'summate: loop {
-                rhs_point[..rhs_contraction_point].copy_from_slice(&contraction_point);
-                lhs_point[lhs_contraction_point..].copy_from_slice(&contraction_point);
+                // rhs_point[..rhs_contraction_point].copy_from_slice(&contraction_point);
+                // lhs_point[lhs_contraction_point..].copy_from_slice(&contraction_point);
                 sum += *self.get(&lhs_point).unwrap() * *other.get(&rhs_point).unwrap();
 
-                for (p, s) in contraction_point.iter_mut().zip(contraction_shape.iter()) {
+                for (i, (p, s)) in contraction_point.iter_mut().zip(contraction_shape.iter()).enumerate() {
                     if *p == *s - 1 {
                         *p = 0;
+                        rhs_point[i] = 0;
+                        lhs_point[lhs_contraction_point + i] = 0;
                     } else {
                         *p += 1;
+                        rhs_point[i] += 1;
+                        lhs_point[lhs_contraction_point + i] += 1;
                         continue 'summate;
                     }
                 }
 
                 break;
             }
-
-            unsafe {
-                *new_ref.get().as_mut().unwrap().get_mut(&new_point).unwrap() = sum;
+            *new.get_mut(&new_point).unwrap() = sum;
+            contraction_point.fill(0);
+            
+            for (i, (p, s)) in new_point.iter_mut().zip(new.shape.iter()).enumerate() {
+                if *p == *s - 1 {
+                    *p = 0;
+                    if i < depth {
+                        lhs_point[i] = 0;
+                    }
+                    if i >= depth {
+                        rhs_point[rhs_survival_point + i - depth] = 0;
+                    }
+                } else {
+                    *p += 1;
+                    if i < depth {
+                        lhs_point[i] += 1;
+                    }
+                    if i >= depth {
+                        rhs_point[rhs_survival_point + i - depth] += 1;
+                    }
+                    continue 'iterate;
+                }
             }
-        });
 
-        Some(new_ref.into_inner())
+            break;
+        }
+
+        Some(new)
     }
 
     fn sum(&self) -> Self {
@@ -527,7 +516,7 @@ impl Tensor for CPUTensor {
         let mut new_shape: Vec<usize> = self.shape.clone();
         new_shape.remove(0);
         let mut new = Self {
-            data: vec![0.0; Self::len(&new_shape)],
+            data: vec![f64::NEG_INFINITY; Self::len(&new_shape)],
             shape: new_shape.clone(),
         };
         let mut new_point = vec![0; new_shape.len()];
@@ -610,7 +599,7 @@ impl Tensor for CPUTensor {
         let mut column_point = vec![0; self.shape.len()];
         'iterate: loop {
             let mut argmax = 0;
-            let mut max = 0.0;
+            let mut max = f64::NEG_INFINITY;
             column_point[1..].copy_from_slice(&new_point);
             for i in 0..self.shape[0] {
                 column_point[0] = i;

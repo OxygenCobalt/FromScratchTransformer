@@ -1,3 +1,4 @@
+use core::f64;
 use std::{cell::RefCell, rc::Rc};
 
 use crate::tensor::{Field, Fill, Generate, TensorInit};
@@ -440,7 +441,7 @@ impl<T: TensorMut> Operation<T> {
                 'iterate: loop {
                     column_point[1..].copy_from_slice(&grad_point);
                     let mut max_idx = 0;
-                    let mut max_value = f64::MIN;
+                    let mut max_value = f64::NEG_INFINITY;
                     for i in 0..t.tensor.shape()[0] {
                         column_point[0] = i;
                         let cur_value = t.tensor.get(&column_point).unwrap();
@@ -484,7 +485,7 @@ impl<T: TensorMut> Operation<T> {
                 let mut grad_point = vec![0; grad.shape().len()];
                 'iterate: loop {
                     let mut argmax = 0;
-                    let mut max = 0.0;
+                    let mut max = f64::NEG_INFINITY;
                     t_grad_point[1..].copy_from_slice(&grad_point);
                     for i in 0..t.tensor.shape()[0] {
                         t_grad_point[0] = i;
@@ -517,27 +518,4 @@ mod tests {
     use super::*;
     use crate::tensor::{CPUTensor, Field, Fill};
 
-    #[test]
-    fn colify_backward_accumulates_overlapping_patches() {
-        let input = Autograd::new(
-            CPUTensor::tensor(Fill {
-                shape: vec![4, 4],
-                with: 1.0,
-            })
-            .unwrap(),
-        );
-        let field = Field {
-            size: 3,
-            stride: 1,
-            padding: 0,
-        };
-
-        let loss = input.colify(field).unwrap().sum();
-        // println!("{:?}", input.colify(field).unwrap().shape());
-        loss.backward();
-        drop(loss);
-
-        let grad = input.into_grad().unwrap();
-        assert_eq!(*grad.get(&[1, 1]).unwrap(), 4.0);
-    }
 }

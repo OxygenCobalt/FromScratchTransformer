@@ -8,7 +8,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use crate::tensor::{CPUTensor, Field, Generate, Tensor, TensorIO, TensorMut, Tt};
+use crate::tensor::{CPUTensor, Field, Fill, Generate, Tensor, TensorIO, TensorMut, Tt};
 
 use super::{activation::Activation, autograd::Autograd, loss::Loss};
 
@@ -317,8 +317,6 @@ pub struct TestResult<T: Tensor> {
     pub activations: T,
 }
 
-static NORMAL: LazyLock<Normal<f64>> = std::sync::LazyLock::new(|| Normal::new(0.0, 1.0).unwrap());
-
 pub enum Layer {
     Dense {
         neurons: usize,
@@ -570,15 +568,16 @@ impl<T: Tensor> FeedForward<T> {
     fn new(last: Option<&Layer>, neurons: usize, activation: Activation) -> Self {
         let input_shape = last.unwrap().activation_shape();
         let flattened = CPUTensor::len(&input_shape);
+        let xavier = Normal::new(0.0, 2.0 / (flattened + neurons) as f64).unwrap();
         Self {
             weights: T::tensor(Generate {
                 shape: vec![neurons, flattened],
-                with: || NORMAL.sample(&mut rand::rng()),
+                with: || xavier.sample(&mut rand::rng()),
             })
             .unwrap(),
-            biases: T::tensor(Generate {
+            biases: T::tensor(Fill {
                 shape: vec![neurons],
-                with: || NORMAL.sample(&mut rand::rng()),
+                with: 0.0
             })
             .unwrap(),
             activation,
@@ -651,16 +650,17 @@ struct Conv2D<T: Tensor> {
 
 impl<T: Tensor> Conv2D<T> {
     fn new(field: Field, filters: usize, activation: Activation, input_size: usize) -> Self {
+        let he = Normal::new(0.0, 2.0 / (field.size * field.size) as f64).unwrap();
         let weights = T::tensor(Generate {
             shape: vec![filters, field.size * field.size],
-            with: || NORMAL.sample(&mut rand::rng()),
+            with: || he.sample(&mut rand::rng()),
         }).unwrap();
         let locs = field
             .locations_on(input_size)
             .unwrap();
         let biases = T::tensor(Generate {
             shape: vec![locs, locs, filters],
-            with: || NORMAL.sample(&mut rand::rng()),
+            with: || 0.0
         }).unwrap();
         Self {
             weights,
