@@ -231,7 +231,7 @@ impl CPUTensor {
                     rhs_point[i] = v % other.shape[i];
                 }
             }
-            *new.get_mut(&new_point).unwrap() = op(stride
+            *new.get_mut(&new_point).unwrap() = op(
                 self.get(&lhs_point).unwrap(),
                 other.get(&rhs_point).unwrap(),
             );
