@@ -398,14 +398,16 @@ impl Tensor for CPUTensor {
         }
         'iterate: loop {
             let mut sum = 0.0;
-            for i in 0..k {
+            let mut i = 0;
+            while i < k {
                 sum += self.data[lhs_idx + lhs_contract_offsets[i]] * other.data[rhs_idx + rhs_contract_offsets[i]];
+                i += 1;
             }
             new.data[new_idx] = sum;
-            
-            for (i, (p, s)) in new_point.iter_mut().zip(new.shape.iter()).enumerate() {
-                if *p == *s - 1 {
-                    *p = 0;
+
+            for i in 0..new.ndim() {
+                if new_point[i] == new.shape[i] - 1 {
+                    new_point[i] = 0;
                     new_idx -= new.stride[i] * (new.shape[i] - 1);
                     if i < lhs_survivor_len {
                         lhs_idx -= self.stride[i] * (self.shape[i] - 1);
@@ -416,7 +418,8 @@ impl Tensor for CPUTensor {
                         rhs_idx -= other.stride[rhs_c] * (other.shape[rhs_c] - 1);
                     }
                 } else {
-                    *p += 1;
+                    new_point[i] += 1;
+
                     new_idx += new.stride[i];
                     if i < lhs_survivor_len {
                         lhs_idx += self.stride[i];
