@@ -485,27 +485,27 @@ impl Tensor for CPUTensor {
     }
 
     fn ln(mut self) -> Self {
-        self.data.par_iter_mut().for_each(|x| *x = x.ln());
+        self.data.iter_mut().for_each(|x| *x = x.ln());
         self
     }
 
     fn exp(mut self) -> Self {
-        self.data.par_iter_mut().for_each(|x| *x = x.exp());
+        self.data.iter_mut().for_each(|x| *x = x.exp());
         self
     }
 
     fn pow(mut self, i: i32) -> Self {
-        self.data.par_iter_mut().for_each(|x| *x = x.powi(i));
+        self.data.iter_mut().for_each(|x| *x = x.powi(i));
         self
     }
 
     fn neg(mut self) -> Self {
-        self.data.par_iter_mut().for_each(|x| *x = -*x);
+        self.data.iter_mut().for_each(|x| *x = -*x);
         self
     }
 
     fn max(mut self, y: f64) -> Self {
-        self.data.par_iter_mut().for_each(|x| *x = x.max(y));
+        self.data.iter_mut().for_each(|x| *x = x.max(y));
         self
     }
 
