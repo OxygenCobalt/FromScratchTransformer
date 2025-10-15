@@ -373,58 +373,35 @@ impl Tensor for CPUTensor {
         let k: usize = contraction_shape.iter().product();
 
         let lhs_contraction_stride = &self.stride[self.ndim() - depth..];
-        // let mut lhs_contract_offsets: Vec<usize> = vec![];
+        let mut lhs_contract_offsets: Vec<usize> = vec![];
         let rhs_contraction_stride = &other.stride[..depth];
-        // let mut rhs_contract_offsets: Vec<usize> = vec![];
+        let mut rhs_contract_offsets: Vec<usize> = vec![];
 
-        // let mut lhs_contract_idx = 0;
-        // let mut rhs_contract_idx = 0;
-        // 'precompute: loop {
-        //     lhs_contract_offsets.push(lhs_contract_idx);
-        //     rhs_contract_offsets.push(rhs_contract_idx);
-        //     for i in 0..contraction_point.len() {
-        //         if contraction_point[i] == contraction_shape[i] - 1 {
-        //             contraction_point[i] = 0;
-        //             lhs_contract_idx -= lhs_contraction_stride[i] * (contraction_shape[i] - 1);
-        //             rhs_contract_idx -= rhs_contraction_stride[i] * (contraction_shape[i] - 1);
-        //         } else {
-        //             contraction_point[i] += 1;
-        //             lhs_contract_idx += lhs_contraction_stride[i];
-        //             rhs_contract_idx += rhs_contraction_stride[i];
-        //             continue 'precompute;
-        //         }
-        //     }
-        //     break;
-        // }
-        // dbg!(&contraction_shape);
-        // dbg!(&lhs_contract_offsets, &rhs_contract_offsets);
+        let mut lhs_contract_idx = 0;
+        let mut rhs_contract_idx = 0;
+        'precompute: loop {
+            lhs_contract_offsets.push(lhs_contract_idx);
+            rhs_contract_offsets.push(rhs_contract_idx);
+            for i in 0..contraction_point.len() {
+                if contraction_point[i] == contraction_shape[i] - 1 {
+                    contraction_point[i] = 0;
+                    lhs_contract_idx -= lhs_contraction_stride[i] * (contraction_shape[i] - 1);
+                    rhs_contract_idx -= rhs_contraction_stride[i] * (contraction_shape[i] - 1);
+                } else {
+                    contraction_point[i] += 1;
+                    lhs_contract_idx += lhs_contraction_stride[i];
+                    rhs_contract_idx += rhs_contraction_stride[i];
+                    continue 'precompute;
+                }
+            }
+            break;
+        }
         'iterate: loop {
             let mut sum = 0.0;
-            let mut lhs_contract_idx = lhs_idx;
-            let mut rhs_contract_idx = rhs_idx;
-            // for i in 0..k {
-            //     sum += self.data[lhs_idx + lhs_contract_offsets[i]] * other.data[rhs_idx + rhs_contract_offsets[i]];
-            // }
-           'summate: loop {
-                sum += self.data[lhs_contract_idx] * other.data[rhs_contract_idx];
-
-                for i in 0..contraction_point.len() {
-                    if contraction_point[i] == contraction_shape[i] - 1 {
-                        contraction_point[i] = 0;
-                        lhs_contract_idx -= lhs_contraction_stride[i] * (contraction_shape[i] - 1);
-                        rhs_contract_idx -= rhs_contraction_stride[i] * (contraction_shape[i] - 1);
-                    } else {
-                        contraction_point[i] += 1;
-                        lhs_contract_idx += lhs_contraction_stride[i];
-                        rhs_contract_idx += rhs_contraction_stride[i];
-                        continue 'summate;
-                    }
-                }
-
-                break;
+            for i in 0..k {
+                sum += self.data[lhs_idx + lhs_contract_offsets[i]] * other.data[rhs_idx + rhs_contract_offsets[i]];
             }
             new.data[new_idx] = sum;
-            // contraction_point.fill(0);
             
             for (i, (p, s)) in new_point.iter_mut().zip(new.shape.iter()).enumerate() {
                 if *p == *s - 1 {
