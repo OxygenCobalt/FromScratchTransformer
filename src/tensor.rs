@@ -204,15 +204,23 @@ impl CPUTensor {
 
     fn arithmetic(&self, other: &Self, op: impl Fn(&f64, &f64) -> f64) -> Option<Self> {
         let mut new_shape = Vec::new();
+        let mut lhs_strides = Vec::new();
+        let mut rhs_strides = Vec::new();
         for i in 0..self.shape.len().max(other.shape.len()) {
             let lhs = self.shape.get(i).cloned().unwrap_or(1);
             let rhs = other.shape.get(i).cloned().unwrap_or(1);
             if lhs == rhs {
                 new_shape.push(lhs);
+                lhs_strides.push(self.stride[i]);
+                rhs_strides.push(other.stride[i]);
             } else if lhs == 1 {
                 new_shape.push(rhs);
+                lhs_strides.push(0);
+                rhs_strides.push(other.stride[i]);
             } else if rhs == 1 {
                 new_shape.push(lhs);
+                lhs_strides.push(self.stride[i]);
+                rhs_strides.push(0);
             } else {
                 return None;
             }
@@ -220,26 +228,27 @@ impl CPUTensor {
 
         let mut new = Self::tensor(Fill::null(new_shape)).unwrap();
         let mut new_point = vec![0; new.shape.len()];
-        let mut lhs_point = vec![0; self.shape.len()];
-        let mut rhs_point = vec![0; other.shape.len()];
+
+        let mut new_idx = 0;
+        let mut lhs_idx = 0;
+        let mut rhs_idx = 0;
+
         'iterate: loop {
-            for (i, v) in new_point.iter().enumerate() {
-                if i < lhs_point.len() {
-                    lhs_point[i] = v % self.shape[i];
-                }
-                if i < rhs_point.len() {
-                    rhs_point[i] = v % other.shape[i];
-                }
-            }
-            *new.get_mut(&new_point).unwrap() = op(
-                self.get(&lhs_point).unwrap(),
-                other.get(&rhs_point).unwrap(),
+            new.data[new_idx] = op(
+                &self.data[lhs_idx],
+                &other.data[rhs_idx]
             );
-            for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
-                if *p == *s - 1 {
-                    *p = 0;
+            for i in 0..new_point.len() {
+                if new_point[i] == new.shape[i] - 1 {
+                    new_point[i] = 0;
+                    new_idx -= new.stride[i] * (new.shape[i] - 1);
+                    lhs_idx -= lhs_strides[i] * (new.shape[i] - 1);
+                    rhs_idx -= rhs_strides[i] * (new.shape[i] - 1);
                 } else {
-                    *p += 1;
+                    new_point[i] += 1;
+                    new_idx += new.stride[i];
+                    lhs_idx += lhs_strides[i];
+                    rhs_idx += rhs_strides[i];
                     continue 'iterate;
                 }
             }
@@ -305,6 +314,7 @@ impl Tensor for CPUTensor {
             i += 1;
             x
         });
+        
         Some(Self { data, shape, stride })
     }
 
