@@ -359,60 +359,95 @@ impl Tensor for CPUTensor {
 
         let lhs_survivors = &self.shape[..self.shape.len() - depth];
         let rhs_survivors = &other.shape[depth..];
+        let lhs_survivor_len = lhs_survivors.len();
+        let rhs_survivor_len = rhs_survivors.len();
         let mut new_shape: Vec<usize> = lhs_survivors.to_vec();
         new_shape.extend_from_slice(rhs_survivors);
         let mut new = Self::tensor(Fill::null(new_shape)).unwrap();
         let mut new_point = vec![0; new.shape.len()];
-        let mut lhs_point = vec![0; self.ndim()];
-        let mut rhs_point = vec![0; other.ndim()];
-        let lhs_contraction_point = lhs_point.len() - depth;
-        // if i dont force the evaluation of (new_point.len() - lhs_survivors.len()) first ill underflow
-        let rhs_survival_point = rhs_point.len() - (new_point.len() - depth);
+        let mut new_idx = 0;
+        let mut lhs_idx = 0;
+        let mut rhs_idx = 0;
         let mut contraction_point = vec![0; contraction_shape.len()];
+
+        let k: usize = contraction_shape.iter().product();
+
+        let lhs_contraction_stride = &self.stride[self.ndim() - depth..];
+        // let mut lhs_contract_offsets: Vec<usize> = vec![];
+        let rhs_contraction_stride = &other.stride[..depth];
+        // let mut rhs_contract_offsets: Vec<usize> = vec![];
+
+        // let mut lhs_contract_idx = 0;
+        // let mut rhs_contract_idx = 0;
+        // 'precompute: loop {
+        //     lhs_contract_offsets.push(lhs_contract_idx);
+        //     rhs_contract_offsets.push(rhs_contract_idx);
+        //     for i in 0..contraction_point.len() {
+        //         if contraction_point[i] == contraction_shape[i] - 1 {
+        //             contraction_point[i] = 0;
+        //             lhs_contract_idx -= lhs_contraction_stride[i] * (contraction_shape[i] - 1);
+        //             rhs_contract_idx -= rhs_contraction_stride[i] * (contraction_shape[i] - 1);
+        //         } else {
+        //             contraction_point[i] += 1;
+        //             lhs_contract_idx += lhs_contraction_stride[i];
+        //             rhs_contract_idx += rhs_contraction_stride[i];
+        //             continue 'precompute;
+        //         }
+        //     }
+        //     break;
+        // }
+        // dbg!(&contraction_shape);
+        // dbg!(&lhs_contract_offsets, &rhs_contract_offsets);
         'iterate: loop {
-            // lhs_point[..lhs_survival_point].copy_from_slice(&new_point[..depth]);
-            // rhs_point[rhs_survival_point..].copy_from_slice(&new_point[depth..]);
-
             let mut sum = 0.0;
-            'summate: loop {
-                // rhs_point[..rhs_contraction_point].copy_from_slice(&contraction_point);
-                // lhs_point[lhs_contraction_point..].copy_from_slice(&contraction_point);
-                sum += *self.get(&lhs_point).unwrap() * *other.get(&rhs_point).unwrap();
+            let mut lhs_contract_idx = lhs_idx;
+            let mut rhs_contract_idx = rhs_idx;
+            // for i in 0..k {
+            //     sum += self.data[lhs_idx + lhs_contract_offsets[i]] * other.data[rhs_idx + rhs_contract_offsets[i]];
+            // }
+           'summate: loop {
+                sum += self.data[lhs_contract_idx] * other.data[rhs_contract_idx];
 
-                for (i, (p, s)) in contraction_point.iter_mut().zip(contraction_shape.iter()).enumerate() {
-                    if *p == *s - 1 {
-                        *p = 0;
-                        rhs_point[i] = 0;
-                        lhs_point[lhs_contraction_point + i] = 0;
+                for i in 0..contraction_point.len() {
+                    if contraction_point[i] == contraction_shape[i] - 1 {
+                        contraction_point[i] = 0;
+                        lhs_contract_idx -= lhs_contraction_stride[i] * (contraction_shape[i] - 1);
+                        rhs_contract_idx -= rhs_contraction_stride[i] * (contraction_shape[i] - 1);
                     } else {
-                        *p += 1;
-                        rhs_point[i] += 1;
-                        lhs_point[lhs_contraction_point + i] += 1;
+                        contraction_point[i] += 1;
+                        lhs_contract_idx += lhs_contraction_stride[i];
+                        rhs_contract_idx += rhs_contraction_stride[i];
                         continue 'summate;
                     }
                 }
 
                 break;
             }
-            *new.get_mut(&new_point).unwrap() = sum;
-            contraction_point.fill(0);
+            new.data[new_idx] = sum;
+            // contraction_point.fill(0);
             
             for (i, (p, s)) in new_point.iter_mut().zip(new.shape.iter()).enumerate() {
                 if *p == *s - 1 {
                     *p = 0;
-                    if i < depth {
-                        lhs_point[i] = 0;
+                    new_idx -= new.stride[i] * (new.shape[i] - 1);
+                    if i < lhs_survivor_len {
+                        lhs_idx -= self.stride[i] * (self.shape[i] - 1);
                     }
-                    if i >= depth {
-                        rhs_point[rhs_survival_point + i - depth] = 0;
+                    if i >= lhs_survivor_len && rhs_survivor_len > 0 {
+                        let rhs_axis = i - lhs_survivor_len;
+                        let rhs_c = depth + rhs_axis;
+                        rhs_idx -= other.stride[rhs_c] * (other.shape[rhs_c] - 1);
                     }
                 } else {
                     *p += 1;
-                    if i < depth {
-                        lhs_point[i] += 1;
+                    new_idx += new.stride[i];
+                    if i < lhs_survivor_len {
+                        lhs_idx += self.stride[i];
                     }
-                    if i >= depth {
-                        rhs_point[rhs_survival_point + i - depth] += 1;
+                    if i >= lhs_survivor_len {
+                        let rhs_axis = i - lhs_survivor_len;
+                        let rhs_c = depth + rhs_axis;
+                        rhs_idx += other.stride[rhs_c];
                     }
                     continue 'iterate;
                 }
@@ -488,7 +523,6 @@ impl Tensor for CPUTensor {
             return None;
         }
         let locations = field.locations_on(*self.shape.first().unwrap())?;
-        // let offset = field.offset(*self.shape.first().unwrap());
         let new_shape: Vec<usize> = [field.size * field.size, locations * locations]
             .into_iter()
             .chain(self.shape[2..].iter().cloned())
