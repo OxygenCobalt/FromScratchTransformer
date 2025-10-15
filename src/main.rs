@@ -33,28 +33,39 @@ fn main() {
 
     let mnist = MNIST::<CPUTensor>::load(Path::new("data/mnist")).unwrap();
     let layers = Layers::new(vec![
-        Layer::Conv2D {
-            input_size: 28,
-            field: Field { size: 5, stride: 1, padding: 0 },
-            filters: 20,
-            activation: Activation::ReLU,
-        },
-        Layer::Pool2D {
-            input_size: 24,
-            field: Field { size: 2, stride: 2, padding: 0 },
-            filters: 20,
+        Layer::Dense {
+            input_shape: Some(vec![28, 28]),
+            neurons: 100,
+            activation: Activation::Sigmoid,
+            // rate: 0.01
         },
         Layer::Dense {
+            input_shape: None,
             neurons: 10,
-            activation: Activation::Softmax,
+            activation: Activation::Sigmoid,
         },
+        // Layer::Conv2D {
+        //     input_size: 28,
+        //     field: Field { size: 5, stride: 1, padding: 0 },
+        //     filters: 20,
+        //     activation: Activation::ReLU,
+        // },
+        // Layer::Pool2D {
+        //     input_size: 24,
+        //     field: Field { size: 2, stride: 2, padding: 0 },
+        //     filters: 20,
+        // },
+        // Layer::Dense {
+        //     neurons: 10,
+        //     activation: Activation::Softmax,
+        // },
     ])
     .unwrap();
     let checkpointing = Checkpoint::new(&layers, &mnist, Path::new("data/checkpoints/mnist"));
     let hyperparams = Hyperparams {
         epochs: 1,
         batch_size: 10,
-        learning_rate: 0.1,
+        learning_rate: 3.0,
     };
-    NeuralNetwork::train(&layers, &mnist, &mnist, &hyperparams, &LogLikelihood).unwrap();
+    NeuralNetwork::train(&layers, &mnist, &mnist, &hyperparams, &MSE).unwrap();
 }
