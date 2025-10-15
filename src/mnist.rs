@@ -47,29 +47,29 @@ impl<'a, T: Tensor> Reporting<T> for MNIST<T> {
         loss: &impl Loss,
         _: Option<u64>,
     ) -> std::io::Result<()> {
-        fn argmax<T: Tensor>(tensor: &T) -> usize {
-            tensor
-                .iter()
-                .enumerate()
-                .max_by(|(_, x), (_, y)| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal))
-                .unwrap()
-                .0
-        }
-        let results = nn.test(&self.test, loss);
-        let successes = results
-            .results
-            .iter()
-            .filter(|result| argmax(&result.example.output) == argmax(&result.activations))
-            .count();
-        let percent = (successes as f64 / results.results.len() as f64) * 100.0;
-        println!(
-            "{}: avg loss = {:.3}, success = {} / {} ({:.2}%)",
-            "mnist".green(),
-            results.avg_loss,
-            successes,
-            results.results.len(),
-            percent
-        );
+        // fn argmax<T: Tensor>(tensor: &T) -> usize {
+        //     tensor
+        //         .iter()
+        //         .enumerate()
+        //         .max_by(|(_, x), (_, y)| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal))
+        //         .unwrap()
+        //         .0
+        // }
+        // let results = nn.test(&self.test, loss);
+        // let successes = results
+        //     .results
+        //     .iter()
+        //     .filter(|result| argmax(&result.example.output) == argmax(&result.activations))
+        //     .count();
+        // let percent = (successes as f64 / results.results.len() as f64) * 100.0;
+        // println!(
+        //     "{}: avg loss = {:.3}, success = {} / {} ({:.2}%)",
+        //     "mnist".green(),
+        //     results.avg_loss,
+        //     successes,
+        //     results.results.len(),
+        //     percent
+        // );
         Ok(())
     }
 }
