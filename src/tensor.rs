@@ -373,9 +373,9 @@ impl Tensor for CPUTensor {
         let k: usize = contraction_shape.iter().product();
 
         let lhs_contraction_stride = &self.stride[self.ndim() - depth..];
-        let mut lhs_contract_offsets: Vec<usize> = vec![];
+        let mut lhs_contract_offsets: Vec<usize> = Vec::with_capacity(k);
         let rhs_contraction_stride = &other.stride[..depth];
-        let mut rhs_contract_offsets: Vec<usize> = vec![];
+        let mut rhs_contract_offsets: Vec<usize> = Vec::with_capacity(k);
 
         let mut lhs_contract_idx = 0;
         let mut rhs_contract_idx = 0;
@@ -383,14 +383,19 @@ impl Tensor for CPUTensor {
             lhs_contract_offsets.push(lhs_contract_idx);
             rhs_contract_offsets.push(rhs_contract_idx);
             for i in 0..contraction_point.len() {
-                if contraction_point[i] == contraction_shape[i] - 1 {
-                    contraction_point[i] = 0;
-                    lhs_contract_idx -= lhs_contraction_stride[i] * (contraction_shape[i] - 1);
-                    rhs_contract_idx -= rhs_contraction_stride[i] * (contraction_shape[i] - 1);
+                let con_ref = unsafe { contraction_point.get_unchecked_mut(i) };
+                let con = *con_ref;
+                let csh = unsafe { *contraction_shape.get_unchecked(i) };
+                let lst = unsafe { *lhs_contraction_stride.get_unchecked(i) };
+                let rst = unsafe { *rhs_contraction_stride.get_unchecked(i) };
+                if con == csh - 1 {
+                    lhs_contract_idx -= lst * con;
+                    rhs_contract_idx -= rst * con;
+                    *con_ref = 0;
                 } else {
-                    contraction_point[i] += 1;
-                    lhs_contract_idx += lhs_contraction_stride[i];
-                    rhs_contract_idx += rhs_contraction_stride[i];
+                    lhs_contract_idx += lst;
+                    rhs_contract_idx += rst;
+                    *con_ref += 1;
                     continue 'precompute;
                 }
             }
@@ -400,34 +405,44 @@ impl Tensor for CPUTensor {
             let mut sum = 0.0;
             let mut i = 0;
             while i < k {
-                sum += self.data[lhs_idx + lhs_contract_offsets[i]] * other.data[rhs_idx + rhs_contract_offsets[i]];
+                sum += unsafe {
+                    let lhs_offset = lhs_contract_offsets.get_unchecked(i);
+                    let rhs_offset = rhs_contract_offsets.get_unchecked(i);
+                    *self.data.get_unchecked(lhs_idx + lhs_offset) * other.data.get_unchecked(rhs_idx + rhs_offset)
+                };
                 i += 1;
             }
-            new.data[new_idx] = sum;
+            unsafe { *new.data.get_unchecked_mut(new_idx) = sum; }
 
             for i in 0..new.ndim() {
-                if new_point[i] == new.shape[i] - 1 {
-                    new_point[i] = 0;
-                    new_idx -= new.stride[i] * (new.shape[i] - 1);
+                let npt = unsafe { new_point.get_unchecked_mut(i) };
+                let nsh = unsafe { *new.shape.get_unchecked(i) };
+                let nst = unsafe { *new.stride.get_unchecked(i) };
+                if *npt == nsh - 1 {
+                    *npt = 0;
+                    new_idx -= nst * (nsh - 1);
                     if i < lhs_survivor_len {
-                        lhs_idx -= self.stride[i] * (self.shape[i] - 1);
+                        let lsh = unsafe { *self.shape.get_unchecked(i) };
+                        let lst = unsafe { *self.stride.get_unchecked(i) };
+                        lhs_idx -= lst * (lsh - 1);
                     }
                     if i >= lhs_survivor_len && rhs_survivor_len > 0 {
-                        let rhs_axis = i - lhs_survivor_len;
-                        let rhs_c = depth + rhs_axis;
-                        rhs_idx -= other.stride[rhs_c] * (other.shape[rhs_c] - 1);
+                        let rhs_axis = depth + (i - lhs_survivor_len);
+                        let rsh = unsafe { *other.shape.get_unchecked(rhs_axis) };
+                        let rst = unsafe { *other.stride.get_unchecked(rhs_axis) };
+                        rhs_idx -= rst * (rsh - 1);
                     }
                 } else {
-                    new_point[i] += 1;
-
-                    new_idx += new.stride[i];
+                    *npt += 1;
+                    new_idx += nst;
                     if i < lhs_survivor_len {
-                        lhs_idx += self.stride[i];
+                        let lst = unsafe { *self.stride.get_unchecked(i) };
+                        lhs_idx += lst;
                     }
                     if i >= lhs_survivor_len {
-                        let rhs_axis = i - lhs_survivor_len;
-                        let rhs_c = depth + rhs_axis;
-                        rhs_idx += other.stride[rhs_c];
+                        let rhs_axis = depth + (i - lhs_survivor_len);
+                        let rst = unsafe { *other.stride.get_unchecked(rhs_axis) };
+                        rhs_idx += rst;
                     }
                     continue 'iterate;
                 }
