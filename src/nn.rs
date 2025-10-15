@@ -319,10 +319,12 @@ pub struct TestResult<T: Tensor> {
 
 pub enum Layer {
     Dense {
+        input_shape: Option<Vec<usize>>,
         neurons: usize,
         activation: Activation,
     },
     Dropout {
+        input_shape: Option<Vec<usize>>,
         neurons: usize,
         rate: f64,
         activation: Activation,
@@ -344,17 +346,19 @@ impl Layer {
     fn axon<T: Tensor>(&self, last: Option<&Layer>) -> Axon<T> {
         match self {
             Self::Dense {
+                input_shape,
                 neurons,
                 activation,
             } => Axon::Dense {
-                ff: FeedForward::new(last, *neurons, *activation),
+                ff: FeedForward::new(last.map(|l| l.activation_shape()).or(input_shape.clone()).unwrap(), *neurons, *activation),
             },
             Self::Dropout {
+                input_shape,
                 neurons,
                 rate,
                 activation,
             } => Axon::Dropout {
-                ff: FeedForward::new(last, *neurons, *activation),
+                ff: FeedForward::new(last.map(|l| l.activation_shape()).or(input_shape.clone()).unwrap(), *neurons, *activation),
                 rate: *rate,
             },
             Self::Conv2D {
@@ -565,8 +569,7 @@ struct FeedForward<T: Tensor> {
 }
 
 impl<T: Tensor> FeedForward<T> {
-    fn new(last: Option<&Layer>, neurons: usize, activation: Activation) -> Self {
-        let input_shape = last.unwrap().activation_shape();
+    fn new(input_shape: Vec<usize>, neurons: usize, activation: Activation) -> Self {
         let flattened = CPUTensor::len(&input_shape);
         let xavier = Normal::new(0.0, 2.0 / (flattened + neurons) as f64).unwrap();
         Self {
@@ -590,9 +593,11 @@ impl<T: Tensor> FeedForward<T> {
         // we ignore any additional batching parameters that would be appended to the activation shape
         let mut flattened_shape = vec![self.flattened_input_shape];
         flattened_shape.extend_from_slice(&activations.shape()[self.flattened_input_ndim..]);
+        // dbg!(activations.shape());
         self.activation.activate(
             self.weights
-                .dot(&activations.reshape(&flattened_shape).unwrap(), 1)
+                .dot(
+                    &activations.reshape(&flattened_shape).unwrap(), 1)
                 .unwrap()
                 .add(&self.biases)
                 .unwrap(),
