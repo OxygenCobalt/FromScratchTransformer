@@ -159,7 +159,7 @@ struct Computation<T: TensorMut> {
 
 impl<T: TensorMut> Computation<T> {
     fn backward_init(&self) {
-        self.backward(T::scalar(1.0));
+        self.backward(T::tensor(Fill { shape: self.tensor.shape().to_vec(), with: 1.0 }).unwrap());
     }
 
     pub fn backward(&self, grad: T) {
