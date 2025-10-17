@@ -203,10 +203,11 @@ impl CPUTensor {
     }
 
     fn arithmetic(&self, other: &Self, op: impl Fn(&f64, &f64) -> f64) -> Option<Self> {
-        let mut new_shape = Vec::new();
-        let mut lhs_strides = Vec::new();
-        let mut rhs_strides = Vec::new();
-        for i in 0..self.shape.len().max(other.shape.len()) {
+        let k = self.shape.len().max(other.shape.len());
+        let mut new_shape = Vec::with_capacity(k);
+        let mut lhs_strides = Vec::with_capacity(k);
+        let mut rhs_strides = Vec::with_capacity(k);
+        for i in 0..k {
             let lhs = self.shape.get(i).cloned().unwrap_or(1);
             let rhs = other.shape.get(i).cloned().unwrap_or(1);
             if lhs == rhs {
@@ -233,22 +234,28 @@ impl CPUTensor {
         let mut lhs_idx = 0;
         let mut rhs_idx = 0;
 
+        let mut new_ptr = new.data.as_mut_ptr();
+        let mut lhs_ptr = self.data.as_ptr();
+        let mut rhs_ptr = other.data.as_ptr();
+
         'iterate: loop {
-            new.data[new_idx] = op(
-                &self.data[lhs_idx],
-                &other.data[rhs_idx]
-            );
+            unsafe { 
+                *new.data.get_unchecked_mut(new_idx)  = op(
+                    self.data.get_unchecked(lhs_idx),
+                    other.data.get_unchecked(rhs_idx)
+                ); 
+            }
             for i in 0..new_point.len() {
                 if new_point[i] == new.shape[i] - 1 {
+                    new_idx -= new.stride[i] * new_point[i];
+                    lhs_idx -= lhs_strides[i] * new_point[i];
+                    rhs_idx -= rhs_strides[i] * new_point[i];
                     new_point[i] = 0;
-                    new_idx -= new.stride[i] * (new.shape[i] - 1);
-                    lhs_idx -= lhs_strides[i] * (new.shape[i] - 1);
-                    rhs_idx -= rhs_strides[i] * (new.shape[i] - 1);
                 } else {
-                    new_point[i] += 1;
                     new_idx += new.stride[i];
                     lhs_idx += lhs_strides[i];
                     rhs_idx += rhs_strides[i];
+                    new_point[i] += 1;
                     continue 'iterate;
                 }
             }
@@ -365,18 +372,18 @@ impl Tensor for CPUTensor {
         new_shape.extend_from_slice(rhs_survivors);
         let mut new = Self::tensor(Fill::null(new_shape)).unwrap();
         let mut new_point = vec![0; new.shape.len()];
-        let mut new_idx = 0;
-        let mut lhs_idx = 0;
-        let mut rhs_idx = 0;
-        let mut contraction_point = vec![0; contraction_shape.len()];
+        // let mut new_idx = 0;
+        let mut new_ptr = new.data.as_mut_ptr();
+        let mut lhs_ptr = self.data.as_ptr();
+        let mut rhs_ptr = other.data.as_ptr();
 
-        let k: usize = contraction_shape.iter().product();
-
+        let contraction_magnitude: usize = contraction_shape.iter().product();
         let lhs_contraction_stride = &self.stride[self.ndim() - depth..];
-        let mut lhs_contract_offsets: Vec<usize> = Vec::with_capacity(k);
+        let mut lhs_contract_offsets: Vec<usize> = Vec::with_capacity(contraction_magnitude);
         let rhs_contraction_stride = &other.stride[..depth];
-        let mut rhs_contract_offsets: Vec<usize> = Vec::with_capacity(k);
+        let mut rhs_contract_offsets: Vec<usize> = Vec::with_capacity(contraction_magnitude);
 
+        let mut contraction_point = vec![0; contraction_shape.len()];
         let mut lhs_contract_idx = 0;
         let mut rhs_contract_idx = 0;
         'precompute: loop {
@@ -404,45 +411,47 @@ impl Tensor for CPUTensor {
         'iterate: loop {
             let mut sum = 0.0;
             let mut i = 0;
-            while i < k {
+            let mut lhs_offset_ptr = lhs_contract_offsets.as_ptr();
+            let mut rhs_offset_ptr = rhs_contract_offsets.as_ptr();
+            
+            while i < contraction_magnitude {
                 sum += unsafe {
-                    let lhs_offset = lhs_contract_offsets.get_unchecked(i);
-                    let rhs_offset = rhs_contract_offsets.get_unchecked(i);
-                    *self.data.get_unchecked(lhs_idx + lhs_offset) * other.data.get_unchecked(rhs_idx + rhs_offset)
+                    *lhs_ptr.add(*lhs_offset_ptr) * *rhs_ptr.add(*rhs_offset_ptr)
                 };
                 i += 1;
+                lhs_offset_ptr = unsafe { lhs_offset_ptr.add(1) };
+                rhs_offset_ptr = unsafe { rhs_offset_ptr.add(1) };
             }
-            unsafe { *new.data.get_unchecked_mut(new_idx) = sum; }
+            unsafe { *new_ptr = sum; }
 
             for i in 0..new.ndim() {
-                let npt = unsafe { new_point.get_unchecked_mut(i) };
+                let npt_ref = unsafe { new_point.get_unchecked_mut(i) };
+                let np = *npt_ref;
                 let nsh = unsafe { *new.shape.get_unchecked(i) };
                 let nst = unsafe { *new.stride.get_unchecked(i) };
-                if *npt == nsh - 1 {
-                    *npt = 0;
-                    new_idx -= nst * (nsh - 1);
+                if np == nsh - 1 {
+                    *npt_ref = 0;
+                    new_ptr = unsafe { new_ptr.sub(nst * np) };
                     if i < lhs_survivor_len {
-                        let lsh = unsafe { *self.shape.get_unchecked(i) };
                         let lst = unsafe { *self.stride.get_unchecked(i) };
-                        lhs_idx -= lst * (lsh - 1);
+                        lhs_ptr = unsafe { lhs_ptr.sub(lst * np) };
                     }
                     if i >= lhs_survivor_len && rhs_survivor_len > 0 {
                         let rhs_axis = depth + (i - lhs_survivor_len);
-                        let rsh = unsafe { *other.shape.get_unchecked(rhs_axis) };
                         let rst = unsafe { *other.stride.get_unchecked(rhs_axis) };
-                        rhs_idx -= rst * (rsh - 1);
+                        rhs_ptr = unsafe { rhs_ptr.sub(rst * np) };
                     }
                 } else {
-                    *npt += 1;
-                    new_idx += nst;
+                    *npt_ref += 1;
+                    new_ptr = unsafe { new_ptr.add(nst) };
                     if i < lhs_survivor_len {
                         let lst = unsafe { *self.stride.get_unchecked(i) };
-                        lhs_idx += lst;
+                        lhs_ptr = unsafe { lhs_ptr.add(lst) }
                     }
                     if i >= lhs_survivor_len {
                         let rhs_axis = depth + (i - lhs_survivor_len);
                         let rst = unsafe { *other.stride.get_unchecked(rhs_axis) };
-                        rhs_idx += rst;
+                        rhs_ptr = unsafe { rhs_ptr.add(rst) }
                     }
                     continue 'iterate;
                 }
