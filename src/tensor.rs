@@ -1,7 +1,6 @@
 use core::f64;
 use std::{
-    fmt::Debug,
-    io::{self, Read, Write},
+    collections::HashSet, fmt::Debug, io::{self, Read, Write}
 };
 
 use rayon::prelude::*;
@@ -30,7 +29,7 @@ where
     fn colify(&self, field: Field) -> Option<Self>;
     fn colmax(&self) -> Option<Self>;
     fn reshape(self, shape: &[usize]) -> Option<Self>;
-    fn transpose(&self, axes: &[usize]) -> Option<Self>;
+    fn transpose(self, axes: &[usize]) -> Option<Self>;
     fn at_argmax(&self, of: &Self) -> Option<Self>;
 }
 
@@ -612,36 +611,21 @@ impl Tensor for CPUTensor {
         Some(self)
     }
 
-    fn transpose(&self, axes: &[usize]) -> Option<Self> {
-        if self.shape.len() != axes.len() || axes.iter().any(|i| *i > self.shape.len()) {
+    fn transpose(mut self, axes: &[usize]) -> Option<Self> {
+        if self.shape.len() != axes.len() || axes.iter().any(|i| *i >= self.shape.len()) {
             return None;
         }
-        let new_shape: Vec<usize> = axes.iter().map(|j| self.shape[*j]).collect();
-        let mut new = Self::tensor(Fill::null(new_shape)).unwrap();
-
-        let mut point = vec![0; self.shape.len()];
-        let mut new_point = vec![0; new.shape.len()];
-        'iterate: loop {
-            new_point
-                .iter_mut()
-                .enumerate()
-                .for_each(|(i, x)| *x = point[axes[i]]);
-            *new.get_mut(&new_point).unwrap() = *self.get(&point.as_slice()).unwrap();
-
-            for i in 0..self.ndim() {
-                let (p, s) = (&mut point[i], self.shape[i]);
-                if *p == s - 1 {
-                    *p = 0;
-                } else {
-                    *p += 1;
-                    continue 'iterate;
-                }
-            }
-
-            break;
+        let axis_set = axes.iter().copied().collect::<HashSet<usize>>();
+        if axis_set.len() != self.ndim() || axis_set != (0..self.ndim()).collect() {
+            return None;
         }
-
-        Some(new)
+        let old_shape = self.shape.clone();
+        let old_stride = self.stride.clone();
+        for (i, j) in axes.iter().enumerate() {
+            self.shape[i] = old_shape[*j];
+            self.stride[i] = old_stride[*j];
+        }
+        Some(self)
     }
 
     fn at_argmax(&self, of: &Self) -> Option<Self> {
@@ -739,6 +723,66 @@ impl TensorIO for CPUTensor {
             write.write_all(&x.to_le_bytes())?;
         }
         Ok(())
+    }
+}
+
+// ai generated tests -- ai generated tests -- ai generated tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tensor_with_data(shape: Vec<usize>, values: &[f64]) -> CPUTensor {
+        let mut tensor = CPUTensor::tensor(Fill { shape, with: 0.0 }).unwrap();
+        assert_eq!(tensor.data.len(), values.len());
+        tensor.data.clone_from_slice(values);
+        tensor
+    }
+
+    #[test]
+    fn transpose_swaps_axes_for_matrices() {
+        let tensor = tensor_with_data(vec![2, 3], &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        let transposed = tensor.clone().transpose(&[1, 0]).unwrap();
+
+        assert_eq!(transposed.shape(), &[3, 2]);
+
+        for i in 0..3 {
+            for j in 0..2 {
+                assert_eq!(
+                    transposed.get(&[i, j]).unwrap(),
+                    tensor.get(&[j, i]).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transpose_reorders_higher_rank_axes() {
+        let mut values = Vec::with_capacity(24);
+        for i in 0..24 {
+            values.push(i as f64);
+        }
+        let tensor = tensor_with_data(vec![2, 3, 4], &values);
+        let transposed = tensor.clone().transpose(&[2, 0, 1]).unwrap();
+
+        assert_eq!(transposed.shape(), &[4, 2, 3]);
+
+        for a in 0..4 {
+            for b in 0..2 {
+                for c in 0..3 {
+                    assert_eq!(
+                        transposed.get(&[a, b, c]).unwrap(),
+                        tensor.get(&[b, c, a]).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn transpose_rejects_axis_length_mismatch() {
+        let tensor = CPUTensor::tensor(Fill { shape: vec![2, 2], with: 1.0 }).unwrap();
+        assert!(tensor.transpose(&[0]).is_none());
     }
 }
 

@@ -132,9 +132,9 @@ impl<T: TensorMut> Tensor for Autograd<T> {
         .forward()
     }
 
-    fn transpose(&self, axes: &[usize]) -> Option<Self> {
+    fn transpose(self, axes: &[usize]) -> Option<Self> {
         Operation::Transpose {
-            t: self.0.clone(),
+            t: self.0,
             axes: axes.to_vec(),
         }
         .forward()
@@ -300,7 +300,7 @@ impl<T: TensorMut> Operation<T> {
             Self::Colify { t, field } => t.tensor.colify(*field),
             Self::Colmax { t } => t.tensor.colmax(),
             Self::Reshape { t, shape } => t.tensor.clone().reshape(shape),
-            Self::Transpose { t, axes } => t.tensor.transpose(&axes),
+            Self::Transpose { t, axes } => t.tensor.clone().transpose(&axes),
             Self::AtArgmax { t, of } => t.tensor.at_argmax(&of.tensor),
         };
         tensor.map(|tensor| {
@@ -328,7 +328,7 @@ impl<T: TensorMut> Operation<T> {
                 let mut rhs_axes: Vec<usize> = (0..rhs.tensor.ndim()).collect();
                 rhs_axes.rotate_right(lhs_shift);
                 lhs.backward(
-                    grad.dot(&rhs.tensor.transpose(&rhs_axes).unwrap(), lhs_shift)
+                    grad.dot(&rhs.tensor.clone().transpose(&rhs_axes).unwrap(), lhs_shift)
                         .unwrap(),
                 );
 
@@ -337,6 +337,7 @@ impl<T: TensorMut> Operation<T> {
                 lhs_axes.rotate_left(rhs_shift);
                 rhs.backward(
                     lhs.tensor
+                        .clone()
                         .transpose(&lhs_axes)
                         .unwrap()
                         .dot(grad, rhs_shift)
@@ -473,7 +474,7 @@ impl<T: TensorMut> Operation<T> {
                 for i in 0..axes.len() {
                     rev_axes[axes[i]] = i;
                 }
-                t.backward(grad.transpose(&rev_axes).unwrap());
+                t.backward(grad.clone().transpose(&rev_axes).unwrap());
             }
             Self::AtArgmax { t, of } => {
                 let mut t_grad = T::tensor(Fill {
