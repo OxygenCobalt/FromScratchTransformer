@@ -201,7 +201,8 @@ impl CPUTensor {
         Some(idx)
     }
 
-    fn arithmetic(&self, other: &Self, op: impl Fn(&f64, &f64) -> f64) -> Option<Self> {
+    #[inline(always)]
+    fn arithmetic(&self, other: &Self, op: impl Fn(f64, f64) -> f64) -> Option<Self> {
         let k = self.shape.len().max(other.shape.len());
         let mut new_shape = Vec::with_capacity(k);
         let mut lhs_strides = Vec::with_capacity(k);
@@ -228,33 +229,27 @@ impl CPUTensor {
 
         let mut new = Self::tensor(Fill::null(new_shape)).unwrap();
         let mut new_point = vec![0; new.shape.len()];
-
-        let mut new_idx = 0;
-        let mut lhs_idx = 0;
-        let mut rhs_idx = 0;
-
         let mut new_ptr = new.data.as_mut_ptr();
         let mut lhs_ptr = self.data.as_ptr();
         let mut rhs_ptr = other.data.as_ptr();
 
         'iterate: loop {
             unsafe { 
-                *new.data.get_unchecked_mut(new_idx)  = op(
-                    self.data.get_unchecked(lhs_idx),
-                    other.data.get_unchecked(rhs_idx)
-                ); 
+                *new_ptr = op(*lhs_ptr, *rhs_ptr)
             }
             for i in 0..new_point.len() {
-                if new_point[i] == new.shape[i] - 1 {
-                    new_idx -= new.stride[i] * new_point[i];
-                    lhs_idx -= lhs_strides[i] * new_point[i];
-                    rhs_idx -= rhs_strides[i] * new_point[i];
-                    new_point[i] = 0;
+                let np_ref = unsafe { new_point.get_unchecked_mut(i) };
+                let np = *np_ref;
+                if np == unsafe { new.shape.get_unchecked(i) } - 1 {
+                    new_ptr = unsafe { new_ptr.sub( *new.stride.get_unchecked(i) * np) };
+                    lhs_ptr = unsafe { lhs_ptr.sub(*lhs_strides.get_unchecked(i) * np) };
+                    rhs_ptr = unsafe { rhs_ptr.sub(*rhs_strides.get_unchecked(i)  * np) };
+                    *np_ref = 0;
                 } else {
-                    new_idx += new.stride[i];
-                    lhs_idx += lhs_strides[i];
-                    rhs_idx += rhs_strides[i];
-                    new_point[i] += 1;
+                    new_ptr = unsafe { new_ptr.add(*new.stride.get_unchecked(i)) };
+                    lhs_ptr = unsafe { lhs_ptr.add(*lhs_strides.get_unchecked(i)) };
+                    rhs_ptr = unsafe { rhs_ptr.add(*rhs_strides.get_unchecked(i)) };
+                    *np_ref += 1;
                     continue 'iterate;
                 }
             }
@@ -341,15 +336,15 @@ impl Tensor for CPUTensor {
     }
 
     fn add(&self, other: &Self) -> Option<Self> {
-        self.arithmetic(other, |rhs, lhs| *rhs + *lhs)
+        self.arithmetic(other, |rhs, lhs| rhs + lhs)
     }
 
     fn sub(&self, other: &Self) -> Option<Self> {
-        self.arithmetic(other, |rhs, lhs| *rhs - *lhs)
+        self.arithmetic(other, |rhs, lhs| rhs - lhs)
     }
 
     fn mul(&self, other: &Self) -> Option<Self> {
-        self.arithmetic(other, |rhs, lhs| *rhs * *lhs)
+        self.arithmetic(other, |rhs, lhs| rhs * lhs)
     }
 
     fn dot(&self, other: &Self, depth: usize) -> Option<Self> {
