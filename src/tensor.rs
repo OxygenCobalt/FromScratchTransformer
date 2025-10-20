@@ -592,17 +592,95 @@ impl Tensor for CPUTensor {
         if Self::len(shape) != Self::len(&self.shape) {
             return None;
         }
-        self.shape = shape.to_vec();
-        self.stride.clear();
+        if self.ndim() == 0 {
+            // short circuit case for scalar so i dont have to deal
+            // with it in general reshaping code
+            // we can just return the same scalar since shape must be []
+            // and stride is already []
+            return Some(self) 
+        }
+        // see if stride is monotonically increasing. if so we can just recompute the strides
+        // since we havent done any views
+        let mut last = 0;
+        let mut monotonic = true;
+        for s in &self.stride {
+            if *s < last {
+                monotonic = false;
+                break;
+            }
+            last = *s;
+        }
+        if monotonic {
+            self.shape = shape.to_vec();
+            self.stride.clear();
+            let mut mult = 1;
+            for s in shape {
+                self.stride.push(mult);
+                mult *= *s;
+            }
+            return Some(self);
+        }
 
-        let mut i = 0;
-        let mut mult = 1;
-        self.stride.resize_with(shape.len(), || {
-            let x = mult;
-            mult *= shape[i];
-            i += 1;
-            x
-        });
+        // so our stride isnt monotonically increasing, we transposed at some point
+        // therefore we have to recompute the stride such that it still aligns with
+        // the view we created.
+
+        // note: this is partially assisted by codex since i had a hard time
+        // understanding the process
+
+        // first, identify the blocks of memory that are still contiguous despite
+        // 
+        struct Block {
+            len: usize,
+            stride: usize
+        }
+        let mut blocks = vec![];
+        let mut block_len = 1;
+        let mut block_stride = 1;
+        for i in 0..self.ndim() {
+            if i > 0 && self.stride[i] == self.stride[i - 1] * self.shape[i - 1] {
+                block_len *= self.shape[i];
+            } else {
+                if i > 0 {
+                    blocks.push(Block { len: block_len, stride: block_stride });
+                }
+                block_len = self.shape[i];
+                block_stride = self.stride[i];
+            }
+        }
+        blocks.push(Block { len: block_len, stride: block_stride });
+
+        let mut block_iter = blocks.into_iter();
+        let mut cur_blk = block_iter.next().unwrap();
+        let mut cur_len = 1;
+        let mut accd_stride = cur_blk.stride;
+        let mut new_stride = Vec::with_capacity(shape.len());
+        for (i, s) in shape.iter().enumerate() {
+            cur_len *= *s;
+            new_stride.push(accd_stride);
+            accd_stride = accd_stride.saturating_mul(*s);
+            if cur_len == cur_blk.len {
+                cur_len = 1;
+                if let Some(blk) = block_iter.next() {
+                    cur_blk = blk;
+                    accd_stride = cur_blk.stride;
+                } else if i + 1 < shape.len() {
+                    // no more blocks. in this case the remaining axes
+                    // must be size 1. if not we will reject it later on
+                    accd_stride = 0;
+                }
+            } else if cur_len > cur_blk.len {
+                return None;
+            }
+        }
+        // we didnt use all of the blocks OR we couldnt fit the last dimensions
+        // into a block, reject
+        if cur_len != 1 || block_iter.next().is_some() {
+            return None;
+        }
+        self.shape = shape.to_vec();
+        self.stride = new_stride;
+        
         Some(self)
     }
 
