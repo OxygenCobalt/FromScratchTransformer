@@ -12,7 +12,6 @@ use crate::{
 };
 
 mod activation;
-mod autograd;
 mod embeddings;
 mod loss;
 mod mnist;

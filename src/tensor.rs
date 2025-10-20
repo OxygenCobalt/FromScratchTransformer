@@ -1,6 +1,6 @@
 use core::f64;
 use std::{
-    collections::HashSet, fmt::Debug, io::{self, Read, Write}
+    cell::RefCell, collections::HashSet, fmt::Debug, io::{self, Read, Write}, rc::Rc
 };
 
 use rayon::prelude::*;
@@ -33,6 +33,26 @@ where
     fn at_argmax(&self, of: &Self) -> Option<Self>;
 }
 
+pub trait DifferentiableTensor: Tensor {
+    type Autograd: Autograd<Self>;
+    fn autograd(self) -> Self::Autograd;
+}
+
+pub trait Autograd<Parent> : Tensor {
+    fn backward(&self);
+    fn into_grad(self) -> Option<Parent>;
+}
+
+pub trait TensorMut: Tensor {
+    fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64>;
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut f64>;
+}
+
+pub trait TensorIO: Tensor {
+    fn read(read: &mut impl Read) -> io::Result<Self>;
+    fn write(&self, write: &mut impl Write) -> io::Result<()>;
+}
+
 #[derive(Clone, Copy)]
 pub struct Field {
     pub size: usize,
@@ -60,16 +80,6 @@ impl Field {
 
 pub trait TensorInit {
     fn make(self) -> Option<(Vec<usize>, Vec<f64>)>;
-}
-
-pub trait TensorMut: Tensor {
-    fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64>;
-    fn iter_mut(&mut self) -> impl Iterator<Item = &mut f64>;
-}
-
-pub trait TensorIO: Tensor {
-    fn read(read: &mut impl Read) -> io::Result<Self>;
-    fn write(&self, write: &mut impl Write) -> io::Result<()>;
 }
 
 pub struct Tt<T: Tensor>(pub Vec<T>);
@@ -738,6 +748,17 @@ impl Tensor for CPUTensor {
     }
 }
 
+impl DifferentiableTensor for CPUTensor {
+    type Autograd = CPUAutograd;
+    fn autograd(self) -> Self::Autograd {
+        CPUAutograd(AutogradNode::new(Computation {
+            tensor: self,
+            grad: RefCell::new(None),
+            op: None,
+        }))
+    }
+}
+
 impl TensorMut for CPUTensor {
     fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64> {
         self.point_index(point).and_then(|i| self.data.get_mut(i))
@@ -796,6 +817,635 @@ impl TensorIO for CPUTensor {
             write.write_all(&x.to_le_bytes())?;
         }
         Ok(())
+    }
+}
+
+
+#[derive(Clone)]
+pub struct CPUAutograd(AutogradNode);
+
+impl Autograd<CPUTensor> for CPUAutograd {
+    fn backward(&self) {
+        self.0.backward_init();
+    }
+
+    fn into_grad(self) -> Option<CPUTensor> {
+        Rc::into_inner(self.0).and_then(|c| c.grad.into_inner())
+    }
+}
+
+impl Tensor for CPUAutograd {
+    fn scalar(c: impl Into<f64>) -> Self {
+        Self(AutogradNode::new(Computation {
+            tensor: CPUTensor::scalar(c),
+            grad: RefCell::new(None),
+            op: None,
+        }))
+    }
+
+    fn vector(v: impl Into<Vec<f64>>) -> Option<Self> {
+        Some(Self(AutogradNode::new(Computation {
+            tensor: CPUTensor::vector(v)?,
+            grad: RefCell::new(None),
+            op: None,
+        })))
+    }
+
+    fn tensor(tv: impl TensorInit) -> Option<Self> {
+        Some(Self(AutogradNode::new(Computation {
+            tensor: CPUTensor::tensor(tv)?,
+            grad: RefCell::new(None),
+            op: None,
+        })))
+    }
+
+    fn ndim(&self) -> usize {
+        self.0.tensor.ndim()
+    }
+
+    fn shape(&self) -> &[usize] {
+        &self.0.tensor.shape()
+    }
+
+    fn get(&self, point: &[usize]) -> Option<&f64> {
+        self.0.tensor.get(point)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &f64> {
+        self.0.tensor.iter()
+    }
+
+    fn add(&self, other: &Self) -> Option<Self> {
+        Operation::Add {
+            lhs: self.0.clone(),
+            rhs: other.0.clone(),
+        }
+        .forward()
+    }
+
+    fn sub(&self, other: &Self) -> Option<Self> {
+        Operation::Sub {
+            lhs: self.0.clone(),
+            rhs: other.0.clone(),
+        }
+        .forward()
+    }
+
+    fn mul(&self, other: &Self) -> Option<Self> {
+        Operation::Mul {
+            lhs: self.0.clone(),
+            rhs: other.0.clone(),
+        }
+        .forward()
+    }
+
+    fn dot(&self, other: &Self, depth: usize) -> Option<Self> {
+        Operation::Dot {
+            lhs: self.0.clone(),
+            rhs: other.0.clone(),
+            depth,
+        }
+        .forward()
+    }
+
+    fn sum(&self) -> Self {
+        Operation::Sum { t: self.0.clone() }.forward().unwrap()
+    }
+
+    fn pow(self, i: i32) -> Self {
+        Operation::Pow { t: self.0, i }.forward().unwrap()
+    }
+
+    fn ln(self) -> Self {
+        Operation::Ln { t: self.0 }.forward().unwrap()
+    }
+
+    fn exp(self) -> Self {
+        Operation::Exp { t: self.0 }.forward().unwrap()
+    }
+
+    fn neg(self) -> Self {
+        Operation::Neg { t: self.0 }.forward().unwrap()
+    }
+
+    fn max(self, y: f64) -> Self {
+        Operation::Max { t: self.0, u: y }.forward().unwrap()
+    }
+
+    fn colify(&self, field: Field) -> Option<Self> {
+        Operation::Colify {
+            t: self.0.clone(),
+            field,
+        }
+        .forward()
+    }
+
+    fn colmax(&self) -> Option<Self> {
+        Operation::Colmax { t: self.0.clone() }.forward()
+    }
+
+    fn reshape(self, shape: &[usize]) -> Option<Self> {
+        Operation::Reshape {
+            t: self.0.clone(),
+            shape: shape.to_vec(),
+        }
+        .forward()
+    }
+
+    fn transpose(self, axes: &[usize]) -> Option<Self> {
+        Operation::Transpose {
+            t: self.0,
+            axes: axes.to_vec(),
+        }
+        .forward()
+    }
+
+    fn at_argmax(&self, of: &Self) -> Option<Self> {
+        Operation::AtArgmax {
+            t: self.0.clone(),
+            of: of.0.clone(),
+        }
+        .forward()
+    }
+}
+
+type AutogradNode = Rc<Computation>;
+
+struct Computation {
+    tensor: CPUTensor,
+    grad: RefCell<Option<CPUTensor>>,
+    op: Option<Operation>,
+}
+
+impl Computation {
+    fn backward_init(&self) {
+        self.backward(CPUTensor::tensor(Fill { shape: self.tensor.shape().to_vec(), with: 1.0 }).unwrap());
+    }
+
+    pub fn backward(&self, grad: CPUTensor) {
+        if let Some(op) = &self.op {
+            op.backward(&grad);
+        }
+        let new_grad = match self.grad.borrow().as_ref() {
+            Some(existing) => Some(existing.clone().add(&grad).unwrap()),
+            None => Some(grad),
+        };
+        *self.grad.borrow_mut() = new_grad;
+    }
+}
+
+enum Operation {
+    Add {
+        lhs: AutogradNode,
+        rhs: AutogradNode,
+    },
+    Sub {
+        lhs: AutogradNode,
+        rhs: AutogradNode,
+    },
+    Mul {
+        lhs: AutogradNode,
+        rhs: AutogradNode,
+    },
+    Dot {
+        lhs: AutogradNode,
+        rhs: AutogradNode,
+        depth: usize,
+    },
+    Sum {
+        t: AutogradNode,
+    },
+    Ln {
+        t: AutogradNode,
+    },
+    Exp {
+        t: AutogradNode,
+    },
+    Pow {
+        t: AutogradNode,
+        i: i32,
+    },
+    Neg {
+        t: AutogradNode,
+    },
+    Max {
+        t: AutogradNode,
+        u: f64,
+    },
+    Colify {
+        t: AutogradNode,
+        field: Field,
+    },
+    Colmax {
+        t: AutogradNode,
+    },
+    Reshape {
+        t: AutogradNode,
+        shape: Vec<usize>,
+    },
+    Transpose {
+        t: AutogradNode,
+        axes: Vec<usize>,
+    },
+    AtArgmax {
+        t: AutogradNode,
+        of: AutogradNode,
+    },
+}
+
+impl Operation {
+    fn arithmetic_backward(
+        lhs: &AutogradNode,
+        rhs: &AutogradNode,
+        grad: &CPUTensor,
+        op: impl Fn(&f64, &f64) -> (f64, f64),
+    ) {
+        let mut lhs_grad = CPUTensor::tensor(Fill {
+            shape: lhs.tensor.shape().to_vec(),
+            with: 0.0,
+        })
+        .unwrap();
+        let mut rhs_grad = CPUTensor::tensor(Fill {
+            shape: rhs.tensor.shape().to_vec(),
+            with: 0.0,
+        })
+        .unwrap();
+
+        let mut new_point = vec![0; grad.ndim()];
+        let mut lhs_point = vec![0; lhs.tensor.ndim()];
+        let mut rhs_point = vec![0; rhs.tensor.ndim()];
+        'iterate: loop {
+            for (i, v) in new_point.iter().enumerate() {
+                if i < lhs_point.len() {
+                    lhs_point[i] = v % lhs.tensor.shape()[i];
+                }
+                if i < rhs_point.len() {
+                    rhs_point[i] = v % rhs.tensor.shape()[i];
+                }
+            }
+            let (lhs_lgrad, rhs_lgrad) = op(
+                lhs.tensor.get(&lhs_point).unwrap(),
+                rhs.tensor.get(&rhs_point).unwrap(),
+            );
+            let bgrad = *grad.get(&new_point).unwrap();
+            *lhs_grad.get_mut(&lhs_point).unwrap() += lhs_lgrad * bgrad;
+            *rhs_grad.get_mut(&rhs_point).unwrap() += rhs_lgrad * bgrad;
+
+            for (p, s) in new_point.iter_mut().zip(grad.shape()) {
+                if *p == *s - 1 {
+                    *p = 0;
+                } else {
+                    *p += 1;
+                    continue 'iterate;
+                }
+            }
+            break;
+        }
+        rhs.backward(rhs_grad);
+        lhs.backward(lhs_grad);
+    }
+
+    fn add_backward(
+        lhs: &AutogradNode,
+        rhs: &AutogradNode,
+        grad: &CPUTensor,
+    ) {
+        Self::arithmetic_backward(lhs, rhs, grad, |_, _| (1.0, 1.0));
+    }
+
+    fn sub_backward(
+        lhs: &AutogradNode,
+        rhs: &AutogradNode,
+        grad: &CPUTensor
+    ){
+        Self::arithmetic_backward(lhs, rhs, grad, |_, _| (1.0, -1.0));
+    }
+
+    fn mul_backward(
+        lhs: &AutogradNode,
+        rhs: &AutogradNode,
+        grad: &CPUTensor
+    ) {
+        Self::arithmetic_backward(lhs, rhs, grad, |lhs, rhs| (*rhs, *lhs));
+    }
+
+    fn dot_backward(
+        lhs: &AutogradNode,
+        rhs: &AutogradNode,
+        depth: usize,
+        grad: &CPUTensor,
+    ) {
+        let lhs_shift = rhs.tensor.ndim() - depth;
+        let mut rhs_axes: Vec<usize> = (0..rhs.tensor.ndim()).collect();
+        rhs_axes.rotate_right(lhs_shift);
+        lhs.backward(
+            grad.dot(&rhs.tensor.clone().transpose(&rhs_axes).unwrap(), lhs_shift)
+                .unwrap(),
+        );
+
+        let rhs_shift = lhs.tensor.ndim() - depth;
+        let mut lhs_axes: Vec<usize> = (0..lhs.tensor.ndim()).collect();
+        lhs_axes.rotate_left(rhs_shift);
+        rhs.backward(
+            lhs.tensor
+                .clone()
+                .transpose(&lhs_axes)
+                .unwrap()
+                .dot(grad, rhs_shift)
+                .unwrap(),
+        );
+    }
+
+    fn sum_backward(
+        t: &AutogradNode,
+        grad: &CPUTensor
+    ) {
+        let mut t_grad = CPUTensor::tensor(Fill {
+            shape: t.tensor.shape().to_vec(),
+            with: 0.0,
+        })
+        .unwrap();
+        let mut t_grad_point = vec![0; t_grad.shape().len()];
+        let mut grad_point = vec![0; grad.shape().len()];
+        'iterate: loop {
+            t_grad_point[1..].copy_from_slice(&grad_point);
+            for i in 0..t.tensor.shape()[0] {
+                t_grad_point[0] = i;
+                *t_grad.get_mut(&t_grad_point).unwrap() = *grad.get(&grad_point).unwrap();
+            }
+            for (p, s) in grad_point.iter_mut().zip(grad.shape().iter()) {
+                if *p == *s - 1 {
+                    *p = 0;
+                } else {
+                    *p += 1;
+                    continue 'iterate;
+                }
+            }
+            break;
+        }
+        t.backward(t_grad);
+    }
+
+    fn ln_backward(
+        t: &AutogradNode,
+        grad: &CPUTensor
+    ) {
+        t.backward(t.tensor.clone().pow(-1).mul(grad).unwrap());
+    }
+
+    fn exp_backward(
+        t: &AutogradNode,
+        grad: &CPUTensor
+    ) {
+        t.backward(t.tensor.clone().exp().mul(grad).unwrap());
+    }
+
+    fn pow_backward(
+        t: &AutogradNode,
+        i: i32,
+        grad: &CPUTensor
+    ) {
+        t.backward(
+            t.tensor
+                .clone()
+                .pow(i - 1)
+                .mul(&Tensor::scalar(i as f64))
+                .unwrap()
+                .mul(grad)
+                .unwrap(),
+        );
+    }
+
+    fn neg_backward(
+        t: &AutogradNode,
+        grad: &CPUTensor
+    ){
+        t.backward(grad.clone().neg());
+    }
+
+    fn max_backward(
+        t: &AutogradNode,
+        u: f64,
+        grad: &CPUTensor
+    ) {
+        let mut loc = t.tensor.clone();
+        loc.iter_mut()
+            .for_each(|x| *x = if *x >= u { 1.0 } else { 0.0 });
+        t.backward(loc.mul(grad).unwrap());       
+    }
+
+    fn colify_backward(
+        t: &AutogradNode,
+        field: Field,
+        grad: &CPUTensor
+    ) {
+        let mut t_grad = CPUTensor::tensor(Fill {
+            shape: t.tensor.shape().to_vec(),
+            with: 0.0,
+        })
+        .unwrap();
+        let locations = field
+            .locations_on(*t.tensor.shape().first().unwrap())
+            .unwrap();
+        let new_shape = grad.shape();
+        let mut new_point = vec![0; new_shape.len()];
+        let mut old_point = vec![0; t.tensor.ndim()];
+        'iterate: loop {
+            let field_idx = new_point[0];
+            let location_idx = new_point[1];
+            let x = -(field.padding as i64) + (((location_idx % locations) * field.stride) + (field_idx % field.size)) as i64;
+            let y = -(field.padding as i64) + (((location_idx / locations) * field.stride) + (field_idx / field.size)) as i64;
+            if x >= 0 && y >= 0 && x < t.tensor.shape()[0] as i64 && y < t.tensor.shape()[1] as i64 {
+                old_point[0] = x as usize;
+                old_point[1] = y as usize;
+                old_point[2..].copy_from_slice(&new_point[2..]);
+                *t_grad.get_mut(&old_point).unwrap() += *grad.get(&new_point).unwrap()
+            }
+            for (p, s) in new_point.iter_mut().zip(grad.shape().iter()) {
+                if *p == *s - 1 {
+                    *p = 0;
+                } else {
+                    *p += 1;
+                    continue 'iterate;
+                }
+            }
+            break;
+        }
+        t.backward(t_grad);
+    }
+
+    fn colmax_backward(
+        t: &AutogradNode,
+        grad: &CPUTensor
+    ) {
+        let mut t_grad = CPUTensor::tensor(Fill {
+            shape: t.tensor.shape().to_vec(),
+            with: 0.0,
+        })
+        .unwrap();
+        let mut grad_point = vec![0; grad.ndim()];
+        let mut column_point = vec![0; t.tensor.ndim()];
+        'iterate: loop {
+            column_point[1..].copy_from_slice(&grad_point);
+            let mut max_idx = 0;
+            let mut max_value = f64::NEG_INFINITY;
+            for i in 0..t.tensor.shape()[0] {
+                column_point[0] = i;
+                let cur_value = t.tensor.get(&column_point).unwrap();
+                if *cur_value > max_value {
+                    max_idx = i;
+                    max_value = *cur_value;
+                }
+            }
+            column_point[0] = max_idx;
+            // max point, frwd here
+            *t_grad.get_mut(&column_point).unwrap() = *grad.get(&grad_point).unwrap();
+            for (p, s) in grad_point.iter_mut().zip(grad.shape().iter()) {
+                if *p == *s - 1 {
+                    *p = 0;
+                } else {
+                    *p += 1;
+                    continue 'iterate;
+                }
+            }
+            break;
+        }
+        t.backward(t_grad);      
+    }
+
+    fn reshape_backward(
+        t: &AutogradNode,
+        grad: &CPUTensor
+    ) {
+        t.backward(grad.clone().reshape(t.tensor.shape()).unwrap())
+    }
+
+    fn transpose_backward(
+        t: &AutogradNode,
+        axes: &[usize],
+        grad: &CPUTensor
+    ) {
+        let mut rev_axes = vec![0; axes.len()];
+        for i in 0..axes.len() {
+            rev_axes[axes[i]] = i;
+        }
+        t.backward(grad.clone().transpose(&rev_axes).unwrap());
+    }
+
+    fn at_argmax_backward(
+        at: &AutogradNode,
+        of: &AutogradNode,
+        grad: &CPUTensor
+    ) {
+        let mut t_grad = CPUTensor::tensor(Fill {
+            shape: at.tensor.shape().to_vec(),
+            with: 0.0,
+        })
+        .unwrap();
+        let mut t_grad_point = vec![0; t_grad.shape().len()];
+        let mut grad_point = vec![0; grad.shape().len()];
+        'iterate: loop {
+            let mut argmax = 0;
+            let mut max = f64::NEG_INFINITY;
+            t_grad_point[1..].copy_from_slice(&grad_point);
+            for i in 0..at.tensor.shape()[0] {
+                t_grad_point[0] = i;
+                let x = *of.tensor.get(&t_grad_point).unwrap();
+                if x > max {
+                    argmax = i;
+                    max = x;
+                }
+            }
+            t_grad_point[0] = argmax;
+            *t_grad.get_mut(&t_grad_point).unwrap() = *grad.get(&grad_point).unwrap();
+            for (p, s) in grad_point.iter_mut().zip(grad.shape().iter()) {
+                if *p == *s - 1 {
+                    *p = 0;
+                } else {
+                    *p += 1;
+                    continue 'iterate;
+                }
+            }
+            break;
+        }
+        at.backward(t_grad);       
+    }
+
+    fn forward(self) -> Option<CPUAutograd> {
+        let tensor = match &self {
+            Self::Add { lhs, rhs } => lhs.tensor.add(&rhs.tensor),
+            Self::Sub { lhs, rhs } => lhs.tensor.sub(&rhs.tensor),
+            Self::Mul { lhs, rhs } => lhs.tensor.mul(&rhs.tensor),
+            Self::Dot { lhs, rhs, depth } => lhs.tensor.dot(&rhs.tensor, *depth),
+            Self::Sum { t } => Some(t.tensor.sum()),
+            Self::Ln { t } => Some(t.tensor.clone().ln()),
+            Self::Exp { t } => Some(t.tensor.clone().exp()),
+            Self::Pow { t, i } => Some(t.tensor.clone().pow(*i)),
+            Self::Neg { t } => Some(t.tensor.clone().neg()),
+            Self::Max { t, u } => Some(t.tensor.clone().max(*u)),
+            Self::Colify { t, field } => t.tensor.colify(*field),
+            Self::Colmax { t } => t.tensor.colmax(),
+            Self::Reshape { t, shape } => t.tensor.clone().reshape(shape),
+            Self::Transpose { t, axes } => t.tensor.clone().transpose(&axes),
+            Self::AtArgmax { t, of } => t.tensor.at_argmax(&of.tensor),
+        };
+        tensor.map(|tensor| {
+            CPUAutograd(Rc::new(Computation {
+                tensor,
+                grad: RefCell::new(None),
+                op: Some(self),
+            }))
+        })
+    }
+
+    fn backward(&self, grad: &CPUTensor) {
+        match self {
+            Self::Add { lhs, rhs } => {
+                Self::add_backward(lhs, rhs, grad);
+            }
+            Self::Sub { lhs, rhs } => {
+                Self::sub_backward(lhs, rhs, grad);
+            }
+            Self::Mul { lhs, rhs } => {
+                Self::mul_backward(lhs, rhs, grad);
+            }
+            Self::Dot { lhs, rhs, depth } => {
+                Self::dot_backward(lhs, rhs, *depth, grad);
+            }
+            Self::Sum { t } => {
+                Self::sum_backward(t, grad);
+            }
+            Self::Ln { t } => {
+                Self::ln_backward(t, grad);
+            }
+            Self::Exp { t } => {
+                Self::exp_backward(t, grad);
+            }
+            Self::Pow { t, i } => {
+                Self::pow_backward(t, *i, grad);
+            }
+            Self::Neg { t } => {
+                Self::neg_backward(t, grad);
+            }
+            Self::Max { t, u } => {
+                Self::max_backward(t, *u, grad);
+            }
+            Self::Colify { t, field } => {
+                Self::colify_backward(t, *field, grad);
+            }
+            Self::Colmax { t } => {
+                Self::colmax_backward(t, grad);
+            }
+            Self::Reshape { t, .. } => {
+                Self::reshape_backward(t, grad);
+            }
+            Self::Transpose { t, axes } => {
+                Self::transpose_backward(t, axes, grad);
+            }
+            Self::AtArgmax { t, of } => {
+                Self::at_argmax_backward(t, of, grad);
+            }
+        }
     }
 }
 
@@ -858,142 +1508,3 @@ mod tests {
         assert!(tensor.transpose(&[0]).is_none());
     }
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-
-//     #[test]
-//     fn field_locations_on_counts_valid_stride_windows() {
-//         let field = Field {
-//             size: 2,
-//             stride: 1,
-//             padding: 0,
-//         };
-
-//         assert_eq!(field.locations_on(4).unwrap(), 3);
-//     }
-
-//     #[test]
-//     fn colify_collects_all_stride_one_patches_without_padding() {
-//         let input = CPUTensor {
-//             shape: vec![4, 4],
-//             data: (0..16).map(|v| v as f64).collect(),
-//         };
-//         let field = Field {
-//             size: 2,
-//             stride: 1,
-//             padding: 0,
-//         };
-
-//         let actual = input.colify(field).unwrap();
-
-//         assert_eq!(actual.shape(), &[4, 9]);
-
-//         let expected_columns = vec![
-//             vec![0.0, 1.0, 4.0, 5.0],
-//             vec![1.0, 2.0, 5.0, 6.0],
-//             vec![2.0, 3.0, 6.0, 7.0],
-//             vec![4.0, 5.0, 8.0, 9.0],
-//             vec![5.0, 6.0, 9.0, 10.0],
-//             vec![6.0, 7.0, 10.0, 11.0],
-//             vec![8.0, 9.0, 12.0, 13.0],
-//             vec![9.0, 10.0, 13.0, 14.0],
-//             vec![10.0, 11.0, 14.0, 15.0],
-//         ];
-
-//         for (location_idx, column) in expected_columns.iter().enumerate() {
-//             for (field_idx, expected_value) in column.iter().enumerate() {
-//                 println!("{} {} {:?} {:?}", location_idx, field_idx, actual.get(&[field_idx, location_idx]).copied(), Some(*expected_value));
-//                 assert_eq!(
-//                     actual.get(&[field_idx, location_idx]).copied(),
-//                     Some(*expected_value)
-//                 );
-//             }
-//         }
-//     }
-
-//     #[test]
-//     fn colify_obeys_strides_greater_than_one() {
-//         let input = CPUTensor {
-//             shape: vec![4, 4],
-//             data: (0..16).map(|v| v as f64).collect(),
-//         };
-//         let field = Field {
-//             size: 2,
-//             stride: 2,
-//             padding: 0,
-//         };
-
-//         let actual = input.colify(field).unwrap();
-
-//         assert_eq!(actual.shape(), &[4, 4]);
-
-//         let expected_columns = vec![
-//             vec![0.0, 1.0, 4.0, 5.0],
-//             vec![2.0, 3.0, 6.0, 7.0],
-//             vec![8.0, 9.0, 12.0, 13.0],
-//             vec![10.0, 11.0, 14.0, 15.0],
-//         ];
-
-//         for (location_idx, column) in expected_columns.iter().enumerate() {
-//                 // println!("{} {} {:?} {:?}", location_idx, field_idx, actual.get(&[field_idx, location_idx]).copied(), Some(*expected_value));
-//             for (field_idx, expected_value) in column.iter().enumerate() {
-//                 assert_eq!(
-//                     actual.get(&[field_idx, location_idx]).copied(),
-//                     Some(*expected_value)
-//                 );
-//             }
-//         }
-//     }
-
-//     #[test]
-//     fn colify_injects_zero_padding_into_patches() {
-//         let input = CPUTensor {
-//             shape: vec![2, 2],
-//             data: vec![1.0, 2.0, 3.0, 4.0],
-//         };
-//         let field = Field {
-//             size: 2,
-//             stride: 1,
-//             padding: 1,
-//         };
-
-//         let actual = input.colify(field).unwrap();
-
-//         assert_eq!(actual.shape(), &[4, 9]);
-
-//         // [0 0 0 0]
-//         // [0 1 2 0]
-//         // [0 3 4 0]
-//         // [0 0 0 0]
-
-//         let expected_columns = vec![
-//             vec![0.0, 0.0, 0.0, 1.0],
-//             vec![0.0, 0.0, 1.0, 2.0],
-//             vec![0.0, 0.0, 2.0, 0.0],
-//             vec![0.0, 1.0, 0.0, 3.0],
-//             vec![1.0, 2.0, 3.0, 4.0],
-//             vec![2.0, 0.0, 4.0, 0.0],
-//             vec![0.0, 3.0, 0.0, 0.0],
-//             vec![3.0, 4.0, 0.0, 0.0],
-//             vec![4.0, 0.0, 0.0, 0.0],
-//         ];
-
-//         for (location_idx, column) in expected_columns.iter().enumerate() {
-//             for (field_idx, expected_value) in column.iter().enumerate() {
-//                 println!("{} {} {:?} {:?}", location_idx, field_idx, actual.get(&[field_idx, location_idx]).copied(), Some(*expected_value));
-//                 assert_eq!(
-//                     actual.get(&[field_idx, location_idx]).copied(),
-//                     Some(*expected_value)
-//                 );
-//             }
-//         }
-//     }
-// }
-
-// impl Debug for CPUTensor {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         self.debug_shape(f, Vec::with_capacity(self.shape.len()))
-//     }
-// }
