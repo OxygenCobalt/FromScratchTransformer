@@ -545,11 +545,9 @@ impl Tensor for CPUTensor {
         'iterate: loop {
             let x = location_point[0] + field_point[0] as i64;
             let y = location_point[1] + field_point[1] as i64;
-            new.data[new_idx] = if x >= 0 && y >= 0 && x < self.shape[0] as i64 && y < self.shape[1] as i64 {
-                self.data[rel_idx as usize + old_idx]
-            } else {
-                0.0
-            };
+            if x >= 0 && y >= 0 && x < self.shape[0] as i64 && y < self.shape[1] as i64 {
+                *unsafe { new.data.get_unchecked_mut(new_idx) } = unsafe { *self.data.get_unchecked(rel_idx as usize + old_idx) };
+            }
 
             for i in 0..self.ndim() {
                 if new_point[i] == new.shape[i] - 1 {
@@ -1304,33 +1302,77 @@ impl Operation {
         field: Field,
         grad: &CPUTensor
     ) {
-        let mut t_grad = CPUTensor::tensor(Fill {
-            shape: t.tensor.shape().to_vec(),
-            with: 0.0,
-        })
-        .unwrap();
+        let mut t_grad = t.tensor.clone();
+        t_grad.iter_mut().for_each(|x| *x = 0.0);
         let locations = field
             .locations_on(*t.tensor.shape().first().unwrap())
             .unwrap();
         let new_shape = grad.shape();
         let mut new_point = vec![0; new_shape.len()];
-        let mut old_point = vec![0; t.tensor.ndim()];
+        let mut field_point = [0, 0];
+        let mut location_point = [-(field.padding as i64), -(field.padding as i64)];
+        let mut new_idx = 0;
+        let mut rel_idx = 0i64;
+        let mut old_idx = 0usize;
         'iterate: loop {
-            let field_idx = new_point[0];
-            let location_idx = new_point[1];
-            let x = -(field.padding as i64) + (((location_idx % locations) * field.stride) + (field_idx % field.size)) as i64;
-            let y = -(field.padding as i64) + (((location_idx / locations) * field.stride) + (field_idx / field.size)) as i64;
-            if x >= 0 && y >= 0 && x < t.tensor.shape()[0] as i64 && y < t.tensor.shape()[1] as i64 {
-                old_point[0] = x as usize;
-                old_point[1] = y as usize;
-                old_point[2..].copy_from_slice(&new_point[2..]);
-                *t_grad.get_mut(&old_point).unwrap() += *grad.get(&new_point).unwrap()
+            let x = location_point[0] + field_point[0] as i64;
+            let y = location_point[1] + field_point[1] as i64;
+            if x >= 0 && y >= 0 && x < t.tensor.shape[0] as i64 && y < t.tensor.shape[1] as i64 {
+                t_grad.data[rel_idx as usize + old_idx] += grad.data[new_idx];
             }
-            for (p, s) in new_point.iter_mut().zip(grad.shape().iter()) {
-                if *p == *s - 1 {
-                    *p = 0;
+
+            for i in 0..t.tensor.ndim() {
+                if new_point[i] == grad.shape[i] - 1 {
+                    match i {
+                        0 => {
+                            rel_idx -= (field_point[0] * t.tensor.stride[0] + field_point[1] * t.tensor.stride[1]) as i64;
+                            field_point[0] = 0;
+                            field_point[1] = 0;
+                        }, 
+                        1 => {
+                            rel_idx -= (location_point[0] + field.padding as i64) * t.tensor.stride[0] as i64 + 
+                                       (location_point[1] + field.padding as i64) * t.tensor.stride[1] as i64;
+                            location_point[0] = -(field.padding as i64);
+                            location_point[1] = -(field.padding as i64);
+                        }
+                        _ => {}
+                    }
+                    if i >= 2 {
+                        old_idx -= t.tensor.stride[i] * new_point[i];
+                    }
+                    new_idx -= grad.stride[i] * new_point[i];
+                    new_point[i] = 0;
                 } else {
-                    *p += 1;
+                    match i {
+                        0 => {
+                            if field_point[0] == field.size - 1 {
+                                rel_idx -= (field_point[0] * t.tensor.stride[0]) as i64;
+                                rel_idx += t.tensor.stride[1] as i64;
+                                field_point[0] = 0;
+                                field_point[1] += 1;
+                            } else {
+                                rel_idx += t.tensor.stride[0] as i64;
+                                field_point[0] += 1;
+                            }
+                        },
+                        1 => {
+                            if location_point[0] == ((locations - 1) * field.stride) as i64 {
+                                rel_idx -= location_point[0] * t.tensor.stride[0] as i64;
+                                rel_idx += (field.stride * t.tensor.stride[1]) as i64;
+                                location_point[0] = -(field.padding as i64);
+                                location_point[1] += field.stride as i64;
+                            } else {
+                                rel_idx += (field.stride * t.tensor.stride[0]) as i64;
+                                location_point[0] += field.stride as i64;
+                            }
+                        }
+                        _ => {}
+                    }
+                    if i >= 2 {
+                        old_idx += t.tensor.stride[i]
+                    }
+                    new_idx += grad.stride[i];
+                    new_point[i] += 1;
                     continue 'iterate;
                 }
             }
