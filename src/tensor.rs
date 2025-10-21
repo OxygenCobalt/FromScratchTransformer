@@ -1,9 +1,7 @@
 use core::f64;
 use std::{
-    cell::RefCell, collections::HashSet, fmt::Debug, io::{self, Read, Write}, rc::Rc
+    cell::RefCell, collections::HashSet, io::{self, Read, Write}, rc::Rc, sync::{Arc, Mutex}
 };
-
-use rayon::prelude::*;
 
 pub trait Tensor
 where
@@ -70,10 +68,31 @@ impl Field {
         Some((numer / denom) + 1)
     }
 
+    pub fn read(read: &mut impl Read) -> io::Result<Field> {
+        let mut buf = [0u8; 8];
+        read.read_exact(&mut buf)?;
+        if &buf != b"CnvField" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid field signature",
+            ));
+        }
+        read.read_exact(&mut buf)?;
+        let size = usize::from_le_bytes(buf);
+        read.read_exact(&mut buf)?;
+        let stride = usize::from_le_bytes(buf);
+        read.read_exact(&mut buf)?;
+        let padding = usize::from_le_bytes(buf);
+        Ok(
+            Field { size, stride, padding }
+        )
+    }
+
     pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
         write.write_all(b"CnvField")?;
         write.write_all(&self.size.to_le_bytes())?;
         write.write_all(&self.stride.to_le_bytes())?;
+        write.write_all(&self.padding.to_le_bytes())?;
         Ok(())
     }
 }
@@ -797,7 +816,7 @@ impl DifferentiableTensor for CPUTensor {
     fn autograd(self) -> Self::Autograd {
         CPUAutograd(AutogradNode::new(Computation {
             tensor: self,
-            grad: RefCell::new(None),
+            grad: Mutex::new(None),
             op: None,
         }))
     }
@@ -816,7 +835,7 @@ impl TensorMut for CPUTensor {
 impl TensorIO for CPUTensor {
     fn read(read: &mut impl Read) -> io::Result<Self> {
         let mut signature = [0u8; 8];
-        read.read(&mut signature)?;
+        read.read_exact(&mut signature)?;
         if &signature != b"CPUTensr" {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -824,25 +843,25 @@ impl TensorIO for CPUTensor {
             ));
         }
         let mut ndimb = [0u8; 8];
-        read.read(&mut ndimb)?;
+        read.read_exact(&mut ndimb)?;
         let ndim = usize::from_le_bytes(ndimb);
         let mut shape = vec![0; ndim];
         for s in &mut shape {
             let mut dim = [0u8; 8];
-            read.read(&mut dim)?;
+            read.read_exact(&mut dim)?;
             *s = usize::from_le_bytes(dim);
         }
         let mut stride = vec![0; ndim];
         for s in &mut stride {
             let mut dim = [0u8; 8];
-            read.read(&mut dim)?;
+            read.read_exact(&mut dim)?;
             *s = usize::from_le_bytes(dim);
         }
         let size = Self::len(shape.as_slice());
         let mut data = vec![0.0; size];
         for d in &mut data {
             let mut x = [0u8; 8];
-            read.read(&mut x)?;
+            read.read_exact(&mut x)?;
             *d = f64::from_le_bytes(x);
         }
         Ok(Self { shape, stride, data })
@@ -874,7 +893,7 @@ impl Autograd<CPUTensor> for CPUAutograd {
     }
 
     fn into_grad(self) -> Option<CPUTensor> {
-        Rc::into_inner(self.0).and_then(|c| c.grad.into_inner())
+        Arc::into_inner(self.0).and_then(|c| c.grad.into_inner().ok().flatten())
     }
 }
 
@@ -882,7 +901,7 @@ impl Tensor for CPUAutograd {
     fn scalar(c: impl Into<f64>) -> Self {
         Self(AutogradNode::new(Computation {
             tensor: CPUTensor::scalar(c),
-            grad: RefCell::new(None),
+            grad: Mutex::new(None),
             op: None,
         }))
     }
@@ -890,7 +909,7 @@ impl Tensor for CPUAutograd {
     fn vector(v: impl Into<Vec<f64>>) -> Option<Self> {
         Some(Self(AutogradNode::new(Computation {
             tensor: CPUTensor::vector(v)?,
-            grad: RefCell::new(None),
+            grad: Mutex::new(None),
             op: None,
         })))
     }
@@ -898,7 +917,7 @@ impl Tensor for CPUAutograd {
     fn tensor(tv: impl TensorInit) -> Option<Self> {
         Some(Self(AutogradNode::new(Computation {
             tensor: CPUTensor::tensor(tv)?,
-            grad: RefCell::new(None),
+            grad: Mutex::new(None),
             op: None,
         })))
     }
@@ -1013,11 +1032,11 @@ impl Tensor for CPUAutograd {
     }
 }
 
-type AutogradNode = Rc<Computation>;
+type AutogradNode = Arc<Computation>;
 
 struct Computation {
     tensor: CPUTensor,
-    grad: RefCell<Option<CPUTensor>>,
+    grad: Mutex<Option<CPUTensor>>,
     op: Option<Operation>,
 }
 
@@ -1030,11 +1049,11 @@ impl Computation {
         if let Some(op) = &self.op {
             op.backward(&grad);
         }
-        let new_grad = match self.grad.borrow().as_ref() {
+        let mut slf_grad = self.grad.lock().expect("mutex poisoned, should not happen");
+        *slf_grad = match slf_grad.as_ref() {
             Some(existing) => Some(existing.clone().add(&grad).unwrap()),
             None => Some(grad),
         };
-        *self.grad.borrow_mut() = new_grad;
     }
 }
 
@@ -1495,9 +1514,9 @@ impl Operation {
             Self::AtArgmax { t, of } => t.tensor.at_argmax(&of.tensor),
         };
         tensor.map(|tensor| {
-            CPUAutograd(Rc::new(Computation {
+            CPUAutograd(Arc::new(Computation {
                 tensor,
-                grad: RefCell::new(None),
+                grad: Mutex::new(None),
                 op: Some(self),
             }))
         })

@@ -199,7 +199,7 @@ where
 impl<T: TensorIO> NeuralNetwork<T> {
     pub fn read(read: &mut impl Read) -> io::Result<Self> {
         let mut signature = [0u8; 8];
-        read.read(&mut signature)?;
+        read.read_exact(&mut signature)?;
         if &signature != b"NeuralNt" {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -207,7 +207,7 @@ impl<T: TensorIO> NeuralNetwork<T> {
             ));
         }
         let mut nb = [0u8; 8];
-        read.read(&mut nb)?;
+        read.read_exact(&mut nb)?;
         let axon_count = usize::from_le_bytes(nb);
         let mut axons = Vec::with_capacity(axon_count);
         for _ in 0..axon_count {
@@ -217,7 +217,7 @@ impl<T: TensorIO> NeuralNetwork<T> {
     }
 
     pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
-        write.write(b"NeuralNt")?;
+        write.write_all(b"NeuralNt")?;
         write.write_all(&self.axons.len().to_le_bytes())?;
         for axon in &self.axons {
             axon.write(write)?;
@@ -341,7 +341,7 @@ impl<'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Checkpoint<'a, T, S, R> {
 
 impl<'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Setup<T> for Checkpoint<'a, T, S, R> {
     fn setup(&self) -> io::Result<Init<T>> {
-        fn open<T: TensorIO>(path: PathBuf) -> io::Result<NeuralNetwork<T>> {
+        fn open<T: TensorIO>(path: &Path) -> io::Result<NeuralNetwork<T>> {
             let mut file = File::open(path)?;
             let nn = NeuralNetwork::read(&mut file)?;
             Ok(nn)
@@ -353,18 +353,28 @@ impl<'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Setup<T> for Checkpoint<'a, 
             .chain(std::iter::once(None))
         {
             let path = self.checkpoint_path(epoch);
-            if let Ok(nn) = open(path) {
-                println!(
-                    "{}: located checkpointed nn at epoch {}",
-                    "checkpoint".red(),
-                    epoch
-                        .map(|e| (e + 1).to_string())
-                        .unwrap_or_else(|| "init".to_string())
-                );
-                return Ok(Init {
-                    nn,
-                    at_epoch: epoch,
-                });
+            match open(&path) {
+                Ok(nn) => {
+                    println!(
+                        "{}: located checkpointed nn at epoch {}",
+                        "checkpoint".red(),
+                        epoch
+                            .map(|e| (e + 1).to_string())
+                            .unwrap_or_else(|| "init".to_string())
+                    );
+                    return Ok(Init {
+                        nn,
+                        at_epoch: epoch,
+                    });
+                }
+                Err(e) => {
+                    println!(
+                        "{}: no checkpointed nn located at {}: {}",
+                        "checkpoint".red(),
+                        path.display(),
+                        e
+                    );
+                }
             }
         }
         self.setup.setup()
@@ -708,7 +718,7 @@ impl<T: Tensor> FeedForward<T> {
 impl<T: TensorIO> FeedForward<T> {
     fn read(read: &mut impl Read) -> io::Result<Self> {
         let mut signature = [0u8; 8];
-        read.read(&mut signature)?;
+        read.read_exact(&mut signature)?;
         if &signature != b"FeedFrwd" {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -716,15 +726,15 @@ impl<T: TensorIO> FeedForward<T> {
             ));
         }
         let mut activation_id = [0u8; 8];
-        read.read(&mut activation_id)?;
+        read.read_exact(&mut activation_id)?;
         let activation = Activation::from_id(&activation_id)
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "invalid feedforward signature"))?;
         let mut finb = [0u8; 8];
-        read.read(&mut finb)?;
+        read.read_exact(&mut finb)?;
         let flattened_input_ndim = usize::from_le_bytes(finb);
         let mut fisb = [0u8; 8];
+        read.read_exact(&mut fisb)?;
         let flattened_input_shape = usize::from_le_bytes(fisb);
-        read.read(&mut fisb)?;
         let weights = T::read(read)?;
         let biases = T::read(read)?;
         Ok(Self {
@@ -795,6 +805,20 @@ impl<T: Tensor> Conv2D<T> {
 }
 
 impl <T: TensorIO> Conv2D<T> {
+    fn read(read: &mut impl Read) -> io::Result<Self> {
+        let field = Field::read(read)?;
+        let mut activation_id = [0u8; 8];
+        read.read_exact(&mut activation_id)?;
+        let activation = Activation::from_id(&activation_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "invalid activation signature"))?;
+        Ok(Self {
+            field,
+            activation,
+            weights: T::read(read)?,
+            biases: T::read(read)?,
+        })
+    }
+
     fn write(&self, write: &mut impl Write) -> io::Result<()> {
         self.field.write(write)?;
         write.write_all(self.activation.id())?;
@@ -837,6 +861,13 @@ impl<T: Tensor> Pool2D<T> {
 }
 
 impl <T: TensorIO> Pool2D<T> {
+    fn read(read: &mut impl Read) -> io::Result<Self> {
+        let field = Field::read(read)?;
+        Ok(Self {
+            field,
+            phantom: PhantomData,
+        })
+    }
     fn write(&self, write: &mut impl Write) -> io::Result<()> {
         self.field.write(write)?;
         Ok(())
