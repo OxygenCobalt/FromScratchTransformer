@@ -1,6 +1,8 @@
 use core::f64;
 use std::{
-    cell::RefCell, collections::HashSet, io::{self, Read, Write}, rc::Rc, sync::{Arc, Mutex}
+    collections::HashSet,
+    io::{self, Read, Write},
+    sync::{Arc, Mutex},
 };
 
 pub trait Tensor
@@ -36,7 +38,7 @@ pub trait DifferentiableTensor: Tensor {
     fn autograd(self) -> Self::Autograd;
 }
 
-pub trait Autograd<Parent> : Tensor {
+pub trait Autograd<Parent>: Tensor {
     fn backward(&self);
     fn into_grad(self) -> Option<Parent>;
 }
@@ -55,7 +57,7 @@ pub trait TensorIO: Tensor {
 pub struct Field {
     pub size: usize,
     pub stride: usize,
-    pub padding: usize
+    pub padding: usize,
 }
 
 impl Field {
@@ -83,9 +85,11 @@ impl Field {
         let stride = usize::from_le_bytes(buf);
         read.read_exact(&mut buf)?;
         let padding = usize::from_le_bytes(buf);
-        Ok(
-            Field { size, stride, padding }
-        )
+        Ok(Field {
+            size,
+            stride,
+            padding,
+        })
     }
 
     pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
@@ -216,9 +220,27 @@ impl CPUTensor {
             1 => self.stride[0] * of[0],
             2 => self.stride[0] * of[0] + self.stride[1] * of[1],
             3 => self.stride[0] * of[0] + self.stride[1] * of[1] + self.stride[2] * of[2],
-            4 => self.stride[0] * of[0] + self.stride[1] * of[1] + self.stride[2] * of[2] + self.stride[3] * of[3],
-            5 => self.stride[0] * of[0] + self.stride[1] * of[1] + self.stride[2] * of[2] + self.stride[3] * of[3] + self.stride[4] * of[4],
-            6 => self.stride[0] * of[0] + self.stride[1] * of[1] + self.stride[2] * of[2] + self.stride[3] * of[3] + self.stride[4] * of[4] + self.stride[5] * of[5],
+            4 => {
+                self.stride[0] * of[0]
+                    + self.stride[1] * of[1]
+                    + self.stride[2] * of[2]
+                    + self.stride[3] * of[3]
+            }
+            5 => {
+                self.stride[0] * of[0]
+                    + self.stride[1] * of[1]
+                    + self.stride[2] * of[2]
+                    + self.stride[3] * of[3]
+                    + self.stride[4] * of[4]
+            }
+            6 => {
+                self.stride[0] * of[0]
+                    + self.stride[1] * of[1]
+                    + self.stride[2] * of[2]
+                    + self.stride[3] * of[3]
+                    + self.stride[4] * of[4]
+                    + self.stride[5] * of[5]
+            }
             _ => {
                 let mut idx = 0;
                 for i in 0..of.len() {
@@ -263,16 +285,14 @@ impl CPUTensor {
         let mut rhs_ptr = other.data.as_ptr();
 
         'iterate: loop {
-            unsafe { 
-                *new_ptr = op(*lhs_ptr, *rhs_ptr)
-            }
+            unsafe { *new_ptr = op(*lhs_ptr, *rhs_ptr) }
             for i in 0..new_point.len() {
                 let np_ref = unsafe { new_point.get_unchecked_mut(i) };
                 let np = *np_ref;
                 if np == unsafe { new.shape.get_unchecked(i) } - 1 {
-                    new_ptr = unsafe { new_ptr.sub( *new.stride.get_unchecked(i) * np) };
+                    new_ptr = unsafe { new_ptr.sub(*new.stride.get_unchecked(i) * np) };
                     lhs_ptr = unsafe { lhs_ptr.sub(*lhs_strides.get_unchecked(i) * np) };
-                    rhs_ptr = unsafe { rhs_ptr.sub(*rhs_strides.get_unchecked(i)  * np) };
+                    rhs_ptr = unsafe { rhs_ptr.sub(*rhs_strides.get_unchecked(i) * np) };
                     *np_ref = 0;
                 } else {
                     new_ptr = unsafe { new_ptr.add(*new.stride.get_unchecked(i)) };
@@ -285,21 +305,6 @@ impl CPUTensor {
             break;
         }
         Some(new)
-    }
-
-    fn debug_shape(&self, f: &mut std::fmt::Formatter<'_>, point: Vec<usize>) -> std::fmt::Result {
-        if point.len() == self.ndim() {
-            write![f, "{} ", self.get(point.as_slice()).unwrap()]?;
-            return Ok(())
-        }
-        write![f, "["]?;
-        for i in 0..self.shape[point.len()] {
-            let mut new_point = point.clone();
-            new_point.push(i);
-            self.debug_shape(f, new_point)?;
-        }
-        write![f, "]\n"]?;
-        Ok(())
     }
 }
 
@@ -344,8 +349,12 @@ impl Tensor for CPUTensor {
             i += 1;
             x
         });
-        
-        Some(Self { data, shape, stride })
+
+        Some(Self {
+            data,
+            shape,
+            stride,
+        })
     }
 
     fn ndim(&self) -> usize {
@@ -436,16 +445,16 @@ impl Tensor for CPUTensor {
             let mut i = 0;
             let mut lhs_offset_ptr = lhs_contract_offsets.as_ptr();
             let mut rhs_offset_ptr = rhs_contract_offsets.as_ptr();
-            
+
             while i < contraction_magnitude {
-                sum += unsafe {
-                    *lhs_ptr.add(*lhs_offset_ptr) * *rhs_ptr.add(*rhs_offset_ptr)
-                };
+                sum += unsafe { *lhs_ptr.add(*lhs_offset_ptr) * *rhs_ptr.add(*rhs_offset_ptr) };
                 i += 1;
                 lhs_offset_ptr = unsafe { lhs_offset_ptr.add(1) };
                 rhs_offset_ptr = unsafe { rhs_offset_ptr.add(1) };
             }
-            unsafe { *new_ptr = sum; }
+            unsafe {
+                *new_ptr = sum;
+            }
 
             for i in 0..new.ndim() {
                 let npt_ref = unsafe { new_point.get_unchecked_mut(i) };
@@ -565,20 +574,25 @@ impl Tensor for CPUTensor {
             let x = location_point[0] + field_point[0] as i64;
             let y = location_point[1] + field_point[1] as i64;
             if x >= 0 && y >= 0 && x < self.shape[0] as i64 && y < self.shape[1] as i64 {
-                *unsafe { new.data.get_unchecked_mut(new_idx) } = unsafe { *self.data.get_unchecked(rel_idx as usize + old_idx) };
+                *unsafe { new.data.get_unchecked_mut(new_idx) } =
+                    unsafe { *self.data.get_unchecked(rel_idx as usize + old_idx) };
             }
 
             for i in 0..self.ndim() {
                 if new_point[i] == new.shape[i] - 1 {
                     match i {
                         0 => {
-                            rel_idx -= (field_point[0] * self.stride[0] + field_point[1] * self.stride[1]) as i64;
+                            rel_idx -= (field_point[0] * self.stride[0]
+                                + field_point[1] * self.stride[1])
+                                as i64;
                             field_point[0] = 0;
                             field_point[1] = 0;
-                        }, 
+                        }
                         1 => {
-                            rel_idx -= (location_point[0] + field.padding as i64) * self.stride[0] as i64 + 
-                                       (location_point[1] + field.padding as i64) * self.stride[1] as i64;
+                            rel_idx -= (location_point[0] + field.padding as i64)
+                                * self.stride[0] as i64
+                                + (location_point[1] + field.padding as i64)
+                                    * self.stride[1] as i64;
                             location_point[0] = -(field.padding as i64);
                             location_point[1] = -(field.padding as i64);
                         }
@@ -601,7 +615,7 @@ impl Tensor for CPUTensor {
                                 rel_idx += self.stride[0] as i64;
                                 field_point[0] += 1;
                             }
-                        },
+                        }
                         1 => {
                             if location_point[0] == ((locations - 1) * field.stride) as i64 {
                                 rel_idx -= location_point[0] * self.stride[0] as i64;
@@ -636,8 +650,9 @@ impl Tensor for CPUTensor {
         new_shape.remove(0);
         let mut new = Self::tensor(Fill {
             shape: new_shape.clone(),
-            with: f64::NEG_INFINITY
-        }).unwrap();
+            with: f64::NEG_INFINITY,
+        })
+        .unwrap();
         let mut new_point = vec![0; new_shape.len()];
         let mut column_point = vec![0; self.shape.len()];
         'iterate: loop {
@@ -670,7 +685,7 @@ impl Tensor for CPUTensor {
             // with it in general reshaping code
             // we can just return the same scalar since shape must be []
             // and stride is already []
-            return Some(self) 
+            return Some(self);
         }
         // see if stride is monotonically increasing. if so we can just recompute the strides
         // since we havent done any views
@@ -702,10 +717,10 @@ impl Tensor for CPUTensor {
         // understanding the process
 
         // first, identify the blocks of memory that are still contiguous despite
-        // 
+        //
         struct Block {
             len: usize,
-            stride: usize
+            stride: usize,
         }
         let mut blocks = vec![];
         let mut block_len = 1;
@@ -715,13 +730,19 @@ impl Tensor for CPUTensor {
                 block_len *= self.shape[i];
             } else {
                 if i > 0 {
-                    blocks.push(Block { len: block_len, stride: block_stride });
+                    blocks.push(Block {
+                        len: block_len,
+                        stride: block_stride,
+                    });
                 }
                 block_len = self.shape[i];
                 block_stride = self.stride[i];
             }
         }
-        blocks.push(Block { len: block_len, stride: block_stride });
+        blocks.push(Block {
+            len: block_len,
+            stride: block_stride,
+        });
 
         let mut block_iter = blocks.into_iter();
         let mut cur_blk = block_iter.next().unwrap();
@@ -753,7 +774,7 @@ impl Tensor for CPUTensor {
         }
         self.shape = shape.to_vec();
         self.stride = new_stride;
-        
+
         Some(self)
     }
 
@@ -864,7 +885,11 @@ impl TensorIO for CPUTensor {
             read.read_exact(&mut x)?;
             *d = f64::from_le_bytes(x);
         }
-        Ok(Self { shape, stride, data })
+        Ok(Self {
+            shape,
+            stride,
+            data,
+        })
     }
 
     fn write(&self, write: &mut impl Write) -> io::Result<()> {
@@ -882,7 +907,6 @@ impl TensorIO for CPUTensor {
         Ok(())
     }
 }
-
 
 #[derive(Clone)]
 pub struct CPUAutograd(AutogradNode);
@@ -1042,7 +1066,13 @@ struct Computation {
 
 impl Computation {
     fn backward_init(&self) {
-        self.backward(CPUTensor::tensor(Fill { shape: self.tensor.shape().to_vec(), with: 1.0 }).unwrap());
+        self.backward(
+            CPUTensor::tensor(Fill {
+                shape: self.tensor.shape().to_vec(),
+                with: 1.0,
+            })
+            .unwrap(),
+        );
     }
 
     pub fn backward(&self, grad: CPUTensor) {
@@ -1187,36 +1217,19 @@ impl Operation {
         lhs.backward(lhs_grad);
     }
 
-    fn add_backward(
-        lhs: &AutogradNode,
-        rhs: &AutogradNode,
-        grad: &CPUTensor,
-    ) {
+    fn add_backward(lhs: &AutogradNode, rhs: &AutogradNode, grad: &CPUTensor) {
         Self::arithmetic_backward(lhs, rhs, grad, |_, _| (1.0, 1.0));
     }
 
-    fn sub_backward(
-        lhs: &AutogradNode,
-        rhs: &AutogradNode,
-        grad: &CPUTensor
-    ){
+    fn sub_backward(lhs: &AutogradNode, rhs: &AutogradNode, grad: &CPUTensor) {
         Self::arithmetic_backward(lhs, rhs, grad, |_, _| (1.0, -1.0));
     }
 
-    fn mul_backward(
-        lhs: &AutogradNode,
-        rhs: &AutogradNode,
-        grad: &CPUTensor
-    ) {
+    fn mul_backward(lhs: &AutogradNode, rhs: &AutogradNode, grad: &CPUTensor) {
         Self::arithmetic_backward(lhs, rhs, grad, |lhs, rhs| (*rhs, *lhs));
     }
 
-    fn dot_backward(
-        lhs: &AutogradNode,
-        rhs: &AutogradNode,
-        depth: usize,
-        grad: &CPUTensor,
-    ) {
+    fn dot_backward(lhs: &AutogradNode, rhs: &AutogradNode, depth: usize, grad: &CPUTensor) {
         let lhs_shift = rhs.tensor.ndim() - depth;
         let mut rhs_axes: Vec<usize> = (0..rhs.tensor.ndim()).collect();
         rhs_axes.rotate_right(lhs_shift);
@@ -1238,10 +1251,7 @@ impl Operation {
         );
     }
 
-    fn sum_backward(
-        t: &AutogradNode,
-        grad: &CPUTensor
-    ) {
+    fn sum_backward(t: &AutogradNode, grad: &CPUTensor) {
         let mut t_grad = CPUTensor::tensor(Fill {
             shape: t.tensor.shape().to_vec(),
             with: 0.0,
@@ -1268,25 +1278,15 @@ impl Operation {
         t.backward(t_grad);
     }
 
-    fn ln_backward(
-        t: &AutogradNode,
-        grad: &CPUTensor
-    ) {
+    fn ln_backward(t: &AutogradNode, grad: &CPUTensor) {
         t.backward(t.tensor.clone().pow(-1).mul(grad).unwrap());
     }
 
-    fn exp_backward(
-        t: &AutogradNode,
-        grad: &CPUTensor
-    ) {
+    fn exp_backward(t: &AutogradNode, grad: &CPUTensor) {
         t.backward(t.tensor.clone().exp().mul(grad).unwrap());
     }
 
-    fn pow_backward(
-        t: &AutogradNode,
-        i: i32,
-        grad: &CPUTensor
-    ) {
+    fn pow_backward(t: &AutogradNode, i: i32, grad: &CPUTensor) {
         t.backward(
             t.tensor
                 .clone()
@@ -1298,29 +1298,18 @@ impl Operation {
         );
     }
 
-    fn neg_backward(
-        t: &AutogradNode,
-        grad: &CPUTensor
-    ){
+    fn neg_backward(t: &AutogradNode, grad: &CPUTensor) {
         t.backward(grad.clone().neg());
     }
 
-    fn max_backward(
-        t: &AutogradNode,
-        u: f64,
-        grad: &CPUTensor
-    ) {
+    fn max_backward(t: &AutogradNode, u: f64, grad: &CPUTensor) {
         let mut loc = t.tensor.clone();
         loc.iter_mut()
             .for_each(|x| *x = if *x >= u { 1.0 } else { 0.0 });
-        t.backward(loc.mul(grad).unwrap());       
+        t.backward(loc.mul(grad).unwrap());
     }
 
-    fn colify_backward(
-        t: &AutogradNode,
-        field: Field,
-        grad: &CPUTensor
-    ) {
+    fn colify_backward(t: &AutogradNode, field: Field, grad: &CPUTensor) {
         let mut t_grad = t.tensor.clone();
         t_grad.iter_mut().for_each(|x| *x = 0.0);
         let locations = field
@@ -1344,13 +1333,17 @@ impl Operation {
                 if new_point[i] == grad.shape[i] - 1 {
                     match i {
                         0 => {
-                            rel_idx -= (field_point[0] * t.tensor.stride[0] + field_point[1] * t.tensor.stride[1]) as i64;
+                            rel_idx -= (field_point[0] * t.tensor.stride[0]
+                                + field_point[1] * t.tensor.stride[1])
+                                as i64;
                             field_point[0] = 0;
                             field_point[1] = 0;
-                        }, 
+                        }
                         1 => {
-                            rel_idx -= (location_point[0] + field.padding as i64) * t.tensor.stride[0] as i64 + 
-                                       (location_point[1] + field.padding as i64) * t.tensor.stride[1] as i64;
+                            rel_idx -= (location_point[0] + field.padding as i64)
+                                * t.tensor.stride[0] as i64
+                                + (location_point[1] + field.padding as i64)
+                                    * t.tensor.stride[1] as i64;
                             location_point[0] = -(field.padding as i64);
                             location_point[1] = -(field.padding as i64);
                         }
@@ -1373,7 +1366,7 @@ impl Operation {
                                 rel_idx += t.tensor.stride[0] as i64;
                                 field_point[0] += 1;
                             }
-                        },
+                        }
                         1 => {
                             if location_point[0] == ((locations - 1) * field.stride) as i64 {
                                 rel_idx -= location_point[0] * t.tensor.stride[0] as i64;
@@ -1400,10 +1393,7 @@ impl Operation {
         t.backward(t_grad);
     }
 
-    fn colmax_backward(
-        t: &AutogradNode,
-        grad: &CPUTensor
-    ) {
+    fn colmax_backward(t: &AutogradNode, grad: &CPUTensor) {
         let mut t_grad = t.tensor.clone();
         t_grad.iter_mut().for_each(|x| *x = 0.0);
         let mut grad_point = vec![0; grad.ndim()];
@@ -1434,21 +1424,14 @@ impl Operation {
             }
             break;
         }
-        t.backward(t_grad);      
+        t.backward(t_grad);
     }
 
-    fn reshape_backward(
-        t: &AutogradNode,
-        grad: &CPUTensor
-    ) {
+    fn reshape_backward(t: &AutogradNode, grad: &CPUTensor) {
         t.backward(grad.clone().reshape(t.tensor.shape()).unwrap())
     }
 
-    fn transpose_backward(
-        t: &AutogradNode,
-        axes: &[usize],
-        grad: &CPUTensor
-    ) {
+    fn transpose_backward(t: &AutogradNode, axes: &[usize], grad: &CPUTensor) {
         let mut rev_axes = vec![0; axes.len()];
         for i in 0..axes.len() {
             rev_axes[axes[i]] = i;
@@ -1456,11 +1439,7 @@ impl Operation {
         t.backward(grad.clone().transpose(&rev_axes).unwrap());
     }
 
-    fn at_argmax_backward(
-        at: &AutogradNode,
-        of: &AutogradNode,
-        grad: &CPUTensor
-    ) {
+    fn at_argmax_backward(at: &AutogradNode, of: &AutogradNode, grad: &CPUTensor) {
         let mut t_grad = CPUTensor::tensor(Fill {
             shape: at.tensor.shape().to_vec(),
             with: 0.0,
@@ -1492,7 +1471,7 @@ impl Operation {
             }
             break;
         }
-        at.backward(t_grad);       
+        at.backward(t_grad);
     }
 
     fn forward(self) -> Option<CPUAutograd> {
@@ -1628,7 +1607,11 @@ mod tests {
 
     #[test]
     fn transpose_rejects_axis_length_mismatch() {
-        let tensor = CPUTensor::tensor(Fill { shape: vec![2, 2], with: 1.0 }).unwrap();
+        let tensor = CPUTensor::tensor(Fill {
+            shape: vec![2, 2],
+            with: 1.0,
+        })
+        .unwrap();
         assert!(tensor.transpose(&[0]).is_none());
     }
 }

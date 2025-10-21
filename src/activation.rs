@@ -55,12 +55,20 @@ impl Activation {
 
 #[cfg(test)]
 mod tests {
-    use crate::{activation::Activation, tensor::{CPUTensor, Tensor, Th}};
+    use crate::{
+        activation::Activation,
+        tensor::{CPUTensor, Tensor, Th},
+    };
 
     #[test]
     fn whywhyhwy() {
-        let softmax = Activation::Softmax.activate(CPUTensor::tensor(Th::C(vec![Th::R(vec![1.0, 2.0]), Th::R(vec![1.0, 2.0])])).unwrap());
-        assert_eq!(1.0, *softmax.get(&[0, 0]).unwrap() + *softmax.get(&[1, 0]).unwrap())
+        let softmax = Activation::Softmax.activate(
+            CPUTensor::tensor(Th::C(vec![Th::R(vec![1.0, 2.0]), Th::R(vec![1.0, 2.0])])).unwrap(),
+        );
+        assert_eq!(
+            1.0,
+            *softmax.get(&[0, 0]).unwrap() + *softmax.get(&[1, 0]).unwrap()
+        )
     }
 
     #[test]
@@ -73,14 +81,12 @@ mod tests {
         assert_eq!(logits.shape(), &[3, 2]);
 
         let probs = Activation::Softmax.activate(logits);
-        let col0_sum = probs.get(&[0, 0]).unwrap()
-            + probs.get(&[1, 0]).unwrap()
-            + probs.get(&[2, 0]).unwrap();
+        let col0_sum =
+            probs.get(&[0, 0]).unwrap() + probs.get(&[1, 0]).unwrap() + probs.get(&[2, 0]).unwrap();
         assert!((col0_sum - 1.0).abs() < 1e-6);
 
-        let col1_sum = probs.get(&[0, 1]).unwrap()
-            + probs.get(&[1, 1]).unwrap()
-            + probs.get(&[2, 1]).unwrap();
+        let col1_sum =
+            probs.get(&[0, 1]).unwrap() + probs.get(&[1, 1]).unwrap() + probs.get(&[2, 1]).unwrap();
         assert!((col1_sum - 1.0).abs() < 1e-6);
     }
 }

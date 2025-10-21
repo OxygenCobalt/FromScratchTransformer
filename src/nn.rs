@@ -9,9 +9,11 @@ use std::io::{self, Read, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::LazyLock;
 
-use crate::tensor::{Autograd, CPUTensor, DifferentiableTensor, Field, Fill, Generate, Tensor, TensorIO, TensorMut, Tt};
+use crate::tensor::{
+    Autograd, CPUTensor, DifferentiableTensor, Field, Fill, Generate, Tensor, TensorIO, TensorMut,
+    Tt,
+};
 
 use super::{activation::Activation, loss::Loss};
 
@@ -164,22 +166,27 @@ where
             let total_loss = AtomicF64::new(0.0);
             for (i, batch) in batches.into_iter().enumerate() {
                 let c = hyperparams.learning_rate / hyperparams.batch_size as f64;
-                let all_auto_axons: Vec<_> = batch.map(|example| {
-                    let auto_axons: Vec<Axon<T::Autograd>> =
-                        init.nn.axons.iter().map(|a| a.train()).collect();
-                    let mut current = example.input.autograd();
-                    for axon in &auto_axons {
-                        current = axon.forward(current);
-                    }
-                    let loss = loss.loss(&current, &example.output.autograd());
-                    total_loss.fetch_add(loss.iter().sum::<f64>() / *loss.shape().first().unwrap_or(&1) as f64, Ordering::Relaxed);
-                    loss.backward();
-                    // this drops the entire computation graph allowing us to move the weight/bias
-                    // gradients out w/o a clone
-                    std::mem::drop(loss);
-                    std::mem::drop(current);
-                    auto_axons
-                }).collect();
+                let all_auto_axons: Vec<_> = batch
+                    .map(|example| {
+                        let auto_axons: Vec<Axon<T::Autograd>> =
+                            init.nn.axons.iter().map(|a| a.train()).collect();
+                        let mut current = example.input.autograd();
+                        for axon in &auto_axons {
+                            current = axon.forward(current);
+                        }
+                        let loss = loss.loss(&current, &example.output.autograd());
+                        total_loss.fetch_add(
+                            loss.iter().sum::<f64>() / *loss.shape().first().unwrap_or(&1) as f64,
+                            Ordering::Relaxed,
+                        );
+                        loss.backward();
+                        // this drops the entire computation graph allowing us to move the weight/bias
+                        // gradients out w/o a clone
+                        std::mem::drop(loss);
+                        std::mem::drop(current);
+                        auto_axons
+                    })
+                    .collect();
 
                 for auto_axon in all_auto_axons {
                     for (axon, auto_axon) in init.nn.axons.iter_mut().zip(auto_axon.into_iter()) {
@@ -187,7 +194,10 @@ where
                     }
                 }
                 sgd_bar.inc(1);
-                sgd_bar.set_message(format!["{:.3}", total_loss.load(Ordering::Relaxed) / (i + 1) as f64]);
+                sgd_bar.set_message(format![
+                    "{:.3}",
+                    total_loss.load(Ordering::Relaxed) / (i + 1) as f64
+                ]);
             }
             sgd_bar.finish();
             reporting.report(&init.nn, loss, Some(epoch))?;
@@ -260,13 +270,14 @@ impl<T: Tensor> Train<T> {
     }
 }
 
-impl <T: Tensor + Send> Train<T> {
-    fn par_batch(&self, size: usize) -> Vec<impl ParallelIterator<Item=Example<T>>> {
+impl<T: Tensor + Send> Train<T> {
+    fn par_batch(&self, size: usize) -> Vec<impl ParallelIterator<Item = Example<T>>> {
         let mut examples = self.examples.clone();
         examples.shuffle(&mut rand::rng());
-        examples.chunks(size).map(|chunk| {
-            chunk.to_vec().into_par_iter()
-        }).collect()
+        examples
+            .chunks(size)
+            .map(|chunk| chunk.to_vec().into_par_iter())
+            .collect()
     }
 }
 
@@ -454,7 +465,13 @@ impl Layer {
                 neurons,
                 activation,
             } => Axon::Dense {
-                ff: FeedForward::new(last.map(|l| l.activation_shape()).or(input_shape.clone()).unwrap(), *neurons, *activation),
+                ff: FeedForward::new(
+                    last.map(|l| l.activation_shape())
+                        .or(input_shape.clone())
+                        .unwrap(),
+                    *neurons,
+                    *activation,
+                ),
             },
             Self::Dropout {
                 input_shape,
@@ -462,14 +479,20 @@ impl Layer {
                 rate,
                 activation,
             } => Axon::Dropout {
-                ff: FeedForward::new(last.map(|l| l.activation_shape()).or(input_shape.clone()).unwrap(), *neurons, *activation),
+                ff: FeedForward::new(
+                    last.map(|l| l.activation_shape())
+                        .or(input_shape.clone())
+                        .unwrap(),
+                    *neurons,
+                    *activation,
+                ),
                 rate: *rate,
             },
             Self::Conv2D {
                 field,
                 filters,
                 activation,
-                input_size
+                input_size,
             } => Axon::Conv2D {
                 conv: Conv2D::new(*field, *filters, *activation, *input_size),
             },
@@ -608,9 +631,9 @@ impl<T: DifferentiableTensor + TensorMut> Axon<T> {
                     .biases
                     .sub(&autoconv.biases.into_grad().unwrap().mul(&scale).unwrap())
                     .unwrap();
-            },
-            (Self::Pool2D { pool }, Axon::<T::Autograd>::Pool2D { pool: autopool }) => {
-
+            }
+            (Self::Pool2D { .. }, Axon::<T::Autograd>::Pool2D { .. }) => {
+                // pooling layers have only a fixed field config, nothing to commit
             }
             _ => return None,
         }
@@ -690,7 +713,7 @@ impl<T: Tensor> FeedForward<T> {
             .unwrap(),
             biases: T::tensor(Fill {
                 shape: vec![neurons],
-                with: 0.0
+                with: 0.0,
             })
             .unwrap(),
             activation,
@@ -706,8 +729,7 @@ impl<T: Tensor> FeedForward<T> {
         // dbg!(activations.shape());
         self.activation.activate(
             self.weights
-                .dot(
-                    &activations.reshape(&flattened_shape).unwrap(), 1)
+                .dot(&activations.reshape(&flattened_shape).unwrap(), 1)
                 .unwrap()
                 .add(&self.biases)
                 .unwrap(),
@@ -742,7 +764,7 @@ impl<T: TensorIO> FeedForward<T> {
             biases,
             activation,
             flattened_input_ndim,
-            flattened_input_shape
+            flattened_input_shape,
         })
     }
 
@@ -769,14 +791,14 @@ impl<T: Tensor> Conv2D<T> {
         let weights = T::tensor(Generate {
             shape: vec![filters, field.size * field.size],
             with: || he.sample(&mut rand::rng()),
-        }).unwrap();
-        let locs = field
-            .locations_on(input_size)
-            .unwrap();
+        })
+        .unwrap();
+        let locs = field.locations_on(input_size).unwrap();
         let biases = T::tensor(Generate {
             shape: vec![locs, locs, filters],
-            with: || 0.0
-        }).unwrap();
+            with: || 0.0,
+        })
+        .unwrap();
         Self {
             weights,
             biases,
@@ -804,7 +826,7 @@ impl<T: Tensor> Conv2D<T> {
     }
 }
 
-impl <T: TensorIO> Conv2D<T> {
+impl<T: TensorIO> Conv2D<T> {
     fn read(read: &mut impl Read) -> io::Result<Self> {
         let field = Field::read(read)?;
         let mut activation_id = [0u8; 8];
@@ -860,7 +882,7 @@ impl<T: Tensor> Pool2D<T> {
     }
 }
 
-impl <T: TensorIO> Pool2D<T> {
+impl<T: TensorIO> Pool2D<T> {
     fn read(read: &mut impl Read) -> io::Result<Self> {
         let field = Field::read(read)?;
         Ok(Self {
