@@ -1060,47 +1060,66 @@ impl Operation {
         grad: &CPUTensor,
         op: impl Fn(&f64, &f64) -> (f64, f64),
     ) {
-        let mut lhs_grad = CPUTensor::tensor(Fill {
-            shape: lhs.tensor.shape().to_vec(),
-            with: 0.0,
-        })
-        .unwrap();
-        let mut rhs_grad = CPUTensor::tensor(Fill {
-            shape: rhs.tensor.shape().to_vec(),
-            with: 0.0,
-        })
-        .unwrap();
+        // partially assisted via codex
+        let k = lhs.tensor.ndim().max(rhs.tensor.ndim());
+        let mut lhs_strides = Vec::with_capacity(k);
+        let mut rhs_strides = Vec::with_capacity(k);
 
-        let mut new_point = vec![0; grad.ndim()];
-        let mut lhs_point = vec![0; lhs.tensor.ndim()];
-        let mut rhs_point = vec![0; rhs.tensor.ndim()];
-        'iterate: loop {
-            for (i, v) in new_point.iter().enumerate() {
-                if i < lhs_point.len() {
-                    lhs_point[i] = v % lhs.tensor.shape()[i];
-                }
-                if i < rhs_point.len() {
-                    rhs_point[i] = v % rhs.tensor.shape()[i];
-                }
+        for axis in 0..k {
+            let lhs_dim = lhs.tensor.shape.get(axis).copied().unwrap_or(1);
+            let rhs_dim = rhs.tensor.shape.get(axis).copied().unwrap_or(1);
+
+            if lhs_dim == rhs_dim {
+                lhs_strides.push(lhs.tensor.stride[axis]);
+                rhs_strides.push(rhs.tensor.stride[axis]);
+            } else if lhs_dim == 1 {
+                lhs_strides.push(0);
+                rhs_strides.push(rhs.tensor.stride[axis]);
+            } else if rhs_dim == 1 {
+                lhs_strides.push(lhs.tensor.stride[axis]);
+                rhs_strides.push(0);
+            } else {
+                unreachable!();
             }
-            let (lhs_lgrad, rhs_lgrad) = op(
-                lhs.tensor.get(&lhs_point).unwrap(),
-                rhs.tensor.get(&rhs_point).unwrap(),
-            );
-            let bgrad = *grad.get(&new_point).unwrap();
-            *lhs_grad.get_mut(&lhs_point).unwrap() += lhs_lgrad * bgrad;
-            *rhs_grad.get_mut(&rhs_point).unwrap() += rhs_lgrad * bgrad;
+        }
 
-            for (p, s) in new_point.iter_mut().zip(grad.shape()) {
-                if *p == *s - 1 {
-                    *p = 0;
+        let mut lhs_grad = lhs.tensor.clone();
+        lhs_grad.iter_mut().for_each(|v| *v = 0.0);
+        let mut rhs_grad = rhs.tensor.clone();
+        rhs_grad.iter_mut().for_each(|v| *v = 0.0);
+
+        let mut grad_point = vec![0; grad.ndim()];
+        let mut grad_idx = 0;
+        let mut lhs_idx = 0;
+        let mut rhs_idx = 0;
+
+        'iterate: loop {
+            let lhs_val = lhs.tensor.data[lhs_idx];
+            let rhs_val = rhs.tensor.data[rhs_idx];
+            let (lhs_scale, rhs_scale) = op(&lhs_val, &rhs_val);
+            let upstream = grad.data[grad_idx];
+
+            lhs_grad.data[lhs_idx] += lhs_scale * upstream;
+            rhs_grad.data[rhs_idx] += rhs_scale * upstream;
+
+            for axis in 0..grad.ndim() {
+                if grad_point[axis] == grad.shape()[axis] - 1 {
+                    grad_idx -= grad.stride[axis] * grad_point[axis];
+                    lhs_idx -= lhs_strides[axis] * grad_point[axis];
+                    rhs_idx -= rhs_strides[axis] * grad_point[axis];
+                    grad_point[axis] = 0;
                 } else {
-                    *p += 1;
+                    grad_point[axis] += 1;
+                    grad_idx += grad.stride[axis];
+                    lhs_idx += lhs_strides[axis];
+                    rhs_idx += rhs_strides[axis];
                     continue 'iterate;
                 }
             }
+
             break;
         }
+
         rhs.backward(rhs_grad);
         lhs.backward(lhs_grad);
     }
