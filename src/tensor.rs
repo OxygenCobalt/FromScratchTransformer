@@ -536,27 +536,73 @@ impl Tensor for CPUTensor {
             .chain(self.shape[2..].iter().cloned())
             .collect();
         let mut new = Self::tensor(Fill::null(new_shape)).unwrap();
+        let mut field_point = [0, 0];
+        let mut location_point = [-(field.padding as i64), -(field.padding as i64)];
+        let mut new_idx = 0;
+        let mut rel_idx = 0i64;
         let mut new_point = vec![0; new.shape.len()];
-        let mut old_point = vec![0; self.ndim()];
+        let mut old_idx = 0usize;
         'iterate: loop {
-            let field_idx = new_point[0];
-            let location_idx = new_point[1];
-            let x = -(field.padding as i64) + (((location_idx % locations) * field.stride) + (field_idx % field.size)) as i64;
-            let y = -(field.padding as i64) + (((location_idx / locations) * field.stride) + (field_idx / field.size)) as i64;
-            *new.get_mut(&new_point).unwrap() = if x >= 0 && y >= 0 && x < self.shape[0] as i64 && y < self.shape[1] as i64 {
-                old_point[0] = x as usize;
-                old_point[1] = y as usize;
-                old_point[2..].copy_from_slice(&new_point[2..]);
-                *self.get(&old_point).unwrap()
+            let x = location_point[0] + field_point[0] as i64;
+            let y = location_point[1] + field_point[1] as i64;
+            new.data[new_idx] = if x >= 0 && y >= 0 && x < self.shape[0] as i64 && y < self.shape[1] as i64 {
+                self.data[rel_idx as usize + old_idx]
             } else {
                 0.0
             };
 
-            for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
-                if *p == *s - 1 {
-                    *p = 0;
+            for i in 0..self.ndim() {
+                if new_point[i] == new.shape[i] - 1 {
+                    match i {
+                        0 => {
+                            rel_idx -= (field_point[0] * self.stride[0] + field_point[1] * self.stride[1]) as i64;
+                            field_point[0] = 0;
+                            field_point[1] = 0;
+                        }, 
+                        1 => {
+                            rel_idx -= (location_point[0] + field.padding as i64) * self.stride[0] as i64 + 
+                                       (location_point[1] + field.padding as i64) * self.stride[1] as i64;
+                            location_point[0] = -(field.padding as i64);
+                            location_point[1] = -(field.padding as i64);
+                        }
+                        _ => {}
+                    }
+                    if i >= 2 {
+                        old_idx -= self.stride[i] * new_point[i];
+                    }
+                    new_idx -= new.stride[i] * new_point[i];
+                    new_point[i] = 0;
                 } else {
-                    *p += 1;
+                    match i {
+                        0 => {
+                            if field_point[0] == field.size - 1 {
+                                rel_idx -= (field_point[0] * self.stride[0]) as i64;
+                                rel_idx += self.stride[1] as i64;
+                                field_point[0] = 0;
+                                field_point[1] += 1;
+                            } else {
+                                rel_idx += self.stride[0] as i64;
+                                field_point[0] += 1;
+                            }
+                        },
+                        1 => {
+                            if location_point[0] == ((locations - 1) * field.stride) as i64 {
+                                rel_idx -= location_point[0] * self.stride[0] as i64;
+                                rel_idx += (field.stride * self.stride[1]) as i64;
+                                location_point[0] = -(field.padding as i64);
+                                location_point[1] += field.stride as i64;
+                            } else {
+                                rel_idx += (field.stride * self.stride[0]) as i64;
+                                location_point[0] += field.stride as i64;
+                            }
+                        }
+                        _ => {}
+                    }
+                    if i >= 2 {
+                        old_idx += self.stride[i]
+                    }
+                    new_idx += new.stride[i];
+                    new_point[i] += 1;
                     continue 'iterate;
                 }
             }
