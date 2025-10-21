@@ -1297,33 +1297,31 @@ impl Operation {
         t: &AutogradNode,
         grad: &CPUTensor
     ) {
-        let mut t_grad = CPUTensor::tensor(Fill {
-            shape: t.tensor.shape().to_vec(),
-            with: 0.0,
-        })
-        .unwrap();
+        let mut t_grad = t.tensor.clone();
+        t_grad.iter_mut().for_each(|x| *x = 0.0);
         let mut grad_point = vec![0; grad.ndim()];
-        let mut column_point = vec![0; t.tensor.ndim()];
+        let mut grad_idx = 0;
+        let mut t_idx = 0;
         'iterate: loop {
-            column_point[1..].copy_from_slice(&grad_point);
             let mut max_idx = 0;
             let mut max_value = f64::NEG_INFINITY;
             for i in 0..t.tensor.shape()[0] {
-                column_point[0] = i;
-                let cur_value = t.tensor.get(&column_point).unwrap();
-                if *cur_value > max_value {
+                let cur_value = t.tensor.data[t_idx + i * t.tensor.stride[0]];
+                if cur_value > max_value {
                     max_idx = i;
-                    max_value = *cur_value;
+                    max_value = cur_value;
                 }
             }
-            column_point[0] = max_idx;
-            // max point, frwd here
-            *t_grad.get_mut(&column_point).unwrap() = *grad.get(&grad_point).unwrap();
-            for (p, s) in grad_point.iter_mut().zip(grad.shape().iter()) {
-                if *p == *s - 1 {
-                    *p = 0;
+            t_grad.data[t_idx + max_idx * t_grad.stride[0]] = grad.data[grad_idx];
+            for i in 0..grad.ndim() {
+                if grad_point[i] == grad.shape()[i] - 1 {
+                    grad_idx -= grad.stride[i] * grad_point[i];
+                    t_idx -= t.tensor.stride[i + 1] * grad_point[i];
+                    grad_point[i] = 0;
                 } else {
-                    *p += 1;
+                    grad_idx += grad.stride[i];
+                    t_idx += t.tensor.stride[i + 1];
+                    grad_point[i] += 1;
                     continue 'iterate;
                 }
             }
