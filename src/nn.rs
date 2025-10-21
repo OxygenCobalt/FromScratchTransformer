@@ -82,7 +82,7 @@ impl<T: TensorMut + DifferentiableTensor> NeuralNetwork<T> {
         if let None = init.at_epoch {
             reporting.report(&init.nn, loss, None)?;
         }
-        for epoch in init.at_epoch.unwrap_or(0)..hyperparams.epochs {
+        for epoch in init.at_epoch.map(|e| e + 1).unwrap_or(0)..hyperparams.epochs {
             let batches = training_set.get()?.batch(hyperparams.batch_size);
             let sgd_bar = ProgressBar::new(batches.len() as u64)
                 .with_style(ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}] / avg batch loss = {msg}")
@@ -155,7 +155,7 @@ where
         if let None = init.at_epoch {
             reporting.report(&init.nn, loss, None)?;
         }
-        for epoch in init.at_epoch.unwrap_or(0)..hyperparams.epochs {
+        for epoch in init.at_epoch.map(|e| e + 1).unwrap_or(0)..hyperparams.epochs {
             let training_set = training_set.get()?;
             let batches = training_set.par_batch(hyperparams.batch_size);
             let sgd_bar = ProgressBar::new(batches.len() as u64)
