@@ -1,11 +1,14 @@
+use atomic_float::AtomicF64;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::seq::SliceRandom;
 use rand_distr::{Distribution, Normal};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::LazyLock;
 
 use crate::tensor::{Autograd, CPUTensor, DifferentiableTensor, Field, Fill, Generate, Tensor, TensorIO, TensorMut, Tt};
@@ -74,7 +77,9 @@ impl<T: TensorMut + DifferentiableTensor> NeuralNetwork<T> {
                 .map(|e| format!["epoch {}", e + 1])
                 .unwrap_or_else(|| "init".to_string())
         );
-        reporting.report(&init.nn, loss, None)?;
+        if let None = init.at_epoch {
+            reporting.report(&init.nn, loss, None)?;
+        }
         for epoch in init.at_epoch.unwrap_or(0)..hyperparams.epochs {
             let batches = training_set.get()?.batch(hyperparams.batch_size);
             let sgd_bar = ProgressBar::new(batches.len() as u64)
@@ -104,6 +109,85 @@ impl<T: TensorMut + DifferentiableTensor> NeuralNetwork<T> {
                 }
                 sgd_bar.inc(1);
                 sgd_bar.set_message(format!["{:.3}", total_loss / (i + 1) as f64]);
+            }
+            sgd_bar.finish();
+            reporting.report(&init.nn, loss, Some(epoch))?;
+        }
+        Ok(init.nn)
+    }
+}
+
+impl<T: TensorMut + DifferentiableTensor + Send + Sync> NeuralNetwork<T>
+where
+    T::Autograd: Send,
+{
+    pub fn par_train(
+        setup: &impl Setup<T>,
+        reporting: &impl Reporting<T>,
+        training_set: &impl TrainingSet<T>,
+        hyperparams: &Hyperparams,
+        loss: &(impl Loss + Sync),
+    ) -> io::Result<Self> {
+        println!(
+            "{}: epochs = {} / batch size = {} / learning rate = {}",
+            "train".cyan(),
+            hyperparams.epochs,
+            hyperparams.batch_size,
+            hyperparams.learning_rate
+        );
+        let mut init = setup.setup()?;
+        let start = init.at_epoch.unwrap_or(0);
+        if start > hyperparams.epochs {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "invalid setup, epoch exceeds training parameters",
+            ));
+        }
+        println!(
+            "{}: starting w/nn @ {}",
+            "train".cyan(),
+            init.at_epoch
+                .map(|e| format!["epoch {}", e + 1])
+                .unwrap_or_else(|| "init".to_string())
+        );
+        if let None = init.at_epoch {
+            reporting.report(&init.nn, loss, None)?;
+        }
+        for epoch in init.at_epoch.unwrap_or(0)..hyperparams.epochs {
+            let training_set = training_set.get()?;
+            let batches = training_set.par_batch(hyperparams.batch_size);
+            let sgd_bar = ProgressBar::new(batches.len() as u64)
+                .with_style(ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}] / avg batch loss = {msg}")
+                                .unwrap()
+                                .progress_chars("=> "))
+                .with_prefix(format!["epoch {}", epoch + 1].blue().to_string());
+            let total_loss = AtomicF64::new(0.0);
+            for (i, batch) in batches.into_iter().enumerate() {
+                let c = hyperparams.learning_rate / hyperparams.batch_size as f64;
+                let all_auto_axons: Vec<_> = batch.map(|example| {
+                    let auto_axons: Vec<Axon<T::Autograd>> =
+                        init.nn.axons.iter().map(|a| a.train()).collect();
+                    let mut current = example.input.autograd();
+                    for axon in &auto_axons {
+                        current = axon.forward(current);
+                    }
+                    let loss = loss.loss(&current, &example.output.autograd());
+                    total_loss.fetch_add(loss.iter().sum::<f64>() / *loss.shape().first().unwrap_or(&1) as f64, Ordering::Relaxed);
+                    loss.backward();
+                    // this drops the entire computation graph allowing us to move the weight/bias
+                    // gradients out w/o a clone
+                    std::mem::drop(loss);
+                    std::mem::drop(current);
+                    auto_axons
+                }).collect();
+
+                for auto_axon in all_auto_axons {
+                    for (axon, auto_axon) in init.nn.axons.iter_mut().zip(auto_axon.into_iter()) {
+                        axon.commit(auto_axon, c);
+                    }
+                }
+                sgd_bar.inc(1);
+                sgd_bar.set_message(format!["{:.3}", total_loss.load(Ordering::Relaxed) / (i + 1) as f64]);
             }
             sgd_bar.finish();
             reporting.report(&init.nn, loss, Some(epoch))?;
@@ -173,6 +257,16 @@ impl<T: Tensor> Train<T> {
                 Example { input, output }
             })
             .collect()
+    }
+}
+
+impl <T: Tensor + Send> Train<T> {
+    fn par_batch(&self, size: usize) -> Vec<impl ParallelIterator<Item=Example<T>>> {
+        let mut examples = self.examples.clone();
+        examples.shuffle(&mut rand::rng());
+        examples.chunks(size).map(|chunk| {
+            chunk.to_vec().into_par_iter()
+        }).collect()
     }
 }
 
@@ -424,7 +518,7 @@ impl<T: Tensor> Axon<T> {
 }
 
 impl<T: DifferentiableTensor + TensorMut> Axon<T> {
-    fn train<'a>(&'a mut self) -> Axon<T::Autograd> {
+    fn train<'a>(&self) -> Axon<T::Autograd> {
         match self {
             Self::Dense { ff } => Axon::Dense {
                 ff: FeedForward {
@@ -517,19 +611,25 @@ impl<T: DifferentiableTensor + TensorMut> Axon<T> {
 impl<T: TensorIO> Axon<T> {
     fn read(read: &mut impl Read) -> io::Result<Self> {
         let mut id = [0u8; 8];
-        read.read(&mut id)?;
+        read.read_exact(&mut id)?;
         match &id {
             b"AxonDnse" => Ok(Self::Dense {
                 ff: FeedForward::read(read)?,
             }),
             b"AxonDrop" => {
                 let mut rateb = [0u8; 8];
-                read.read(&mut rateb)?;
+                read.read_exact(&mut rateb)?;
                 Ok(Self::Dropout {
                     ff: FeedForward::read(read)?,
                     rate: f64::from_le_bytes(rateb),
                 })
             }
+            b"AxonCv2D" => Ok(Self::Conv2D {
+                conv: Conv2D::read(read)?,
+            }),
+            b"AxonPl2D" => Ok(Self::Pool2D {
+                pool: Pool2D::read(read)?,
+            }),
             _ => Err(io::Error::new(
                 io::ErrorKind::Other,
                 "invalid axon signature",

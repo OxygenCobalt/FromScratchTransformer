@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 arrow = "56.0.0"
+atomic_float = "1.1.0"
 colored = "3.0.0"
 indicatif = "0.18.0"
 log = "0.4.27"
