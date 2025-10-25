@@ -3,12 +3,13 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::seq::SliceRandom;
 use rand_distr::{Distribution, Normal};
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use crate::tensor::{
     Autograd, CPUTensor, DifferentiableTensor, Field, Fill, Generate, Tensor, TensorIO, TensorMut,
@@ -21,7 +22,15 @@ pub struct NeuralNetwork<T: Tensor> {
     axons: Vec<Axon<T>>,
 }
 
-impl<T: Tensor> NeuralNetwork<T> {
+impl <T: Tensor> NeuralNetwork<T> {
+    pub fn evaluate(&self, input: &T) -> T {
+        let mut current = input.clone();
+        for axon in &self.axons {
+            current = axon.forward(current)
+        }
+        current
+    }
+    
     pub fn test(&self, test: &Test<T>, loss: &impl Loss) -> TestResults<T> {
         let mut sum = 0.0;
         let mut results = Vec::new();
@@ -39,13 +48,24 @@ impl<T: Tensor> NeuralNetwork<T> {
             results,
         };
     }
+}
 
-    pub fn evaluate(&self, input: &T) -> T {
-        let mut current = input.clone();
-        for axon in &self.axons {
-            current = axon.forward(current)
-        }
-        current
+impl<T: Tensor + Send + Sync> NeuralNetwork<T> {
+    pub fn par_test(&self, test: &Test<T>, loss: &impl Loss) -> TestResults<T> {
+        let mut sum = AtomicF64::new(0.0);
+        let results = test.examples.par_iter().map(|example| {
+            let activations = self.evaluate(&example.input);
+            sum.fetch_add(*loss.loss(&activations, &example.output).get(&[]).unwrap(), Ordering::Relaxed);
+            TestResult {
+                example: example.clone(),
+                activations,
+            }
+        }).collect();
+        let loss = sum.into_inner() / test.examples.len() as f64;
+        return TestResults {
+            avg_loss: loss,
+            results,
+        };
     }
 }
 

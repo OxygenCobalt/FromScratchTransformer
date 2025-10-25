@@ -40,7 +40,7 @@ impl<T: Tensor> TrainingSet<T> for MNIST<T> {
     }
 }
 
-impl<'a, T: Tensor> Reporting<T> for MNIST<T> {
+impl<'a, T: Tensor + Send + Sync> Reporting<T> for MNIST<T> {
     fn report(
         &self,
         nn: &NeuralNetwork<T>,
@@ -55,7 +55,7 @@ impl<'a, T: Tensor> Reporting<T> for MNIST<T> {
                 .unwrap()
                 .0
         }
-        let results = nn.test(&self.test, loss);
+        let results = nn.par_test(&self.test, loss);
         let successes = results
             .results
             .iter()

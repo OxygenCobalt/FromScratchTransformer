@@ -1,6 +1,6 @@
 use crate::tensor::Tensor;
 
-pub trait Loss {
+pub trait Loss: Send + Sync {
     fn loss<T: Tensor>(&self, batch_activations: &T, output: &T) -> T;
 }
 
