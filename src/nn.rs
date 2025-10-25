@@ -118,12 +118,9 @@ impl<T: TensorMut + DifferentiableTensor> NeuralNetwork<T> {
                     current = axon.forward(current)
                 }
                 let loss = loss.loss(&current, &batch.output.autograd());
+                std::mem::drop(current);
                 total_loss += loss.iter().sum::<f64>() / *loss.shape().first().unwrap_or(&1) as f64;
                 loss.backward();
-                // this drops the entire computation graph allowing us to move the weight/bias
-                // gradients out w/o a clone
-                std::mem::drop(loss);
-                std::mem::drop(current);
 
                 let c = hyperparams.learning_rate / hyperparams.batch_size as f64;
                 for (axon, auto_axon) in init.nn.axons.iter_mut().zip(auto_axons.into_iter()) {
@@ -199,11 +196,8 @@ where
                             loss.iter().sum::<f64>() / *loss.shape().first().unwrap_or(&1) as f64,
                             Ordering::Relaxed,
                         );
-                        loss.backward();
-                        // this drops the entire computation graph allowing us to move the weight/bias
-                        // gradients out w/o a clone
-                        std::mem::drop(loss);
                         std::mem::drop(current);
+                        loss.backward();
                         auto_axons
                     })
                     .collect();
