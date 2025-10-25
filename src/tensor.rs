@@ -1237,36 +1237,40 @@ impl Operation {
             }
         }
 
-        let mut lhs_grad = lhs.tensor.clone();
-        lhs_grad.iter_mut().for_each(|v| *v = 0.0);
-        let mut rhs_grad = rhs.tensor.clone();
-        rhs_grad.iter_mut().for_each(|v| *v = 0.0);
+        let mut lhs_grad = CPUTensor { shape: lhs.tensor.shape.clone(), stride: lhs.tensor.stride.clone(), data: vec![0.0; lhs.tensor.data.len()] };
+        let mut rhs_grad = CPUTensor { shape: rhs.tensor.shape.clone(), stride: rhs.tensor.stride.clone(), data: vec![0.0; rhs.tensor.data.len()] };
 
         let mut grad_point = vec![0; grad.ndim()];
-        let mut grad_idx = 0;
-        let mut lhs_idx = 0;
-        let mut rhs_idx = 0;
+        let mut grad_ptr = grad.data.as_ptr();
+        let mut lhs_ptr = lhs.tensor.data.as_ptr();
+        let mut lhs_grad_ptr = lhs_grad.data.as_mut_ptr();
+        let mut rhs_ptr = rhs.tensor.data.as_ptr();
+        let mut rhs_grad_ptr = rhs_grad.data.as_mut_ptr();
 
         'iterate: loop {
-            let lhs_val = lhs.tensor.data[lhs_idx];
-            let rhs_val = rhs.tensor.data[rhs_idx];
+            let lhs_val = unsafe { *lhs_ptr };
+            let rhs_val = unsafe { *rhs_ptr };
             let (lhs_scale, rhs_scale) = op(&lhs_val, &rhs_val);
-            let upstream = grad.data[grad_idx];
+            let upstream = unsafe { *grad_ptr };
 
-            lhs_grad.data[lhs_idx] += lhs_scale * upstream;
-            rhs_grad.data[rhs_idx] += rhs_scale * upstream;
+            unsafe { *lhs_grad_ptr += lhs_scale * upstream; }
+            unsafe { *rhs_grad_ptr += rhs_scale * upstream; }
 
             for axis in 0..grad.ndim() {
                 if grad_point[axis] == grad.shape()[axis] - 1 {
-                    grad_idx -= grad.stride[axis] * grad_point[axis];
-                    lhs_idx -= lhs_strides[axis] * grad_point[axis];
-                    rhs_idx -= rhs_strides[axis] * grad_point[axis];
+                    grad_ptr = unsafe { grad_ptr.sub(grad.stride[axis] * grad_point[axis]) };
+                    lhs_ptr = unsafe { lhs_ptr.sub(lhs_strides[axis] * grad_point[axis]) };
+                    lhs_grad_ptr = unsafe { lhs_grad_ptr.sub(lhs_strides[axis] * grad_point[axis]) };
+                    rhs_ptr = unsafe { rhs_ptr.sub(rhs_strides[axis] * grad_point[axis]) };
+                    rhs_grad_ptr = unsafe { rhs_grad_ptr.sub(rhs_strides[axis] * grad_point[axis]) };
                     grad_point[axis] = 0;
                 } else {
                     grad_point[axis] += 1;
-                    grad_idx += grad.stride[axis];
-                    lhs_idx += lhs_strides[axis];
-                    rhs_idx += rhs_strides[axis];
+                    grad_ptr = unsafe { grad_ptr.add(grad.stride[axis]) };
+                    lhs_ptr = unsafe { lhs_ptr.add(lhs_strides[axis]) };
+                    lhs_grad_ptr = unsafe { lhs_grad_ptr.add(lhs_strides[axis]) };
+                    rhs_ptr = unsafe { rhs_ptr.add(rhs_strides[axis]) };
+                    rhs_grad_ptr = unsafe { rhs_grad_ptr.add(rhs_strides[axis]) };
                     continue 'iterate;
                 }
             }
