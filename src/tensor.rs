@@ -658,19 +658,27 @@ impl Tensor for CPUTensor {
         })
         .unwrap();
         let mut new_point = vec![0; new_shape.len()];
-        let mut column_point = vec![0; self.shape.len()];
+        let mut new_idx = 0;
+        let mut old_idx = 0;
         'iterate: loop {
-            column_point[1..].copy_from_slice(&new_point);
-            for i in 0..self.shape[0] {
-                column_point[0] = i;
-                if *self.get(&column_point).unwrap() > *new.get(&new_point).unwrap() {
-                    *new.get_mut(&new_point).unwrap() = *self.get(&column_point).unwrap();
+            let mut max = f64::NEG_INFINITY;
+            let mut max_idx = old_idx;
+            let end_idx = old_idx + self.shape[0] * self.stride[0];
+            while max_idx < end_idx {
+                if self.data[max_idx] > max {
+                    max = self.data[max_idx];
                 }
+                max_idx += self.stride[0];
             }
+            new.data[new_idx] = max;
             for i in 0..new.ndim() {
                 if new_point[i] == new.shape[i] - 1 {
+                    new_idx -= new.stride[i] * new_point[i];
+                    old_idx -= self.stride[i + 1] * new_point[i];
                     new_point[i] = 0;
                 } else {
+                    new_idx += new.stride[i];
+                    old_idx += self.stride[i + 1];
                     new_point[i] += 1;
                     continue 'iterate;
                 }
