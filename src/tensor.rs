@@ -503,20 +503,26 @@ impl Tensor for CPUTensor {
         new_shape.remove(0);
         let mut new = Self::tensor(Fill::null(new_shape)).unwrap();
         let mut new_point = vec![0; new.shape.len()];
-        let mut column_point = vec![0; self.shape.len()];
+        let mut new_idx = 0;
+        let mut old_idx = 0;
         'iterate: loop {
             let mut sum = 0.0;
-            column_point[1..].copy_from_slice(&new_point);
-            for i in 0..self.shape[0] {
-                column_point[0] = i;
-                sum += *self.get(&column_point).unwrap();
+            let mut sum_idx = old_idx;
+            let end_idx = sum_idx + self.stride[0] * self.shape[0];
+            while sum_idx < end_idx {
+                sum += self.data[sum_idx];
+                sum_idx += self.stride[0];
             }
-            *new.get_mut(&new_point).unwrap() = sum;
-            for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
-                if *p == *s - 1 {
-                    *p = 0;
+            new.data[new_idx] = sum;
+            for i in 0..new.ndim() {
+                if new_point[i] == new.shape[i] - 1 {
+                    new_idx -= new.stride[i] * new_point[i];
+                    old_idx += self.stride[i + 1] * new_point[i];
+                    new_point[i] = 0;
                 } else {
-                    *p += 1;
+                    new_idx += new.stride[i];
+                    old_idx += self.stride[i + 1];
+                    new_point[i] += 1;
                     continue 'iterate;
                 }
             }
@@ -663,11 +669,11 @@ impl Tensor for CPUTensor {
                     *new.get_mut(&new_point).unwrap() = *self.get(&column_point).unwrap();
                 }
             }
-            for (p, s) in new_point.iter_mut().zip(new.shape.iter()) {
-                if *p == *s - 1 {
-                    *p = 0;
+            for i in 0..new.ndim() {
+                if new_point[i] == new.shape[i] - 1 {
+                    new_point[i] = 0;
                 } else {
-                    *p += 1;
+                    new_point[i] += 1;
                     continue 'iterate;
                 }
             }
