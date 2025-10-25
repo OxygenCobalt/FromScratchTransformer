@@ -1077,7 +1077,8 @@ impl Computation {
 
     pub fn backward(&self, grad: CPUTensor) {
         if let Some(op) = &self.op {
-            op.backward(&grad);
+            op.backward(grad);
+            return;
         }
         let mut slf_grad = self.grad.lock().expect("mutex poisoned, should not happen");
         *slf_grad = match slf_grad.as_ref() {
@@ -1150,7 +1151,7 @@ impl Operation {
     fn arithmetic_backward(
         lhs: &AutogradNode,
         rhs: &AutogradNode,
-        grad: &CPUTensor,
+        grad: CPUTensor,
         op: impl Fn(&f64, &f64) -> (f64, f64),
     ) {
         // partially assisted via codex
@@ -1217,19 +1218,19 @@ impl Operation {
         lhs.backward(lhs_grad);
     }
 
-    fn add_backward(lhs: &AutogradNode, rhs: &AutogradNode, grad: &CPUTensor) {
+    fn add_backward(lhs: &AutogradNode, rhs: &AutogradNode, grad: CPUTensor) {
         Self::arithmetic_backward(lhs, rhs, grad, |_, _| (1.0, 1.0));
     }
 
-    fn sub_backward(lhs: &AutogradNode, rhs: &AutogradNode, grad: &CPUTensor) {
+    fn sub_backward(lhs: &AutogradNode, rhs: &AutogradNode, grad: CPUTensor) {
         Self::arithmetic_backward(lhs, rhs, grad, |_, _| (1.0, -1.0));
     }
 
-    fn mul_backward(lhs: &AutogradNode, rhs: &AutogradNode, grad: &CPUTensor) {
+    fn mul_backward(lhs: &AutogradNode, rhs: &AutogradNode, grad: CPUTensor) {
         Self::arithmetic_backward(lhs, rhs, grad, |lhs, rhs| (*rhs, *lhs));
     }
 
-    fn dot_backward(lhs: &AutogradNode, rhs: &AutogradNode, depth: usize, grad: &CPUTensor) {
+    fn dot_backward(lhs: &AutogradNode, rhs: &AutogradNode, depth: usize, grad: CPUTensor) {
         let lhs_shift = rhs.tensor.ndim() - depth;
         let mut rhs_axes: Vec<usize> = (0..rhs.tensor.ndim()).collect();
         rhs_axes.rotate_right(lhs_shift);
@@ -1246,12 +1247,12 @@ impl Operation {
                 .clone()
                 .transpose(&lhs_axes)
                 .unwrap()
-                .dot(grad, rhs_shift)
+                .dot(&grad, rhs_shift)
                 .unwrap(),
         );
     }
 
-    fn sum_backward(t: &AutogradNode, grad: &CPUTensor) {
+    fn sum_backward(t: &AutogradNode, grad: CPUTensor) {
         let mut t_grad = CPUTensor::tensor(Fill {
             shape: t.tensor.shape().to_vec(),
             with: 0.0,
@@ -1278,38 +1279,38 @@ impl Operation {
         t.backward(t_grad);
     }
 
-    fn ln_backward(t: &AutogradNode, grad: &CPUTensor) {
-        t.backward(t.tensor.clone().pow(-1).mul(grad).unwrap());
+    fn ln_backward(t: &AutogradNode, grad: CPUTensor) {
+        t.backward(t.tensor.clone().pow(-1).mul(&grad).unwrap());
     }
 
-    fn exp_backward(t: &AutogradNode, grad: &CPUTensor) {
-        t.backward(t.tensor.clone().exp().mul(grad).unwrap());
+    fn exp_backward(t: &AutogradNode, grad: CPUTensor) {
+        t.backward(t.tensor.clone().exp().mul(&grad).unwrap());
     }
 
-    fn pow_backward(t: &AutogradNode, i: i32, grad: &CPUTensor) {
+    fn pow_backward(t: &AutogradNode, i: i32, grad: CPUTensor) {
         t.backward(
             t.tensor
                 .clone()
                 .pow(i - 1)
                 .mul(&Tensor::scalar(i as f64))
                 .unwrap()
-                .mul(grad)
+                .mul(&grad)
                 .unwrap(),
         );
     }
 
-    fn neg_backward(t: &AutogradNode, grad: &CPUTensor) {
-        t.backward(grad.clone().neg());
+    fn neg_backward(t: &AutogradNode, grad: CPUTensor) {
+        t.backward(grad.neg());
     }
 
-    fn max_backward(t: &AutogradNode, u: f64, grad: &CPUTensor) {
+    fn max_backward(t: &AutogradNode, u: f64, grad: CPUTensor) {
         let mut loc = t.tensor.clone();
         loc.iter_mut()
             .for_each(|x| *x = if *x >= u { 1.0 } else { 0.0 });
-        t.backward(loc.mul(grad).unwrap());
+        t.backward(loc.mul(&grad).unwrap());
     }
 
-    fn colify_backward(t: &AutogradNode, field: Field, grad: &CPUTensor) {
+    fn colify_backward(t: &AutogradNode, field: Field, grad: CPUTensor) {
         let mut t_grad = t.tensor.clone();
         t_grad.iter_mut().for_each(|x| *x = 0.0);
         let locations = field
@@ -1393,7 +1394,7 @@ impl Operation {
         t.backward(t_grad);
     }
 
-    fn colmax_backward(t: &AutogradNode, grad: &CPUTensor) {
+    fn colmax_backward(t: &AutogradNode, grad: CPUTensor) {
         let mut t_grad = t.tensor.clone();
         t_grad.iter_mut().for_each(|x| *x = 0.0);
         let mut grad_point = vec![0; grad.ndim()];
@@ -1427,19 +1428,19 @@ impl Operation {
         t.backward(t_grad);
     }
 
-    fn reshape_backward(t: &AutogradNode, grad: &CPUTensor) {
-        t.backward(grad.clone().reshape(t.tensor.shape()).unwrap())
+    fn reshape_backward(t: &AutogradNode, grad: CPUTensor) {
+        t.backward(grad.reshape(t.tensor.shape()).unwrap())
     }
 
-    fn transpose_backward(t: &AutogradNode, axes: &[usize], grad: &CPUTensor) {
+    fn transpose_backward(t: &AutogradNode, axes: &[usize], grad: CPUTensor) {
         let mut rev_axes = vec![0; axes.len()];
         for i in 0..axes.len() {
             rev_axes[axes[i]] = i;
         }
-        t.backward(grad.clone().transpose(&rev_axes).unwrap());
+        t.backward(grad.transpose(&rev_axes).unwrap());
     }
 
-    fn at_argmax_backward(at: &AutogradNode, of: &AutogradNode, grad: &CPUTensor) {
+    fn at_argmax_backward(at: &AutogradNode, of: &AutogradNode, grad: CPUTensor) {
         let mut t_grad = CPUTensor::tensor(Fill {
             shape: at.tensor.shape().to_vec(),
             with: 0.0,
@@ -1501,7 +1502,7 @@ impl Operation {
         })
     }
 
-    fn backward(&self, grad: &CPUTensor) {
+    fn backward(&self, grad: CPUTensor) {
         match self {
             Self::Add { lhs, rhs } => {
                 Self::add_backward(lhs, rhs, grad);
