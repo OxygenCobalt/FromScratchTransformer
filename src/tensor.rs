@@ -24,6 +24,7 @@ where
     fn sum(&self) -> Self;
     fn neg(self) -> Self;
     fn max(self, y: f64) -> Self;
+    fn cols_at(&self, indices: &Self) -> Option<Self>;
     fn colify(&self, field: Field) -> Option<Self>;
     fn colmax(&self) -> Option<Self>;
     fn reshape(self, shape: &[usize]) -> Option<Self>;
@@ -554,6 +555,46 @@ impl Tensor for CPUTensor {
         self
     }
 
+    fn cols_at(&self, indices: &Self) -> Option<Self> {
+        if indices.ndim() != 1 {
+            return None;
+        }
+        let mut new_shape = self.shape.clone();
+        new_shape[1] = indices.shape[0];
+        let mut new = Self::tensor(Fill { shape: new_shape, with: 0.0 }).unwrap();
+        let mut new_point = vec![0; new.ndim()];
+        let mut new_idx = 0;
+        while new_point[1] < indices.shape[0] {
+            let idx = indices.data[new_point[1]] as usize;
+            let mut old_idx = idx * self.stride[1];
+            'iterate: loop {
+                new.data[new_idx] = self.data[old_idx];
+                for i in 0..new.ndim() {
+                    if i == 1 {
+                        continue;
+                    }
+                    if new_point[i] == new.shape[i] - 1 {
+                        if i == 1 {
+                            break 'iterate;
+                        }
+                        new_idx -= new.stride[i] * new_point[i];
+                        old_idx += self.stride[i] * new_point[i];
+                        new_point[i] = 0;
+                    } else {
+                        new_idx += new.stride[i];
+                        old_idx += self.stride[i];
+                        new_point[i] += 1;
+                        continue 'iterate;
+                    }
+                }
+                break;
+            }
+            new_idx += new.stride[1];
+            new_point[1] += 1;
+        }
+        Some(new)
+    }
+
     fn colify(&self, field: Field) -> Option<Self> {
         if self.ndim() < 2 {
             return None;
@@ -1045,6 +1086,14 @@ impl Tensor for CPUAutograd {
         Operation::Max { t: self.0, u: y }.forward().unwrap()
     }
 
+    fn cols_at(&self, indices: &Self) -> Option<Self> {
+        Operation::ColsAt {
+            t: self.0.clone(),
+            indices: indices.0.clone(),
+        }
+        .forward()
+    }
+
     fn colify(&self, field: Field) -> Option<Self> {
         Operation::Colify {
             t: self.0.clone(),
@@ -1185,6 +1234,10 @@ enum Operation {
     Max {
         t: AutogradNode,
         u: f64,
+    },
+    ColsAt {
+        t: AutogradNode,
+        indices: AutogradNode,
     },
     Colify {
         t: AutogradNode,
@@ -1378,6 +1431,38 @@ impl Operation {
         t_edge.backward(t_tensor.mul(&grad).unwrap());
     }
 
+    fn cols_at_backward(t: AutogradNode, indices: AutogradNode, grad: CPUTensor) {
+        let mut t_grad = CPUTensor { shape: t.tensor.shape.clone(), stride: t.tensor.stride.clone(), data: vec![0.0; t.tensor.data.len()] };
+        let mut grad_point = vec![0; grad.ndim()];
+        let mut grad_idx = 0;
+        while grad_point[1] < indices.tensor.shape[0] {
+            let idx = indices.tensor.data[grad_point[1]] as usize;
+            let mut t_grad_idx = idx * t.tensor.stride[1];
+            'iterate: loop {
+                t_grad.data[t_grad_idx] += grad.data[grad_idx];
+                for i in 0..grad.ndim() {
+                    if i == 1 {
+                        continue;
+                    }
+                    if grad_point[i] == grad.shape[i] - 1 {
+                        grad_idx -= grad.stride[i] * grad_point[i];
+                        t_grad_idx -= t.tensor.stride[i] * grad_point[i];
+                        grad_point[i] = 0;
+                    } else {
+                        grad_idx += grad.stride[i];
+                        t_grad_idx += t.tensor.stride[i];
+                        grad_point[i] += 1;
+                        continue 'iterate;
+                    }
+                }
+                break;
+            }
+            grad_idx += grad.stride[1];
+            grad_point[1] += 1;
+        }
+        t.edge.backward(t_grad);
+    }
+
     fn colify_backward(t: AutogradNode, field: Field, grad: CPUTensor) {
         let mut t_grad = CPUTensor { shape: t.tensor.shape.clone(), stride: t.tensor.stride.clone(), data: vec![0.0; t.tensor.data.len()] };
         let locations = field
@@ -1555,6 +1640,7 @@ impl Operation {
             Self::Pow { t, i } => Some(t.tensor.clone().pow(*i)),
             Self::Neg { t } => Some(t.tensor.clone().neg()),
             Self::Max { t, u } => Some(t.tensor.clone().max(*u)),
+            Self::ColsAt { t, indices } => t.tensor.cols_at(&indices.tensor),
             Self::Colify { t, field } => t.tensor.colify(*field),
             Self::Colmax { t } => t.tensor.colmax(),
             Self::Reshape { t, shape } => t.tensor.clone().reshape(shape),
@@ -1603,6 +1689,9 @@ impl Operation {
             }
             Self::Max { t, u } => {
                 Self::max_backward(t.clone(), *u, grad);
+            }
+            Self::ColsAt { t, indices } => {
+                Self::cols_at_backward(t.clone(), indices.clone(), grad);
             }
             Self::Colify { t, field } => {
                 Self::colify_backward(t.clone(), *field, grad);
@@ -1653,6 +1742,9 @@ impl Operation {
             }
             Self::Max { t, u } => {
                 Self::max_backward(t, u, grad);
+            }
+            Self::ColsAt { t, indices } => {
+                Self::cols_at_backward(t, indices, grad);
             }
             Self::Colify { t, field } => {
                 Self::colify_backward(t, field, grad);
@@ -1734,5 +1826,38 @@ mod tests {
         })
         .unwrap();
         assert!(tensor.transpose(&[0]).is_none());
+    }
+
+    #[test]
+    fn cols_at_selects_specified_columns() {
+        let tensor = tensor_with_data(vec![2, 3], &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        let indices = CPUTensor::vector(vec![2.0, 0.0]).unwrap();
+
+        let selected = tensor.cols_at(&indices).unwrap();
+
+        assert_eq!(selected.shape(), &[2, 2]);
+        assert_eq!(selected.get(&[0, 0]).unwrap(), tensor.get(&[0, 2]).unwrap());
+        assert_eq!(selected.get(&[1, 0]).unwrap(), tensor.get(&[1, 2]).unwrap());
+        assert_eq!(selected.get(&[0, 1]).unwrap(), tensor.get(&[0, 0]).unwrap());
+        assert_eq!(selected.get(&[1, 1]).unwrap(), tensor.get(&[1, 0]).unwrap());
+    }
+
+    #[test]
+    fn cols_at_backward_accumulates_gradients() {
+        let tensor = tensor_with_data(vec![2, 3], &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]).autograd();
+        let indices = CPUAutograd::vector(vec![2.0, 0.0]).unwrap();
+        let indices_for_grad = indices.clone();
+
+        let selected = tensor.cols_at(&indices).unwrap();
+        selected.backward();
+
+        let grad = tensor.into_grad().expect("expected gradient for input tensor");
+        assert_eq!(grad.shape(), &[2, 3]);
+        assert_eq!(grad.data, vec![1.0, 1.0, 0.0, 0.0, 1.0, 1.0]);
+
+        assert!(
+            indices_for_grad.into_grad().is_none(),
+            "indices tensor should not accumulate gradient"
+        );
     }
 }
