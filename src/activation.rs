@@ -6,6 +6,7 @@ pub enum Activation {
     ReLU,
     SiLU,
     Softmax,
+    Tanh
 }
 
 impl Activation {
@@ -15,6 +16,7 @@ impl Activation {
             Self::ReLU => b"ActvReLU",
             Self::SiLU => b"ActvSiLU",
             Self::Softmax => b"ActvSfmx",
+            Self::Tanh => b"ActvTanh",
         }
     }
 
@@ -24,6 +26,7 @@ impl Activation {
             b"ActvReLU" => Some(Self::ReLU),
             b"ActvSiLU" => Some(Self::SiLU),
             b"ActvSfmx" => Some(Self::Softmax),
+            b"ActvTanh" => Some(Self::Tanh),
             _ => None,
         }
     }
@@ -48,7 +51,8 @@ impl Activation {
                     exp.clone().sum().pow(-1).reshape(&shape).unwrap()
                 };
                 exp.mul(&norm).unwrap()
-            }
+            },
+            Self::Tanh => y.tanh()
         }
     }
 }

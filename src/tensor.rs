@@ -20,6 +20,7 @@ where
     fn dot(&self, other: &Self, axes: usize) -> Option<Self>;
     fn ln(self) -> Self;
     fn exp(self) -> Self;
+    fn tanh(self) -> Self;
     fn pow(self, i: i32) -> Self;
     fn sum(&self) -> Self;
     fn neg(self) -> Self;
@@ -537,6 +538,11 @@ impl Tensor for CPUTensor {
 
     fn exp(mut self) -> Self {
         self.data.iter_mut().for_each(|x| *x = x.exp());
+        self
+    }
+
+    fn tanh(mut self) -> Self {
+        self.data.iter_mut().for_each(|x| *x = x.tanh());
         self
     }
 
@@ -1078,6 +1084,10 @@ impl Tensor for CPUAutograd {
         Operation::Exp { t: self.0 }.forward().unwrap()
     }
 
+    fn tanh(self) -> Self {
+        Operation::Exp { t: self.0.clone() }.forward().unwrap()
+    }
+    
     fn neg(self) -> Self {
         Operation::Neg { t: self.0 }.forward().unwrap()
     }
@@ -1222,6 +1232,9 @@ enum Operation {
         t: AutogradNode,
     },
     Exp {
+        t: AutogradNode,
+    },
+    Tanh {
         t: AutogradNode,
     },
     Pow {
@@ -1405,6 +1418,15 @@ impl Operation {
     fn exp_backward(t: AutogradNode, grad: CPUTensor) {
         let (t_tensor, t_edge) = unravel_tensor(t);
         t_edge.backward(t_tensor.exp().mul(&grad).unwrap());
+    }
+
+    fn tanh_backward(t: AutogradNode, grad: CPUTensor) {
+        let (mut t_tensor, t_edge) = unravel_tensor(t);
+        t_tensor.data.iter_mut()
+            .for_each(|x| {
+                *x = x.asinh().powi(2);
+            });
+        t_edge.backward(t_tensor.mul(&grad).unwrap());
     }
 
     fn pow_backward(t: AutogradNode, i: i32, grad: CPUTensor) {
@@ -1637,6 +1659,7 @@ impl Operation {
             Self::Sum { t } => Some(t.tensor.sum()),
             Self::Ln { t } => Some(t.tensor.clone().ln()),
             Self::Exp { t } => Some(t.tensor.clone().exp()),
+            Self::Tanh { t } => Some(t.tensor.clone().tanh()),
             Self::Pow { t, i } => Some(t.tensor.clone().pow(*i)),
             Self::Neg { t } => Some(t.tensor.clone().neg()),
             Self::Max { t, u } => Some(t.tensor.clone().max(*u)),
@@ -1680,6 +1703,9 @@ impl Operation {
             }
             Self::Exp { t } => {
                 Self::exp_backward(t.clone(), grad);
+            }
+            Self::Tanh { t } => {
+                Self::tanh_backward(t.clone(), grad);
             }
             Self::Pow { t, i } => {
                 Self::pow_backward(t.clone(), *i, grad);
@@ -1733,6 +1759,9 @@ impl Operation {
             }
             Self::Exp { t } => {
                 Self::exp_backward(t, grad);
+            }
+            Self::Tanh { t } => {
+                Self::tanh_backward(t, grad);
             }
             Self::Pow { t, i } => {
                 Self::pow_backward(t, i, grad);
