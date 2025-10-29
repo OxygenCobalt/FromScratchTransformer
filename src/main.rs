@@ -12,7 +12,7 @@ use crate::{
 };
 
 mod activation;
-mod embeddings;
+mod vocab;
 mod loss;
 mod mnist;
 mod nn;
