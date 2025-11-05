@@ -13,6 +13,14 @@ impl <E> Train<E> {
     pub fn new(data: Vec<E>) -> Self {
         Self(data)
     }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item=&E> {
+        self.0.iter()
+    }
+
+    pub fn map<F: Iterator<Item=G>, G>(self, remapper: impl Fn(E) -> F) -> Train<G> {
+        Train(self.0.into_iter().flat_map(remapper).collect())
+    }
 }
 
 impl <'a, E> Train<E> {
@@ -52,6 +60,10 @@ impl <E> Test<E> {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+
+    pub fn map<F: Iterator<Item=G>, G>(self, remapper: impl Fn(E) -> F) -> Test<G> {
+        Test(self.0.into_iter().flat_map(remapper).collect())
+    }
 }
 
 impl <E: Send + Sync> Test<E> {
@@ -77,6 +89,10 @@ impl <E> Validation<E> {
 
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+
+    pub fn map<F: Iterator<Item=G>, G>(self, remapper: impl Fn(E) -> F) -> Validation<G> {
+        Validation(self.0.into_iter().flat_map(remapper).collect())
     }
 }
 

@@ -4,7 +4,7 @@ use colored::Colorize;
 use rayon::ThreadPoolBuilder;
 
 use crate::{
-    activation::Activation, dataset::{TestSet, TrainSet}, loss::{AccuracyOf, Loss, LossesOn}, mnist::Mnist, nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork}, tensor::{CPUTensor, Field}
+    activation::Activation, dataset::{TestSet, TrainSet}, language::{FixedSequencer, TokenizedExample, Tokenizer, WordTokenizer}, loss::{AccuracyOf, Loss, LossesOn}, mnist::Mnist, nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork}, tensor::{CPUTensor, Field}, wikitext::WikiText103
 };
 
 mod activation;
@@ -14,6 +14,7 @@ mod nn;
 mod tensor;
 mod wikitext;
 mod dataset;
+mod language;
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -156,4 +157,22 @@ fn conv_mnist() {
         Loss::LogLikelihood,
     )
     .unwrap();
+}
+
+fn shallow_wikitext() {
+    let wikitext = WikiText103(PathBuf::from("data/wikitext"));
+    let train = wikitext.train().unwrap();
+    let tokenizer = WordTokenizer::train(&train);
+    let context = FixedSequencer::new(5);
+    let train = train.map(|s| {
+        context.split(&tokenizer.forward(&s).unwrap()).iter()
+            .map(|s| TokenizedExample::from(s, &tokenizer))
+            .collect::<Vec<TokenizedExample>>().into_iter()
+    });
+    let test = wikitext.test().unwrap().map(|s| {
+        context.split(&tokenizer.forward(&s).unwrap()).iter()
+            .map(|s| TokenizedExample::from(s, &tokenizer))
+            .collect::<Vec<TokenizedExample>>().into_iter()
+    });
+    
 }

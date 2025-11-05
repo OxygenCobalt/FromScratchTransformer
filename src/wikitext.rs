@@ -1,38 +1,41 @@
-use std::{fs::File, path::Path};
+use std::{fs::File, path::{Path, PathBuf}};
 
 use arrow::array::{Array, StringArray};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ArrowReaderBuilder;
 
-pub struct WikiText103 {
-    pub train: Vec<String>,
-    pub test: Vec<String>,
-    pub validation: Vec<String>,
+use crate::dataset::{TestSet, Train, TrainSet, ValidationSet};
+
+pub struct WikiText103(pub PathBuf);
+
+impl TrainSet for WikiText103 {
+    type Example = String;
+
+    fn train(&self) -> std::io::Result<crate::dataset::Train<Self::Example>> {
+        let train = load_wikitext(&self.0.join("wikitext-103-raw-v1/train-00000-of-00002.parquet"))?
+            .into_iter()
+            .chain(load_wikitext(&self.0.join("wikitext-103-raw-v1/train-00001-of-00002.parquet"))?)
+            .collect();
+        Ok(Train::new(train))
+    }
 }
 
-impl WikiText103 {
-    pub fn load(path: &Path) -> Result<Self, parquet::errors::ParquetError> {
-        let mut train =
-            load_wikitext(&path.join("wikitext-103-raw-v1/train-00000-of-00002.parquet"))?;
-        train.extend(load_wikitext(
-            &path.join("wikitext-103-raw-v1/train-00001-of-00002.parquet"),
-        )?);
-        let test = load_wikitext(&path.join("wikitext-103-raw-v1/test-00000-of-00001.parquet"))?;
-        let validation =
-            load_wikitext(&path.join("wikitext-103-raw-v1/validation-00000-of-00001.parquet"))?;
-        println!(
-            "{}: {} / {}/ {}",
-            "wikitext".green(),
-            format!["{} train examples", train.len()],
-            format!["{} test examples", test.len()],
-            format!["{} validation examples", test.len()]
-        );
-        Ok(Self {
-            train,
-            test,
-            validation,
-        })
+impl TestSet for WikiText103 {
+    type Example = String;
+
+    fn test(&self) -> std::io::Result<crate::dataset::Test<Self::Example>> {
+        let test = load_wikitext(&self.0.join("wikitext-103-raw-v1/test-00000-of-00001.parquet"))?;
+        Ok(crate::dataset::Test::new(test))
+    }
+}
+
+impl ValidationSet for WikiText103 {
+    type Example = String;
+
+    fn validation(&self) -> std::io::Result<crate::dataset::Validation<Self::Example>> {
+        let validation = load_wikitext(&self.0.join("wikitext-103-raw-v1/validation-00000-of-00001.parquet"))?;
+        Ok(crate::dataset::Validation::new(validation))
     }
 }
 
