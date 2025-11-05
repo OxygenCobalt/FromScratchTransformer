@@ -1,6 +1,6 @@
 use core::f64;
 use std::{
-    collections::HashSet, io::{self, Read, Write}, ops::Deref, sync::{Arc, Mutex}
+    collections::HashSet, io::{self, Read, Write}, sync::{Arc, Mutex}
 };
 
 pub trait Tensor
@@ -123,11 +123,13 @@ impl<T: Tensor> TensorInit for Tt<T> {
 }
 
 #[derive(Clone)]
+#[cfg(test)]
 pub enum Th {
     R(Vec<f64>),
     C(Vec<Self>),
 }
 
+#[cfg(test)]
 impl TensorInit for Th {
     fn make(self) -> Option<(Vec<usize>, Vec<f64>)> {
         let mut shape: Vec<usize> = Vec::new();

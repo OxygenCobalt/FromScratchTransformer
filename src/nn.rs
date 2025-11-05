@@ -1,19 +1,17 @@
 use atomic_float::AtomicF64;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
-use rand::seq::SliceRandom;
 use rand_distr::{Distribution, Normal};
-use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::ParallelIterator;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 
+use crate::dataset::{Example, TrainSet};
 use crate::tensor::{
-    Autograd, CPUTensor, DifferentiableTensor, Field, Fill, Generate, Tensor, TensorIO, TensorMut,
-    Tt,
+    Autograd, CPUTensor, DifferentiableTensor, Field, Fill, Generate, Tensor, TensorIO, TensorMut
 };
 
 use super::{activation::Activation, loss::Loss};
@@ -23,49 +21,12 @@ pub struct NeuralNetwork<T: Tensor> {
 }
 
 impl <T: Tensor> NeuralNetwork<T> {
-    pub fn evaluate(&self, input: &T) -> T {
+    pub fn test(&self, input: &T) -> T {
         let mut current = input.clone();
         for axon in &self.axons {
             current = axon.forward(current)
         }
         current
-    }
-    
-    pub fn test(&self, test: &Test<T>, loss: &impl Loss) -> TestResults<T> {
-        let mut sum = 0.0;
-        let mut results = Vec::new();
-        for example in &test.examples {
-            let activations = self.evaluate(&example.input);
-            sum += loss.loss(&activations, &example.output).get(&[]).unwrap();
-            results.push(TestResult {
-                example: example.clone(),
-                activations,
-            });
-        }
-        let loss = sum / test.examples.len() as f64;
-        return TestResults {
-            avg_loss: loss,
-            results,
-        };
-    }
-}
-
-impl<T: Tensor + Send + Sync> NeuralNetwork<T> {
-    pub fn par_test(&self, test: &Test<T>, loss: &impl Loss) -> TestResults<T> {
-        let mut sum = AtomicF64::new(0.0);
-        let results = test.examples.par_iter().map(|example| {
-            let activations = self.evaluate(&example.input);
-            sum.fetch_add(*loss.loss(&activations, &example.output).get(&[]).unwrap(), Ordering::Relaxed);
-            TestResult {
-                example: example.clone(),
-                activations,
-            }
-        }).collect();
-        let loss = sum.into_inner() / test.examples.len() as f64;
-        return TestResults {
-            avg_loss: loss,
-            results,
-        };
     }
 }
 
@@ -73,9 +34,9 @@ impl<T: TensorMut + DifferentiableTensor> NeuralNetwork<T> {
     pub fn train(
         setup: &impl Setup<T>,
         reporting: &impl Reporting<T>,
-        training_set: &impl TrainingSet<T>,
+        train_set: &impl TrainSet,
         hyperparams: &Hyperparams,
-        loss: &impl Loss,
+        loss: Loss,
     ) -> io::Result<Self> {
         println!(
             "{}: epochs = {} / batch size = {} / learning rate = {}",
@@ -100,10 +61,11 @@ impl<T: TensorMut + DifferentiableTensor> NeuralNetwork<T> {
                 .unwrap_or_else(|| "init".to_string())
         );
         if let None = init.at_epoch {
-            reporting.report(&init.nn, loss, None)?;
+            reporting.report(&init.nn, None)?;
         }
+        let train = train_set.train();
         for epoch in init.at_epoch.map(|e| e + 1).unwrap_or(0)..hyperparams.epochs {
-            let batches = training_set.get()?.batch(hyperparams.batch_size);
+            let batches = train.batch::<T>(hyperparams.batch_size);
             let sgd_bar = ProgressBar::new(batches.len() as u64)
                 .with_style(ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}] / avg batch loss = {msg}")
                                 .unwrap()
@@ -130,7 +92,7 @@ impl<T: TensorMut + DifferentiableTensor> NeuralNetwork<T> {
                 sgd_bar.set_message(format!["{:.3}", total_loss / (i + 1) as f64]);
             }
             sgd_bar.finish();
-            reporting.report(&init.nn, loss, Some(epoch))?;
+            reporting.report(&init.nn, Some(epoch))?;
         }
         Ok(init.nn)
     }
@@ -143,9 +105,9 @@ where
     pub fn par_train(
         setup: &impl Setup<T>,
         reporting: &impl Reporting<T>,
-        training_set: &impl TrainingSet<T>,
+        train_set: &impl TrainSet,
         hyperparams: &Hyperparams,
-        loss: &(impl Loss + Sync),
+        loss: Loss
     ) -> io::Result<Self> {
         println!(
             "{}: epochs = {} / batch size = {} / learning rate = {}",
@@ -170,11 +132,11 @@ where
                 .unwrap_or_else(|| "init".to_string())
         );
         if let None = init.at_epoch {
-            reporting.report(&init.nn, loss, None)?;
+            reporting.report(&init.nn, None)?;
         }
+        let train = train_set.train();
         for epoch in init.at_epoch.map(|e| e + 1).unwrap_or(0)..hyperparams.epochs {
-            let training_set = training_set.get()?;
-            let batches = training_set.par_batch(hyperparams.batch_size);
+            let batches = train.par_batch(hyperparams.batch_size);
             let sgd_bar = ProgressBar::new(batches.len() as u64)
                 .with_style(ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}] / avg batch loss = {msg}")
                                 .unwrap()
@@ -184,7 +146,7 @@ where
             for (i, batch) in batches.into_iter().enumerate() {
                 let c = hyperparams.learning_rate / hyperparams.batch_size as f64;
                 let all_auto_axons: Vec<_> = batch
-                    .map(|example| {
+                    .map(|example: Example<T>| {
                         let auto_axons: Vec<Axon<T::Autograd>> =
                             init.nn.axons.iter().map(|a| a.train()).collect();
                         let mut current = example.input.autograd();
@@ -214,7 +176,7 @@ where
                 ]);
             }
             sgd_bar.finish();
-            reporting.report(&init.nn, loss, Some(epoch))?;
+            reporting.report(&init.nn, Some(epoch))?;
         }
         Ok(init.nn)
     }
@@ -250,62 +212,12 @@ impl<T: TensorIO> NeuralNetwork<T> {
     }
 }
 
-#[derive(Clone)]
-pub struct Example<T: Tensor> {
-    pub input: T,
-    pub output: T,
-}
-
-#[derive(Clone)]
-pub struct Train<T: Tensor> {
-    pub examples: Vec<Example<T>>,
-}
-
-impl<T: Tensor> Train<T> {
-    fn batch(&self, size: usize) -> Vec<Example<T>> {
-        let mut examples = self.examples.clone();
-        examples.shuffle(&mut rand::rng());
-        examples
-            .chunks(size)
-            .map(|examples| {
-                let input = T::tensor(Tt(examples
-                    .iter()
-                    .map(|e| e.input.clone())
-                    .collect::<Vec<T>>()))
-                .unwrap();
-                let output = T::tensor(Tt(examples
-                    .iter()
-                    .map(|e| e.output.clone())
-                    .collect::<Vec<T>>()))
-                .unwrap();
-                Example { input, output }
-            })
-            .collect()
-    }
-}
-
-impl<T: Tensor + Send> Train<T> {
-    fn par_batch(&self, size: usize) -> Vec<impl ParallelIterator<Item = Example<T>>> {
-        let mut examples = self.examples.clone();
-        examples.shuffle(&mut rand::rng());
-        examples
-            .chunks(size)
-            .map(|chunk| chunk.to_vec().into_par_iter())
-            .collect()
-    }
-}
-
 pub trait Setup<T: Tensor> {
     fn setup(&self) -> io::Result<Init<T>>;
 }
 
 pub trait Reporting<T: Tensor> {
-    fn report(&self, nn: &NeuralNetwork<T>, loss: &impl Loss, epoch: Option<u64>)
-    -> io::Result<()>;
-}
-
-pub trait TrainingSet<T: Tensor> {
-    fn get(&self) -> io::Result<Train<T>>;
+    fn report(&self, nn: &NeuralNetwork<T>, epoch: Option<u64>) -> io::Result<()>;
 }
 
 pub struct Init<T: Tensor> {
@@ -324,7 +236,7 @@ impl Layers {
     }
 }
 
-impl<T: Tensor> Setup<T> for Layers {
+impl <T: Tensor> Setup<T> for Layers {
     fn setup(&self) -> io::Result<Init<T>> {
         let mut axons = vec![];
         for i in 0..self.0.len() {
@@ -410,10 +322,9 @@ impl<'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Reporting<T> for Checkpoint<
     fn report(
         &self,
         nn: &NeuralNetwork<T>,
-        loss: &impl Loss,
         epoch: Option<u64>,
     ) -> io::Result<()> {
-        self.reporting.report(nn, loss, epoch)?;
+        self.reporting.report(nn, epoch)?;
         let path = self.checkpoint_path(epoch);
         println!(
             "{}: writing nn to {}",
@@ -430,20 +341,6 @@ pub struct Hyperparams {
     pub epochs: u64,
     pub batch_size: usize,
     pub learning_rate: f64,
-}
-
-pub struct Test<T: Tensor> {
-    pub examples: Vec<Example<T>>,
-}
-
-pub struct TestResults<T: Tensor> {
-    pub avg_loss: f64,
-    pub results: Vec<TestResult<T>>,
-}
-
-pub struct TestResult<T: Tensor> {
-    pub example: Example<T>,
-    pub activations: T,
 }
 
 pub enum Layer {
@@ -468,7 +365,7 @@ pub enum Layer {
         input_size: usize,
         field: Field,
         filters: usize,
-    },
+    }
 }
 
 impl Layer {
@@ -512,7 +409,7 @@ impl Layer {
             },
             Self::Pool2D { field, .. } => Axon::Pool2D {
                 pool: Pool2D::new(*field),
-            },
+            }
         }
     }
 
@@ -550,7 +447,7 @@ enum Axon<T: Tensor> {
     Dense { ff: FeedForward<T> },
     Dropout { ff: FeedForward<T>, rate: f64 },
     Conv2D { conv: Conv2D<T> },
-    Pool2D { pool: Pool2D<T> },
+    Pool2D { pool: Pool2D<T> }
 }
 
 impl<T: Tensor> Axon<T> {
@@ -559,7 +456,7 @@ impl<T: Tensor> Axon<T> {
             Self::Dense { ff } => ff.forward(activations),
             Self::Dropout { ff, .. } => ff.forward(activations),
             Self::Conv2D { conv } => conv.forward(&activations),
-            Self::Pool2D { pool } => pool.forward(activations),
+            Self::Pool2D { pool } => pool.forward(activations)
         }
     }
 }
@@ -609,7 +506,7 @@ impl<T: DifferentiableTensor + TensorMut> Axon<T> {
                     field: pool.field,
                     phantom: PhantomData,
                 },
-            },
+            }
         }
     }
 
@@ -740,7 +637,7 @@ impl<T: Tensor> FeedForward<T> {
         // we ignore any additional batching parameters that would be appended to the activation shape
         let mut flattened_shape = vec![self.flattened_input_shape];
         flattened_shape.extend_from_slice(&activations.shape()[self.flattened_input_ndim..]);
-        // dbg!(activations.shape());
+        // dbg!(self.weights.shape(), activations.shape());
         self.activation.activate(
             self.weights
                 .dot(&activations.reshape(&flattened_shape).unwrap(), 1)

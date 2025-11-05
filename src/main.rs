@@ -4,20 +4,16 @@ use colored::Colorize;
 use rayon::ThreadPoolBuilder;
 
 use crate::{
-    activation::Activation,
-    loss::{LogLikelihood, MSE},
-    mnist::MNIST,
-    nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork},
-    tensor::{CPUTensor, Field},
+    activation::Activation, loss::{AccuracyOf, Loss, LossesOn}, mnist::Mnist, nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork}, tensor::{CPUTensor, Field}, wikitext::WikiText103
 };
 
 mod activation;
-mod language;
 mod loss;
 mod mnist;
 mod nn;
 mod tensor;
 mod wikitext;
+mod dataset;
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -59,7 +55,7 @@ fn main() {
 }
 
 fn shallow_mnist() {
-    let mnist = MNIST::<CPUTensor>::load(Path::new("data/mnist")).unwrap();
+    let mnist = Mnist::load(Path::new("data/mnist")).unwrap();
     let layers = Layers::new(vec![
         Layer::Dense {
             input_shape: Some(vec![28, 28]),
@@ -73,18 +69,19 @@ fn shallow_mnist() {
         },
     ])
     .unwrap();
+    let reporting = LossesOn(&mnist, vec![Loss::MSE, Loss::Accuracy(AccuracyOf::Argmax)]);
     let checkpointing =
-        Checkpoint::new(&layers, &mnist, Path::new("data/checkpoints/mnist/shallow"));
+        Checkpoint::new(&layers, &reporting, Path::new("data/checkpoints/mnist/shallow"));
     let hyperparams = Hyperparams {
         epochs: 30,
         batch_size: 10,
         learning_rate: 3.0,
     };
-    NeuralNetwork::train(&checkpointing, &checkpointing, &mnist, &hyperparams, &MSE).unwrap();
+    NeuralNetwork::<CPUTensor>::train(&checkpointing, &checkpointing, &mnist, &hyperparams, Loss::MSE).unwrap();
 }
 
 fn dropout_mnist() {
-    let mnist = MNIST::<CPUTensor>::load(Path::new("data/mnist")).unwrap();
+    let mnist = Mnist::load(Path::new("data/mnist")).unwrap();
     let layers = Layers::new(vec![
         Layer::Dropout {
             input_shape: Some(vec![28, 28]),
@@ -99,18 +96,19 @@ fn dropout_mnist() {
         },
     ])
     .unwrap();
+    let reporting = LossesOn(&mnist, vec![Loss::MSE, Loss::Accuracy(AccuracyOf::Argmax)]);
     let checkpointing =
-        Checkpoint::new(&layers, &mnist, Path::new("data/checkpoints/mnist/dropout"));
+        Checkpoint::new(&layers, &reporting, Path::new("data/checkpoints/mnist/dropout"));
     let hyperparams = Hyperparams {
         epochs: 30,
         batch_size: 10,
         learning_rate: 3.0,
     };
-    NeuralNetwork::train(&checkpointing, &checkpointing, &mnist, &hyperparams, &MSE).unwrap();
+    NeuralNetwork::<CPUTensor>::train(&checkpointing, &checkpointing, &mnist, &hyperparams, Loss::MSE).unwrap();
 }
 
 fn conv_mnist() {
-    let mnist = MNIST::<CPUTensor>::load(Path::new("data/mnist")).unwrap();
+    let mnist = Mnist::load(Path::new("data/mnist")).unwrap();
     let layers = Layers::new(vec![
         Layer::Conv2D {
             input_size: 28,
@@ -138,18 +136,19 @@ fn conv_mnist() {
         },
     ])
     .unwrap();
-    let checkpointing = Checkpoint::new(&layers, &mnist, Path::new("data/checkpoints/mnist/conv"));
+    let reporting = LossesOn(&mnist, vec![Loss::LogLikelihood, Loss::Accuracy(AccuracyOf::Argmax)]);
+    let checkpointing = Checkpoint::new(&layers, &reporting, Path::new("data/checkpoints/mnist/conv"));
     let hyperparams = Hyperparams {
         epochs: 60,
         batch_size: 10,
         learning_rate: 0.1,
     };
-    NeuralNetwork::par_train(
+    NeuralNetwork::<CPUTensor>::par_train(
         &checkpointing,
         &checkpointing,
         &mnist,
         &hyperparams,
-        &LogLikelihood,
+        Loss::LogLikelihood,
     )
     .unwrap();
 }
