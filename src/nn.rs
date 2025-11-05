@@ -372,6 +372,11 @@ pub enum Layer {
         input_size: usize,
         field: Field,
         filters: usize,
+    },
+    Embeddings {
+        size: usize,
+        vocab: usize,
+        context: usize
     }
 }
 
@@ -416,7 +421,8 @@ impl Layer {
             },
             Self::Pool2D { field, .. } => Axon::Pool2D {
                 pool: Pool2D::new(*field),
-            }
+            },
+            Self::Embeddings { size, vocab, context } => Axon::Embeddings { embeddings: Embeddings::new(*size, *vocab) }
         }
     }
 
@@ -445,6 +451,9 @@ impl Layer {
                     field.locations_on(*input_size).unwrap(),
                     field.locations_on(*input_size).unwrap(),
                 ]
+            },
+            Self::Embeddings { size, context, .. } => {
+                vec![*size, *context]
             }
         }
     }
@@ -454,7 +463,8 @@ enum Axon<T: Tensor> {
     Dense { ff: FeedForward<T> },
     Dropout { ff: FeedForward<T>, rate: f64 },
     Conv2D { conv: Conv2D<T> },
-    Pool2D { pool: Pool2D<T> }
+    Pool2D { pool: Pool2D<T> },
+    Embeddings { embeddings: Embeddings<T> }
 }
 
 impl<T: Tensor> Axon<T> {
@@ -463,7 +473,8 @@ impl<T: Tensor> Axon<T> {
             Self::Dense { ff } => ff.forward(activations),
             Self::Dropout { ff, .. } => ff.forward(activations),
             Self::Conv2D { conv } => conv.forward(&activations),
-            Self::Pool2D { pool } => pool.forward(activations)
+            Self::Pool2D { pool } => pool.forward(activations),
+            Self::Embeddings { embeddings } => embeddings.forward(activations)
         }
     }
 }
@@ -513,7 +524,8 @@ impl<T: DifferentiableTensor + TensorMut> Axon<T> {
                     field: pool.field,
                     phantom: PhantomData,
                 },
-            }
+            },
+            Self::Embeddings { embeddings } => Axon::Embeddings { embeddings: Embeddings { c: embeddings.c.clone().autograd() } }
         }
     }
 
@@ -552,6 +564,9 @@ impl<T: DifferentiableTensor + TensorMut> Axon<T> {
             }
             (Self::Pool2D { .. }, Axon::<T::Autograd>::Pool2D { .. }) => {
                 // pooling layers have only a fixed field config, nothing to commit
+            }
+            (Self::Embeddings { embeddings }, Axon::<T::Autograd>::Embeddings { embeddings: autoembeddings }) => {
+                embeddings.c = embeddings.c.sub(&autoembeddings.c.into_grad().unwrap().mul(&scale).unwrap()).unwrap()
             }
             _ => return None,
         }
@@ -606,6 +621,10 @@ impl<T: TensorIO> Axon<T> {
             Self::Pool2D { pool } => {
                 write.write_all(b"AxonPl2D")?;
                 pool.write(write)
+            },
+            Self::Embeddings { embeddings } => {
+                write.write_all(b"AxonEmbg")?;
+                embeddings.write(write)
             }
         }
     }
@@ -811,5 +830,29 @@ impl<T: TensorIO> Pool2D<T> {
     fn write(&self, write: &mut impl Write) -> io::Result<()> {
         self.field.write(write)?;
         Ok(())
+    }
+}
+
+struct Embeddings<T: Tensor> {
+    c: T
+}
+
+impl <T: Tensor> Embeddings<T> {
+    fn new(size: usize, vocab: usize) -> Self {
+        Self { c: T::tensor(Fill { shape: vec![size, vocab], with: 0.0 }).unwrap() }
+    }
+
+    fn forward(&self, activations: T) -> T {
+        self.c.cols_at(&activations).unwrap()
+    }
+}
+
+impl <T: TensorIO> Embeddings<T> {
+    fn write(&self, write: &mut impl Write) -> io::Result<()> {
+        self.c.write(write)
+    }
+
+    fn read(read: &mut impl Read) -> io::Result<Self> {
+        Ok(Self { c: T::read(read)? })
     }
 }
