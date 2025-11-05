@@ -9,9 +9,9 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use crate::dataset::{Example, TrainSet};
+use crate::dataset::{EagerExample, Example, Train};
 use crate::tensor::{
-    Autograd, CPUTensor, DifferentiableTensor, Field, Fill, Generate, Tensor, TensorIO, TensorMut
+    Autograd, CPUTensor, DifferentiableTensor, Field, Fill, Generate, Tensor, TensorIO, TensorMut, Tt
 };
 
 use super::{activation::Activation, loss::Loss};
@@ -30,11 +30,11 @@ impl <T: Tensor> NeuralNetwork<T> {
     }
 }
 
-impl<T: TensorMut + DifferentiableTensor> NeuralNetwork<T> {
+impl<T: TensorMut + DifferentiableTensor + Clone> NeuralNetwork<T> {
     pub fn train(
         setup: &impl Setup<T>,
         reporting: &impl Reporting<T>,
-        train_set: &impl TrainSet,
+        train: &Train<impl Example<T>>,
         hyperparams: &Hyperparams,
         loss: Loss,
     ) -> io::Result<Self> {
@@ -63,9 +63,8 @@ impl<T: TensorMut + DifferentiableTensor> NeuralNetwork<T> {
         if let None = init.at_epoch {
             reporting.report(&init.nn, None)?;
         }
-        let train = train_set.train();
         for epoch in init.at_epoch.map(|e| e + 1).unwrap_or(0)..hyperparams.epochs {
-            let batches = train.batch::<T>(hyperparams.batch_size);
+            let batches = train.batch(hyperparams.batch_size);
             let sgd_bar = ProgressBar::new(batches.len() as u64)
                 .with_style(ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}] / avg batch loss = {msg}")
                                 .unwrap()
@@ -73,13 +72,22 @@ impl<T: TensorMut + DifferentiableTensor> NeuralNetwork<T> {
                 .with_prefix(format!["epoch {}", epoch + 1].blue().to_string());
             let mut total_loss = 0.0;
             for (i, batch) in batches.into_iter().enumerate() {
+                let mut concat_example = EagerExample { input: vec![], output: vec![] };
+                for example in batch {
+                    concat_example.input.push(example.input());
+                    concat_example.output.push(example.output());
+                }
+                let example = EagerExample {
+                    input: T::tensor(Tt(concat_example.input)).unwrap(),
+                    output: T::tensor(Tt(concat_example.output)).unwrap(),
+                };
                 let auto_axons: Vec<Axon<T::Autograd>> =
                     init.nn.axons.iter_mut().map(|a| a.train()).collect();
-                let mut current = batch.input.autograd();
+                let mut current = example.input.autograd();
                 for axon in &auto_axons {
                     current = axon.forward(current)
                 }
-                let loss = loss.loss(&current, &batch.output.autograd());
+                let loss = loss.loss(&current, &example.output.autograd());
                 std::mem::drop(current);
                 total_loss += loss.iter().sum::<f64>() / *loss.shape().first().unwrap_or(&1) as f64;
                 loss.backward();
@@ -105,7 +113,7 @@ where
     pub fn par_train(
         setup: &impl Setup<T>,
         reporting: &impl Reporting<T>,
-        train_set: &impl TrainSet,
+        train: &Train<impl Example<T> + Send + Sync>,
         hyperparams: &Hyperparams,
         loss: Loss
     ) -> io::Result<Self> {
@@ -134,7 +142,6 @@ where
         if let None = init.at_epoch {
             reporting.report(&init.nn, None)?;
         }
-        let train = train_set.train();
         for epoch in init.at_epoch.map(|e| e + 1).unwrap_or(0)..hyperparams.epochs {
             let batches = train.par_batch(hyperparams.batch_size);
             let sgd_bar = ProgressBar::new(batches.len() as u64)
@@ -146,14 +153,14 @@ where
             for (i, batch) in batches.into_iter().enumerate() {
                 let c = hyperparams.learning_rate / hyperparams.batch_size as f64;
                 let all_auto_axons: Vec<_> = batch
-                    .map(|example: Example<T>| {
+                    .map(|example| {
                         let auto_axons: Vec<Axon<T::Autograd>> =
                             init.nn.axons.iter().map(|a| a.train()).collect();
-                        let mut current = example.input.autograd();
+                        let mut current = example.input().autograd();
                         for axon in &auto_axons {
                             current = axon.forward(current);
                         }
-                        let loss = loss.loss(&current, &example.output.autograd());
+                        let loss = loss.loss(&current, &example.output().autograd());
                         total_loss.fetch_add(
                             loss.iter().sum::<f64>() / *loss.shape().first().unwrap_or(&1) as f64,
                             Ordering::Relaxed,

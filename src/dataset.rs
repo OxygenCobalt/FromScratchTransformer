@@ -1,57 +1,52 @@
 use rand::seq::SliceRandom;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
-
-use crate::tensor::{Tensor, Tt};
+use std::io;
 
 pub trait TrainSet {
-    type Example: LazyExample;
-    fn train(&self) -> Train<Self::Example>;
+    type Example;
+    fn train(&self) -> io::Result<Train<Self::Example>>;
 }
 
-pub struct Train<'a, E: LazyExample>(&'a [E]);
+pub struct Train<E>(Vec<E>);
 
-impl <'a, E: LazyExample> Train<'a, E> {
-    pub fn new(data: &'a [E]) -> Self {
+impl <E> Train<E> {
+    pub fn new(data: Vec<E>) -> Self {
         Self(data)
     }
+}
 
-    pub fn batch<T: Tensor>(&self, size: usize) -> impl ExactSizeIterator<Item=Example<T>> {
-        let mut examples = self.0.to_vec();
+impl <'a, E> Train<E> {
+    pub fn batch(&self, size: usize) -> impl ExactSizeIterator<Item=impl Iterator<Item=&E>> {
+        let mut examples: Vec<&E> = self.0.iter().collect();
         examples.shuffle(&mut rand::rng());
-        let batches: Vec<Vec<E>> = examples.chunks(size).map(|chunks| chunks.to_vec()).collect();
-        batches.into_iter().map(|chunk| {
-            let inputs = T::tensor(Tt(chunk.iter().map(|e| e.input::<T>()).collect())).unwrap();
-            let outputs = T::tensor(Tt(chunk.iter().map(|e| e.output::<T>()).collect())).unwrap();
-            Example { input: inputs, output: outputs }
-        })
+        let batches: Vec<Vec<&E>> = examples.chunks(size).map(|chunks| chunks.to_vec()).collect();
+        batches.into_iter().map(|v| v.into_iter())
     }
+}
 
-    pub fn par_batch<T: Tensor + Send + Sync>(&self, size: usize) -> impl ExactSizeIterator<Item=impl ParallelIterator<Item=Example<T>>> {
-        let mut examples = self.0.to_vec();
+impl <'a, E: Send + Sync> Train<E> {
+    pub fn par_batch(&self, size: usize) -> impl ExactSizeIterator<Item=impl ParallelIterator<Item=&E>> {
+        let mut examples: Vec<&E> = self.0.iter().collect();
         examples.shuffle(&mut rand::rng());
-        let batches: Vec<Vec<E>> = examples.chunks(size).map(|chunks| chunks.to_vec()).collect();
-        batches.into_iter().map(|chunk| chunk.into_par_iter().map(|e| Example { input: e.input(), output: e.output() }))
+        let batches: Vec<Vec<&E>> = examples.chunks(size).map(|chunks| chunks.to_vec()).collect();
+        batches.into_iter().map(|chunk| chunk.into_par_iter())
     }
 }
 
 pub trait TestSet {
-    type Example: LazyExample;
-    fn test(&self) -> Test<Self::Example>;
+    type Example;
+    fn test(&self) -> io::Result<Test<Self::Example>>;
 }
 
-pub struct Test<'a, E: LazyExample>(&'a [E]);
+pub struct Test<E>(Vec<E>);
 
-impl <'a, E: LazyExample> Test<'a, E> {
-    pub fn new(data: &'a [E]) -> Self {
+impl <E> Test<E> {
+    pub fn new(data: Vec<E>) -> Self {
         Self(data)
     }
 
-    pub fn iter<T: Tensor>(&self) -> impl ExactSizeIterator<Item=Example<T>> {
-        self.0.iter().map(|e| Example { input: e.input(), output: e.output() })
-    }
-
-    pub fn par_iter<T: Tensor + Send + Sync>(&self) -> impl ParallelIterator<Item=Example<T>> {
-        self.0.par_iter().map(|e| Example { input: e.input(), output: e.output() })
+    pub fn iter(&self) -> impl ExactSizeIterator<Item=&E> {
+        self.0.iter()
     }
 
     pub fn len(&self) -> usize {
@@ -59,24 +54,25 @@ impl <'a, E: LazyExample> Test<'a, E> {
     }
 }
 
+impl <E: Send + Sync> Test<E> {
+    pub fn par_iter(&self) -> impl ParallelIterator<Item=&E> {
+        self.0.par_iter()
+    }
+}
 pub trait ValidationSet {
-    type Example: LazyExample;
-    fn validation(&self) -> Test<Self::Example>;
+    type Example;
+    fn validation(&self) -> io::Result<Validation<Self::Example>>;
 }
 
-pub struct Validation<'a, E: LazyExample>(&'a [E]);
+pub struct Validation<E>(Vec<E>);
 
-impl <'a, E: LazyExample> Validation<'a, E> {
-    pub fn new(data: &'a [E]) -> Self {
+impl <E> Validation<E> {
+    pub fn new(data: Vec<E>) -> Self {
         Self(data)
     }
 
-    pub fn iter<T: Tensor>(&self) -> impl ExactSizeIterator<Item=Example<T>> {
-        self.0.iter().map(|e| Example { input: e.input(), output: e.output() })
-    }
-
-    pub fn par_iter<T: Tensor + Send + Sync>(&self) -> impl ParallelIterator<Item=Example<T>> {
-        self.0.par_iter().map(|e| Example { input: e.input(), output: e.output() })
+    pub fn iter(&self) -> impl ExactSizeIterator<Item=&E> {
+        self.0.iter()
     }
 
     pub fn len(&self) -> usize {
@@ -84,12 +80,29 @@ impl <'a, E: LazyExample> Validation<'a, E> {
     }
 }
 
-pub trait LazyExample: Clone + Send + Sync {
-    fn input<T: Tensor>(&self) -> T;
-    fn output<T: Tensor>(&self) -> T;
+impl <E: Send + Sync> Validation<E> {
+    pub fn par_iter(&self) -> impl ParallelIterator<Item=&E> {
+        self.0.par_iter()
+    }
 }
 
-pub struct Example<T: Tensor> {
+pub trait Example<T> {
+    fn input(&self) -> T;
+    fn output(&self) -> T;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EagerExample<T : Clone> {
     pub input: T,
     pub output: T
+}
+
+impl <T : Clone> Example<T> for EagerExample<T> {
+    fn input(&self) -> T {
+        self.input.clone()
+    }
+
+    fn output(&self) -> T {
+        self.output.clone()
+    }
 }

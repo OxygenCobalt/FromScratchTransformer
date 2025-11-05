@@ -1,4 +1,4 @@
-use std::{fs::File, path::Path};
+use std::{fs::File, io, path::{Path, PathBuf}};
 
 use arrow::array::{Array, BinaryArray, Int64Array, StructArray};
 use colored::Colorize;
@@ -6,30 +6,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ArrowReaderBuilder;
 
 use crate::{
-    dataset::{LazyExample, Test, TestSet, Train, TrainSet}, tensor::Tensor
+    dataset::{Example, Test, TestSet, Train, TrainSet}, tensor::Tensor
 };
 
-pub struct Mnist {
-    train: Vec<MnistDigit>,
-    test: Vec<MnistDigit>,
-}
-
-impl Mnist {
-    pub fn load(at: &Path) -> Result<Self, parquet::errors::ParquetError> {
-        let train = load_mnist(&at.join("mnist/train-00000-of-00001.parquet"))?;
-        let test = load_mnist(&at.join("./mnist/test-00000-of-00001.parquet"))?;
-        println!(
-            "{}: {} / {}",
-            "mnist".green(),
-            format!["{} train examples", train.len()],
-            format!["{} test examples", test.len()]
-        );
-        Ok(Self {
-            train,
-            test
-        })
-    }
-}
+pub struct Mnist(pub PathBuf);
 
 fn load_mnist(path: &Path) -> Result<Vec<MnistDigit>, parquet::errors::ParquetError> {
     let load_progress = ProgressBar::new_spinner()
@@ -76,8 +56,6 @@ fn load_mnist(path: &Path) -> Result<Vec<MnistDigit>, parquet::errors::ParquetEr
                 height: h,
                 label: label,
             });
-
-            // labels.push(label_matrix);
             load_progress.inc(1);
         }
     }
@@ -87,15 +65,17 @@ fn load_mnist(path: &Path) -> Result<Vec<MnistDigit>, parquet::errors::ParquetEr
 
 impl TrainSet for Mnist {
     type Example = MnistDigit;
-    fn train(&self) -> Train<Self::Example> {
-        Train::new(&self.train)
+    fn train(&self) -> io::Result<Train<Self::Example>> {
+        let train = load_mnist(&self.0.join("mnist/train-00000-of-00001.parquet"))?;
+        Ok(Train::new(train))
     }
 }
 
 impl TestSet for Mnist {
     type Example = MnistDigit;
-    fn test(&self) -> Test<Self::Example> {
-        Test::new(&self.test)
+    fn test(&self) -> io::Result<Test<Self::Example>> {
+        let test = load_mnist(&self.0.join("./mnist/test-00000-of-00001.parquet"))?;
+        Ok(Test::new(test))
     }
 }
 
@@ -107,15 +87,15 @@ pub struct MnistDigit {
     label: i64,
 }
 
-impl LazyExample for MnistDigit {
-    fn input<T: Tensor>(&self) -> T {
+impl <T: Tensor> Example<T> for MnistDigit {
+    fn input(&self) -> T {
         T::vector(self.pixels.iter().map(|&b| b as f64 / 255.0).collect::<Vec<f64>>())
             .unwrap()
             .reshape(&[self.width as usize, self.height as usize])
             .unwrap()
     }
 
-    fn output<T: Tensor>(&self) -> T {
+    fn output(&self) -> T {
         let mut output = vec![0.0; 10];
         output[self.label as usize] = 1.0;
         T::vector(output).unwrap()
