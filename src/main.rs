@@ -25,7 +25,7 @@ fn main() {
         Some(arg) => arg.clone(),
         None => {
             println!(
-                "{}: please specify an experiment: shallow_mnist, dropout_mnist, conv_mnist",
+                "{}: please specify an experiment: shallow_mnist, dropout_mnist, conv_mnist, shallow_wikitext",
                 "error".red()
             );
             return;
@@ -48,6 +48,9 @@ fn main() {
         }
         ref exp if exp == "conv_mnist" => {
             conv_mnist();
+        }
+        ref exp if exp == "shallow_wikitext" => {
+            shallow_wikitext();
         }
         _ => {
             println!("{}: unknown experiment '{}'", "error".red(), experiment);
@@ -162,17 +165,38 @@ fn conv_mnist() {
 fn shallow_wikitext() {
     let wikitext = WikiText103(PathBuf::from("data/wikitext"));
     let train = wikitext.train().unwrap();
-    let tokenizer = WordTokenizer::train(&train);
+    let test = wikitext.test().unwrap();
+    let tokenizer = WordTokenizer::train(&train, &test, None);
     let context = FixedSequencer::new(5);
     let train = train.map(|s| {
         context.split(&tokenizer.forward(&s).unwrap()).iter()
             .map(|s| TokenizedExample::from(s, &tokenizer))
             .collect::<Vec<TokenizedExample>>().into_iter()
     });
-    let test = wikitext.test().unwrap().map(|s| {
+    let test = test.map(|s| {
         context.split(&tokenizer.forward(&s).unwrap()).iter()
             .map(|s| TokenizedExample::from(s, &tokenizer))
             .collect::<Vec<TokenizedExample>>().into_iter()
     });
+    let reporting = LossesOn::new(&test, &[Loss::LogLikelihood]);
+    let layers = Layers::new(vec![
+        Layer::Embeddings { size: 60, vocab: tokenizer.vocab(), context: 5 },
+        Layer::Dense { input_shape: None, neurons: 128, activation: Activation::Tanh },
+        Layer::Dense { input_shape: None, neurons: tokenizer.vocab(), activation: Activation::Softmax },
+    ]).unwrap();
+    // let checkpointing = Checkpoint::new(&layers, &reporting, Path::new("data/checkpoints/mnist/conv"));
+    let hyperparams = Hyperparams {
+        epochs: 30,
+        batch_size: 10,
+        learning_rate: 0.1,
+    };
+    NeuralNetwork::<CPUTensor>::par_train(
+        &layers,
+        &reporting,
+        &train,
+        &hyperparams,
+        Loss::LogLikelihood,
+    )
+    .unwrap();
     
 }
