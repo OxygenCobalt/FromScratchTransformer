@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::{dataset::{Example, Test, Train, Validation, ValidationSet}, tensor::Tensor};
 
 pub trait Tokenizer {
-    fn train(corpus: &Train<String>) -> Self;
+    fn train(train: &Train<String>, test: &Test<String>, validation: Option<&Validation<String>>) -> Self;
     fn forward(&self, string: &str) -> Option<Vec<usize>>;
     fn backward(&self, tokens: &[usize]) -> Option<String>;
     fn vocab(&self) -> usize;
@@ -15,10 +15,10 @@ pub struct WordTokenizer {
 }
 
 impl Tokenizer for WordTokenizer {
-    fn train(corpus: &Train<String>) -> Self {
+    fn train(train: &Train<String>, test: &Test<String>, validation: Option<&Validation<String>>) -> Self {
         let mut forward = HashMap::new();
         let mut backward = Vec::new();
-        for sentence in corpus.iter() {
+        for sentence in train.iter().chain(test.iter()).chain(validation.into_iter().flat_map(|v| v.iter())) {
             for word in sentence.split_whitespace() {
                 if !forward.contains_key(word) {
                     let index = backward.len();
