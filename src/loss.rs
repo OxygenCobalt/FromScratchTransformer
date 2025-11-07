@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
 use colored::Colorize;
+use indicatif::{ProgressBar, ProgressStyle};
 use crate::{dataset::{Example, Test}, nn::Reporting, tensor::Tensor};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +71,11 @@ impl <'a, T: Tensor, E: Example<T>> LossesOn<'a, T, E> {
 
 impl<'a, T: Tensor, E: Example<T>> Reporting<T> for LossesOn<'a, T, E> {
     fn report(&self, nn: &crate::nn::NeuralNetwork<T>, epoch: Option<u64>) -> std::io::Result<()> {
+        let eval_bar = ProgressBar::new(self.test.len() as u64)
+            .with_style(ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}]")
+                            .unwrap()
+                            .progress_chars("=> "))
+            .with_prefix(format!["eval@epoch {}", epoch.map(|e| (e + 1).to_string()).unwrap_or("init".to_string())].blue().to_string());
         let mut avg_losses = vec![0.0; self.losses.len()];
         for example in self.test.iter() {
             let activations = nn.test(&example.input());
@@ -77,12 +83,14 @@ impl<'a, T: Tensor, E: Example<T>> Reporting<T> for LossesOn<'a, T, E> {
                 let loss_value = loss.loss(&activations, &example.output());
                 avg_losses[i] += *loss_value.get(&[]).unwrap()
             }
+            eval_bar.inc(1);
         }
+        eval_bar.finish();
         let n = self.test.len() as f64;
         for (i, loss) in self.losses.iter().enumerate() {
             println!(
                 "{}: epoch {}: avg. {} = {:.3}",
-                "losses_on".green(),
+                "losses_on".purple(),
                 epoch.map(|e| e.to_string()).unwrap_or_else(|| "init".to_string()),
                 match loss {
                     Loss::MSE => "mse",

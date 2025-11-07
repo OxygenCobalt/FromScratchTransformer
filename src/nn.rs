@@ -69,7 +69,7 @@ impl<T: TensorMut + DifferentiableTensor + Clone> NeuralNetwork<T> {
                 .with_style(ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}] / avg batch loss = {msg}")
                                 .unwrap()
                                 .progress_chars("=> "))
-                .with_prefix(format!["epoch {}", epoch + 1].blue().to_string());
+                .with_prefix(format!["train@epoch {}", epoch + 1].blue().to_string());
             let mut total_loss = 0.0;
             for (i, batch) in batches.into_iter().enumerate() {
                 let mut concat_example = EagerExample { input: vec![], output: vec![] };
@@ -148,7 +148,7 @@ where
                 .with_style(ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}] / avg batch loss = {msg}")
                                 .unwrap()
                                 .progress_chars("=> "))
-                .with_prefix(format!["epoch {}", epoch + 1].blue().to_string());
+                .with_prefix(format!["par_train@epoch {}", epoch + 1].blue().to_string());
             let total_loss = AtomicF64::new(0.0);
             for (i, batch) in batches.into_iter().enumerate() {
                 let c = hyperparams.learning_rate / hyperparams.batch_size as f64;

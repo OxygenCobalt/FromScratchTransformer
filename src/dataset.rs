@@ -1,3 +1,5 @@
+use colored::Colorize;
+use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
 use rand::seq::SliceRandom;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::io;
@@ -18,8 +20,17 @@ impl <E> Train<E> {
         self.0.iter()
     }
 
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
     pub fn map<F: Iterator<Item=G>, G>(self, remapper: impl Fn(E) -> F) -> Train<G> {
-        Train(self.0.into_iter().flat_map(remapper).collect())
+        let map_bar = ProgressBar::new_spinner()
+            .with_style(ProgressStyle::with_template("{prefix}: {pos:>4}")
+                            .unwrap()
+                            .progress_chars("=> "))
+            .with_prefix("map@train".yellow().to_string());
+        Train(self.0.into_iter().flat_map(remapper).progress_with(map_bar).collect())
     }
 }
 
@@ -62,7 +73,12 @@ impl <E> Test<E> {
     }
 
     pub fn map<F: Iterator<Item=G>, G>(self, remapper: impl Fn(E) -> F) -> Test<G> {
-        Test(self.0.into_iter().flat_map(remapper).collect())
+        let map_bar = ProgressBar::new_spinner()
+            .with_style(ProgressStyle::with_template("{prefix}: {pos:>4}")
+                            .unwrap()
+                            .progress_chars("=> "))
+            .with_prefix("map@test".yellow().to_string());
+        Test(self.0.into_iter().flat_map(remapper).progress_with(map_bar).collect())
     }
 }
 
@@ -92,7 +108,12 @@ impl <E> Validation<E> {
     }
 
     pub fn map<F: Iterator<Item=G>, G>(self, remapper: impl Fn(E) -> F) -> Validation<G> {
-        Validation(self.0.into_iter().flat_map(remapper).collect())
+        let map_bar = ProgressBar::new_spinner()
+            .with_style(ProgressStyle::with_template("{prefix}: {pos:>4}")
+                            .unwrap()
+                            .progress_chars("=> "))
+            .with_prefix("map@validation".yellow().to_string());
+        Validation(self.0.into_iter().flat_map(remapper).progress_with(map_bar).collect())
     }
 }
 

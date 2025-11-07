@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+use colored::Colorize;
+use indicatif::{ProgressBar, ProgressStyle};
+
 use crate::{dataset::{Example, Test, Train, Validation, ValidationSet}, tensor::Tensor};
 
 pub trait Tokenizer {
@@ -16,6 +19,11 @@ pub struct WordTokenizer {
 
 impl Tokenizer for WordTokenizer {
     fn train(train: &Train<String>, test: &Test<String>, validation: Option<&Validation<String>>) -> Self {
+        let train_bar = ProgressBar::new((train.len() + test.len() + validation.map(|v| v.len()).unwrap_or(0)) as u64)
+            .with_style(ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}] / vocab size = {msg}")
+                            .unwrap()
+                            .progress_chars("=> "))
+            .with_prefix("wordtok".red().to_string());
         let mut forward = HashMap::new();
         let mut backward = Vec::new();
         for sentence in train.iter().chain(test.iter()).chain(validation.into_iter().flat_map(|v| v.iter())) {
@@ -24,9 +32,12 @@ impl Tokenizer for WordTokenizer {
                     let index = backward.len();
                     forward.insert(word.to_string(), index);
                     backward.push(word.to_string());
+                    train_bar.set_message(backward.len().to_string());
                 }
             }
+            train_bar.inc(1);
         }
+        train_bar.finish();
         Self { forward, backward }
     }
 
