@@ -839,7 +839,8 @@ struct Embeddings<T: Tensor> {
 
 impl <T: Tensor> Embeddings<T> {
     fn new(size: usize, vocab: usize) -> Self {
-        Self { c: T::tensor(Fill { shape: vec![size, vocab], with: 0.0 }).unwrap() }
+        let xavier = Normal::new(0.0, 1.0 / (size as f64).sqrt()).unwrap();
+        Self { c: T::tensor(Generate { shape: vec![size, vocab], with: || xavier.sample(&mut rand::rng()) }).unwrap() }
     }
 
     fn forward(&self, activations: T) -> T {
