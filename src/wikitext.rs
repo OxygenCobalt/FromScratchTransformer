@@ -55,9 +55,11 @@ fn load_wikitext(path: &Path) -> Result<Vec<String>, parquet::errors::ParquetErr
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        let text = text_column.value(0);
-        texts.push(text.to_string());
-        load_progress.inc(1);
+        for i in 0..text_column.len() {
+            let text = text_column.value(i);
+            texts.push(text.to_string());
+            load_progress.inc(1);
+        }
     }
     load_progress.finish();
     Ok(texts)
