@@ -28,10 +28,11 @@ impl Tokenizer for WordTokenizer {
         let mut backward = Vec::new();
         for sentence in train.iter().chain(test.iter()).chain(validation.into_iter().flat_map(|v| v.iter())) {
             for word in sentence.split_whitespace() {
-                if !forward.contains_key(word) {
+                let lowercase = word.to_lowercase();
+                if !forward.contains_key(&lowercase) {
                     let index = backward.len();
-                    forward.insert(word.to_string(), index);
-                    backward.push(word.to_string());
+                    forward.insert(lowercase.clone(), index);
+                    backward.push(lowercase);
                     train_bar.set_message(backward.len().to_string());
                 }
             }
@@ -44,7 +45,7 @@ impl Tokenizer for WordTokenizer {
     fn forward(&self, string: &str) -> Option<Vec<usize>> {
         let mut tokens = vec![];
         for word in string.split_whitespace() {
-            match self.forward.get(word) {
+            match self.forward.get(&word.to_lowercase()) {
                 Some(&index) => tokens.push(index),
                 None => return None
             }
