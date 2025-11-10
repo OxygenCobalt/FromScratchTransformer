@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 
 use crate::dataset::{EagerExample, Example, Train};
 use crate::tensor::{
-    Autograd, CPUTensor, DifferentiableTensor, Field, Fill, Generate, Tensor, TensorIO, TensorMut, Tt
+    Autograd, cpu::CPUTensor, DifferentiableTensor, Field, Fill, Generate, Tensor, TensorIO, TensorMut, Tt
 };
 
 use super::{activation::Activation, loss::Loss};
@@ -422,7 +422,7 @@ impl Layer {
             Self::Pool2D { field, .. } => Axon::Pool2D {
                 pool: Pool2D::new(*field),
             },
-            Self::Embeddings { size, vocab, context } => Axon::Embeddings { embeddings: Embeddings::new(*size, *vocab) }
+            Self::Embeddings { size, vocab, .. } => Axon::Embeddings { embeddings: Embeddings::new(*size, *vocab) }
         }
     }
 

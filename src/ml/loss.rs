@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
-use crate::{dataset::{Example, Test}, nn::Reporting, tensor::Tensor};
+use crate::{dataset::{Example, Test}, ml::nn::{NeuralNetwork, Reporting}, tensor::Tensor};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Loss {
@@ -70,7 +70,7 @@ impl <'a, T: Tensor, E: Example<T>> LossesOn<'a, T, E> {
 }
 
 impl<'a, T: Tensor, E: Example<T>> Reporting<T> for LossesOn<'a, T, E> {
-    fn report(&self, nn: &crate::nn::NeuralNetwork<T>, epoch: Option<u64>) -> std::io::Result<()> {
+    fn report(&self, nn: &NeuralNetwork<T>, epoch: Option<u64>) -> std::io::Result<()> {
         let eval_bar = ProgressBar::new(self.test.len() as u64)
             .with_style(ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}]")
                             .unwrap()

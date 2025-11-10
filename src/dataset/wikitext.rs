@@ -39,6 +39,35 @@ impl ValidationSet for WikiText103 {
     }
 }
 
+pub struct WikiText2(pub PathBuf);
+
+impl TrainSet for WikiText2 {
+    type Example = String;
+
+    fn train(&self) -> std::io::Result<crate::dataset::Train<Self::Example>> {
+        let train = load_wikitext(&self.0.join("wikitext-2-raw-v1/train-00000-of-00001.parquet"))?;
+        Ok(Train::new(train))
+    }
+}
+
+impl TestSet for WikiText2 {
+    type Example = String;
+
+    fn test(&self) -> std::io::Result<crate::dataset::Test<Self::Example>> {
+        let test = load_wikitext(&self.0.join("wikitext-2-raw-v1/test-00000-of-00001.parquet"))?;
+        Ok(crate::dataset::Test::new(test))
+    }
+}
+
+impl ValidationSet for WikiText2 {
+    type Example = String;
+
+    fn validation(&self) -> std::io::Result<crate::dataset::Validation<Self::Example>> {
+        let validation = load_wikitext(&self.0.join("wikitext-2-raw-v1/validation-00000-of-00001.parquet"))?;
+        Ok(crate::dataset::Validation::new(validation))
+    }
+}
+
 fn load_wikitext(path: &Path) -> Result<Vec<String>, parquet::errors::ParquetError> {
     let load_progress = ProgressBar::new_spinner()
         .with_style(ProgressStyle::with_template("{prefix}: loading {msg} {pos:>4}").unwrap())

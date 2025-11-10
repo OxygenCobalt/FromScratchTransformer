@@ -4,17 +4,12 @@ use colored::Colorize;
 use rayon::ThreadPoolBuilder;
 
 use crate::{
-    activation::Activation, dataset::{TestSet, TrainSet}, language::{FixedSequencer, TokenizedExample, Tokenizer, WordTokenizer}, loss::{AccuracyOf, Loss, LossesOn}, mnist::Mnist, nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork}, tensor::{CPUTensor, Field}, wikitext::WikiText103
+    dataset::{TestSet, TrainSet, mnist::Mnist, wikitext::{WikiText2, WikiText103}}, ml::{activation::Activation, language::{FixedSequencer, TokenizedExample, Tokenizer, WordTokenizer}, loss::{AccuracyOf, Loss, LossesOn}, nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork}}, tensor::{Field, cpu::CPUTensor}
 };
 
-mod activation;
-mod loss;
-mod mnist;
-mod nn;
 mod tensor;
-mod wikitext;
 mod dataset;
-mod language;
+mod ml;
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -163,7 +158,7 @@ fn conv_mnist() {
 }
 
 fn shallow_wikitext() {
-    let wikitext = WikiText103(PathBuf::from("data/wikitext"));
+    let wikitext = WikiText2(PathBuf::from("data/wikitext"));
     let train = wikitext.train().unwrap();
     let test = wikitext.test().unwrap();
     let tokenizer = WordTokenizer::train(&train, &test, None);
@@ -184,9 +179,9 @@ fn shallow_wikitext() {
         Layer::Dense { input_shape: None, neurons: 128, activation: Activation::Tanh },
         Layer::Dense { input_shape: None, neurons: tokenizer.vocab(), activation: Activation::Softmax },
     ]).unwrap();
-    // let checkpointing = Checkpoint::new(&layers, &reporting, Path::new("data/checkpoints/mnist/conv"));
+    // let checkpointing = Checkpoint::new(&layers, &reporting, Path::new("data/wikitext"));
     let hyperparams = Hyperparams {
-        epochs: 30,
+        epochs: 1,
         batch_size: 10,
         learning_rate: 0.1,
     };

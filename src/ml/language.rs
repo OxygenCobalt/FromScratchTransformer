@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 
-use crate::{dataset::{Example, Test, Train, Validation, ValidationSet}, tensor::Tensor};
+use crate::{dataset::{Example, Test, Train, Validation}, tensor::Tensor};
 
 pub trait Tokenizer {
     fn train(train: &Train<String>, test: &Test<String>, validation: Option<&Validation<String>>) -> Self;

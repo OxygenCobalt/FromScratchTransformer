@@ -1,3 +1,6 @@
+pub mod mnist;
+pub mod wikitext;
+
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
 use rand::seq::SliceRandom;
