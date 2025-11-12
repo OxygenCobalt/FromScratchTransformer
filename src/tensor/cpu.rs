@@ -1037,44 +1037,44 @@ type AutogradNode = Arc<AutogradNodeData>;
 
 struct AutogradNodeData {
     tensor: CPUTensor,
-    edge: AutogradEdge
+    edge: AutogradEdge,
+}
+
+struct AutogradEdge {
+    grad: Mutex<Option<CPUTensor>>,
+    op: Option<Operation>
 }
 
 fn unravel(node: AutogradNode) -> UnraveledEdge {
     if Arc::strong_count(&node) == 1 {
         let owned=  Arc::try_unwrap(node).ok().unwrap();
-        UnraveledEdge::Ok(owned.edge)
+        UnraveledEdge::Edge(owned.edge)
     } else {
-        UnraveledEdge::Clone(node.clone())
+        UnraveledEdge::Node(node.clone())
     }
 }
 
 fn unravel_tensor(node: AutogradNode) -> (CPUTensor, UnraveledEdge) {
     if Arc::strong_count(&node) == 1 {
         let owned=  Arc::try_unwrap(node).ok().unwrap();
-        (owned.tensor, UnraveledEdge::Ok(owned.edge))
+        (owned.tensor, UnraveledEdge::Edge(owned.edge))
     } else {
-        (node.tensor.clone(), UnraveledEdge::Clone(node.clone()))
+        (node.tensor.clone(), UnraveledEdge::Node(node.clone()))
     }
 }
     
 enum UnraveledEdge {
-    Ok(AutogradEdge),
-    Clone(AutogradNode),
+    Edge(AutogradEdge),
+    Node(AutogradNode),
 }
 
 impl UnraveledEdge {
     pub fn backward(self, grad: CPUTensor) {
         match self {
-            Self::Ok(edge) => edge.take_backward(grad),
-            Self::Clone(node) => node.edge.backward(grad),
+            Self::Edge(edge) => edge.take_backward(grad),
+            Self::Node(node) => node.edge.backward(grad),
         }
     }
-}
-
-struct AutogradEdge {
-    grad: Mutex<Option<CPUTensor>>,
-    op: Option<Operation>
 }
 
 impl AutogradEdge {
@@ -1084,10 +1084,12 @@ impl AutogradEdge {
             return;
         }
         let mut slf_grad = self.grad.lock().expect("mutex poisoned, should not happen");
-        *slf_grad = match slf_grad.as_ref() {
-            Some(existing) => Some(existing.clone().add(&grad).unwrap()),
-            None => Some(grad),
-        };
+        let grad_to_modify = slf_grad.take();
+        slf_grad.replace(
+            grad_to_modify
+                .map(|ng| ng.add(&grad).unwrap())
+                .unwrap_or(grad),
+        );
     }
 
     pub fn take_backward(self, grad: CPUTensor) {
