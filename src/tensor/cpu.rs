@@ -10,6 +10,84 @@ pub struct CPUTensor {
     data: Vec<f64>,
 }
 
+struct Block {
+    len: usize,
+    stride: usize,
+}
+
+macro_rules! impl_arithmetic {
+    ($self:expr, $op:tt, $other:expr) => {{
+        if $self.shape == $other.shape && $self.stride == $other.stride {
+            let mut new_data = Vec::with_capacity($self.data.len());
+            unsafe { new_data.set_len($self.data.len()); }
+            let new_slice = new_data.as_mut_slice();
+            let lhs_slice = $self.data.as_slice();
+            let rhs_slice = $other.data.as_slice();
+            for i in 0..$self.data.len() {
+                unsafe {
+                    *new_slice.get_unchecked_mut(i) = *lhs_slice.get_unchecked(i) $op *rhs_slice.get_unchecked(i);
+                }
+            }
+            return Some(Self {
+                shape: $self.shape.clone(),
+                stride: $self.stride.clone(),
+                data: new_data,
+            });
+        }
+        let k = $self.shape.len().max($other.shape.len());
+        let mut new_shape = Vec::with_capacity(k);
+        let mut lhs_strides = Vec::with_capacity(k);
+        let mut rhs_strides = Vec::with_capacity(k);
+        for i in 0..k {
+            let lhs = $self.shape.get(i).cloned().unwrap_or(1);
+            let rhs = $other.shape.get(i).cloned().unwrap_or(1);
+            if lhs == rhs {
+                new_shape.push(lhs);
+                lhs_strides.push($self.stride[i]);
+                rhs_strides.push($other.stride[i]);
+            } else if lhs == 1 {
+                new_shape.push(rhs);
+                lhs_strides.push(0);
+                rhs_strides.push($other.stride[i]);
+            } else if rhs == 1 {
+                new_shape.push(lhs);
+                lhs_strides.push($self.stride[i]);
+                rhs_strides.push(0);
+            } else {
+                return None;
+            }
+        }
+
+        let mut new = Self::tensor(Fill::null(new_shape)).unwrap();
+        let mut new_point = vec![0; new.shape.len()];
+        let mut new_ptr = new.data.as_mut_ptr();
+        let mut lhs_ptr = $self.data.as_ptr();
+        let mut rhs_ptr = $other.data.as_ptr();
+
+        'iterate: loop {
+            unsafe { *new_ptr = *lhs_ptr $op *rhs_ptr; }
+            for i in 0..new_point.len() {
+                let np_ref = unsafe { new_point.get_unchecked_mut(i) };
+                let np = *np_ref;
+                if np == unsafe { new.shape.get_unchecked(i) } - 1 {
+                    new_ptr = unsafe { new_ptr.sub(*new.stride.get_unchecked(i) * np) };
+                    lhs_ptr = unsafe { lhs_ptr.sub(*lhs_strides.get_unchecked(i) * np) };
+                    rhs_ptr = unsafe { rhs_ptr.sub(*rhs_strides.get_unchecked(i) * np) };
+                    *np_ref = 0;
+                } else {
+                    new_ptr = unsafe { new_ptr.add(*new.stride.get_unchecked(i)) };
+                    lhs_ptr = unsafe { lhs_ptr.add(*lhs_strides.get_unchecked(i)) };
+                    rhs_ptr = unsafe { rhs_ptr.add(*rhs_strides.get_unchecked(i)) };
+                    *np_ref += 1;
+                    continue 'iterate;
+                }
+            }
+            break;
+        }
+        Some(new)
+    }};
+}
+
 impl CPUTensor {
     pub fn len(shape: &[usize]) -> usize {
         if shape.is_empty() {
@@ -181,15 +259,15 @@ impl Tensor for CPUTensor {
     }
 
     fn add(&self, other: &Self) -> Option<Self> {
-        self.arithmetic(other, |rhs, lhs| rhs + lhs)
+        impl_arithmetic!(self, +, other)
     }
 
     fn sub(&self, other: &Self) -> Option<Self> {
-        self.arithmetic(other, |rhs, lhs| rhs - lhs)
+        impl_arithmetic!(self, -, other)
     }
 
     fn mul(&self, other: &Self) -> Option<Self> {
-        self.arithmetic(other, |rhs, lhs| rhs * lhs)
+        impl_arithmetic!(self, *, other)
     }
 
     fn dot(&self, other: &Self, depth: usize) -> Option<Self> {
@@ -1081,6 +1159,7 @@ enum Operation {
 }
 
 impl Operation {
+    #[inline(always)]
     fn arithmetic_backward(
         lhs: AutogradNode,
         rhs: AutogradNode,
