@@ -4,7 +4,7 @@ use colored::Colorize;
 use rayon::ThreadPoolBuilder;
 
 use crate::{
-    dataset::{TestSet, TrainSet, mnist::Mnist, wikitext::{WikiText2, WikiText103}}, ml::{activation::Activation, language::{FixedSequencer, TokenizedExample, Tokenizer, WordTokenizer}, loss::{AccuracyOf, Loss, LossesOn}, nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork}}, tensor::{Field, cpu::CPUTensor}
+    dataset::{TestSet, TrainSet, distill::Distill, mnist::Mnist, wikitext::WikiText2}, ml::{activation::Activation, language::{FixedSequencer, TokenizedExample, Tokenizer, WordTokenizer}, loss::{AccuracyOf, Loss, LossesOn}, nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork}}, tensor::{Field, cpu::CPUTensor}
 };
 
 mod tensor;
@@ -159,8 +159,9 @@ fn conv_mnist() {
 
 fn shallow_wikitext() {
     let wikitext = WikiText2(PathBuf::from("data/wikitext"));
-    let train = wikitext.train().unwrap();
-    let test = wikitext.test().unwrap();
+    let distill = Distill(0.01);
+    let train = distill.train(wikitext.train().unwrap());
+    let test = distill.test(wikitext.test().unwrap());
     let tokenizer = WordTokenizer::train(&train, &test, None);
     let context = FixedSequencer::new(5);
     let train = train.map(|s| {
