@@ -201,3 +201,24 @@ impl<F: FnMut() -> f64> TensorInit for Generate<F> {
         return Some((self.shape, data));
     }
 }
+
+pub struct FillUninit {
+    pub shape: Vec<usize>,
+}
+
+impl FillUninit {
+    pub unsafe fn new(shape: Vec<usize>) -> Self {
+        Self { shape }
+    }
+}
+
+impl TensorInit for FillUninit {
+    fn make(self) -> Option<(Vec<usize>, Vec<f64>)> {
+        let len = CPUTensor::len(&self.shape);
+        let mut data = Vec::with_capacity(len);
+        unsafe {
+            data.set_len(len);
+        }
+        Some((self.shape, data))
+    }
+}

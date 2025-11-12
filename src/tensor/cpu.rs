@@ -1,6 +1,6 @@
 use std::{collections::HashSet, io::{self, Read, Write}, sync::{Arc, Mutex}};
 
-use crate::tensor::{Autograd, DifferentiableTensor, Field, Fill, Tensor, TensorIO, TensorInit, TensorMut};
+use crate::tensor::{Autograd, DifferentiableTensor, Field, Fill, FillUninit, Tensor, TensorIO, TensorInit, TensorMut};
 
 
 #[derive(Clone, PartialEq)]
@@ -137,59 +137,79 @@ impl CPUTensor {
         Some(idx)
     }
 
-    #[inline(always)]
-    fn arithmetic(&self, other: &Self, op: impl Fn(f64, f64) -> f64) -> Option<Self> {
-        let k = self.shape.len().max(other.shape.len());
-        let mut new_shape = Vec::with_capacity(k);
-        let mut lhs_strides = Vec::with_capacity(k);
-        let mut rhs_strides = Vec::with_capacity(k);
-        for i in 0..k {
-            let lhs = self.shape.get(i).cloned().unwrap_or(1);
-            let rhs = other.shape.get(i).cloned().unwrap_or(1);
-            if lhs == rhs {
-                new_shape.push(lhs);
-                lhs_strides.push(self.stride[i]);
-                rhs_strides.push(other.stride[i]);
-            } else if lhs == 1 {
-                new_shape.push(rhs);
-                lhs_strides.push(0);
-                rhs_strides.push(other.stride[i]);
-            } else if rhs == 1 {
-                new_shape.push(lhs);
-                lhs_strides.push(self.stride[i]);
-                rhs_strides.push(0);
+    fn blocks(&self) -> Vec<Block> {
+        let mut blocks = vec![];
+        let mut block_len = 1;
+        let mut block_stride = 1;
+        for i in 0..self.ndim() {
+            if i > 0 && self.stride[i] == self.stride[i - 1] * self.shape[i - 1] {
+                block_len *= self.shape[i];
             } else {
+                if i > 0 {
+                    blocks.push(Block {
+                        len: block_len,
+                        stride: block_stride,
+                    });
+                }
+                block_len = self.shape[i];
+                block_stride = self.stride[i];
+            }
+        }
+        blocks.push(Block {
+            len: block_len,
+            stride: block_stride,
+        });
+        blocks
+    }
+
+    fn contiguous_within(&self, within: std::ops::Range<usize>) -> bool {
+        if self.ndim() == 0 {
+            return true;
+        }
+        if within.end - within.start <= 1 {
+            // single dimension is trivially contiguous
+            return true;
+        }
+        // want to avoid checking dimensions outside the within range
+        for i in within.start + 1..within.end {
+            if self.stride[i] != self.stride[i - 1] * self.shape[i - 1] {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn view(&self, shape: &[usize]) -> Option<Vec<usize>> {
+        let blocks = self.blocks();
+        let mut block_iter = blocks.into_iter();
+        let mut cur_blk = block_iter.next().unwrap();
+        let mut cur_len = 1;
+        let mut accd_stride = cur_blk.stride;
+        let mut new_stride = Vec::with_capacity(shape.len());
+        for (i, s) in shape.iter().enumerate() {
+            cur_len *= *s;
+            new_stride.push(accd_stride);
+            accd_stride = accd_stride.saturating_mul(*s);
+            if cur_len == cur_blk.len {
+                cur_len = 1;
+                if let Some(blk) = block_iter.next() {
+                    cur_blk = blk;
+                    accd_stride = cur_blk.stride;
+                } else if i + 1 < shape.len() {
+                    // no more blocks. in this case the remaining axes
+                    // must be size 1. if not we will reject it later on
+                    accd_stride = 0;
+                }
+            } else if cur_len > cur_blk.len {
                 return None;
             }
         }
-
-        let mut new = Self::tensor(Fill::null(new_shape)).unwrap();
-        let mut new_point = vec![0; new.shape.len()];
-        let mut new_ptr = new.data.as_mut_ptr();
-        let mut lhs_ptr = self.data.as_ptr();
-        let mut rhs_ptr = other.data.as_ptr();
-
-        'iterate: loop {
-            unsafe { *new_ptr = op(*lhs_ptr, *rhs_ptr) }
-            for i in 0..new_point.len() {
-                let np_ref = unsafe { new_point.get_unchecked_mut(i) };
-                let np = *np_ref;
-                if np == unsafe { new.shape.get_unchecked(i) } - 1 {
-                    new_ptr = unsafe { new_ptr.sub(*new.stride.get_unchecked(i) * np) };
-                    lhs_ptr = unsafe { lhs_ptr.sub(*lhs_strides.get_unchecked(i) * np) };
-                    rhs_ptr = unsafe { rhs_ptr.sub(*rhs_strides.get_unchecked(i) * np) };
-                    *np_ref = 0;
-                } else {
-                    new_ptr = unsafe { new_ptr.add(*new.stride.get_unchecked(i)) };
-                    lhs_ptr = unsafe { lhs_ptr.add(*lhs_strides.get_unchecked(i)) };
-                    rhs_ptr = unsafe { rhs_ptr.add(*rhs_strides.get_unchecked(i)) };
-                    *np_ref += 1;
-                    continue 'iterate;
-                }
-            }
-            break;
+        // we didnt use all of the blocks OR we couldnt fit the last dimensions
+        // into a block, reject
+        if cur_len != 1 || block_iter.next().is_some() {
+            return None;
         }
-        Some(new)
+        Some(new_stride)
     }
 }
 
@@ -287,9 +307,55 @@ impl Tensor for CPUTensor {
         let rhs_survivor_len = rhs_survivors.len();
         let mut new_shape: Vec<usize> = lhs_survivors.to_vec();
         new_shape.extend_from_slice(rhs_survivors);
-        let mut new = Self::tensor(Fill::null(new_shape)).unwrap();
+        if self.contiguous_within((self.shape.len() - depth)..(self.shape.len())) && other.contiguous_within(0..depth) {
+            // fast case: dense axk kxb matmul
+            // TODO: implement block intersections so i can apply this method to arbitrary 
+            // non-contiguous tensors
+            let k = contraction_shape.iter().product::<usize>();
+            let a = lhs_survivors.iter().product::<usize>();
+            let b = rhs_survivors.iter().product::<usize>();
+            let lhs_2strides = self.view(&[a, k])?;
+            let rhs_2strides = other.view(&[k, b])?;
+            let mut new = Self::tensor(unsafe { FillUninit::new(vec![a, b]) }).unwrap();
+
+            // explicit slice definitions to signal to the compiler about aliasing
+            let lhs_data = self.data.as_slice();
+            let mut lhs_idx = 0;
+            let rhs_data = other.data.as_slice();
+            let mut rhs_idx = 0;
+            let new_data_mut = new.data.as_mut_slice();
+            let mut new_idx = 0;
+            for _ in 0..a {
+                for _ in 0..b {
+                    let mut sum = 0.0;
+                    for _ in 0..k {
+                        unsafe {
+                            sum += *lhs_data.get_unchecked(lhs_idx) * *rhs_data.get_unchecked(rhs_idx);
+                        }
+                        lhs_idx += lhs_2strides[1];
+                        rhs_idx += rhs_2strides[0];
+                    }
+                    unsafe {
+                        *new_data_mut.get_unchecked_mut(new_idx) = sum;
+                    }
+                    // rewind indices
+                    lhs_idx -= lhs_2strides[1] * k;
+                    rhs_idx -= rhs_2strides[0] * k;
+
+                    new_idx += new.stride[1];
+                    rhs_idx += rhs_2strides[1];
+                }
+                rhs_idx = 0;
+                lhs_idx += lhs_2strides[0];
+                new_idx -= new.stride[1] * b;
+                new_idx += new.stride[0];
+            }
+            // reshape back to original shape
+            return Some(new.reshape(&new_shape).unwrap());
+        }
+
+        let mut new = Self::tensor(unsafe { FillUninit::new(new_shape) }).unwrap();
         let mut new_point = vec![0; new.shape.len()];
-        // let mut new_idx = 0;
         let mut new_ptr = new.data.as_mut_ptr();
         let mut lhs_ptr = self.data.as_ptr();
         let mut rhs_ptr = other.data.as_ptr();
@@ -656,66 +722,7 @@ impl Tensor for CPUTensor {
         // so our stride isnt monotonically increasing, we transposed at some point
         // therefore we have to recompute the stride such that it still aligns with
         // the view we created.
-
-        // note: this is partially assisted by codex since i had a hard time
-        // understanding the process
-
-        // first, identify the blocks of memory that are still contiguous despite
-        //
-        struct Block {
-            len: usize,
-            stride: usize,
-        }
-        let mut blocks = vec![];
-        let mut block_len = 1;
-        let mut block_stride = 1;
-        for i in 0..self.ndim() {
-            if i > 0 && self.stride[i] == self.stride[i - 1] * self.shape[i - 1] {
-                block_len *= self.shape[i];
-            } else {
-                if i > 0 {
-                    blocks.push(Block {
-                        len: block_len,
-                        stride: block_stride,
-                    });
-                }
-                block_len = self.shape[i];
-                block_stride = self.stride[i];
-            }
-        }
-        blocks.push(Block {
-            len: block_len,
-            stride: block_stride,
-        });
-
-        let mut block_iter = blocks.into_iter();
-        let mut cur_blk = block_iter.next().unwrap();
-        let mut cur_len = 1;
-        let mut accd_stride = cur_blk.stride;
-        let mut new_stride = Vec::with_capacity(shape.len());
-        for (i, s) in shape.iter().enumerate() {
-            cur_len *= *s;
-            new_stride.push(accd_stride);
-            accd_stride = accd_stride.saturating_mul(*s);
-            if cur_len == cur_blk.len {
-                cur_len = 1;
-                if let Some(blk) = block_iter.next() {
-                    cur_blk = blk;
-                    accd_stride = cur_blk.stride;
-                } else if i + 1 < shape.len() {
-                    // no more blocks. in this case the remaining axes
-                    // must be size 1. if not we will reject it later on
-                    accd_stride = 0;
-                }
-            } else if cur_len > cur_blk.len {
-                return None;
-            }
-        }
-        // we didnt use all of the blocks OR we couldnt fit the last dimensions
-        // into a block, reject
-        if cur_len != 1 || block_iter.next().is_some() {
-            return None;
-        }
+        let new_stride = self.view(shape)?;
         self.shape = shape.to_vec();
         self.stride = new_stride;
 
