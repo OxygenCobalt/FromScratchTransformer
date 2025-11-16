@@ -36,22 +36,7 @@ impl Activation {
             Self::Sigmoid => T::scalar(1.0).add(&y.neg().exp()).unwrap().pow(-1),
             Self::ReLU => y.max(0.0),
             Self::SiLU => y.clone().mul(&Self::Sigmoid.activate(y)).unwrap(),
-            Self::Softmax => {
-                let max = {
-                    let mut shape = vec![1];
-                    shape.extend_from_slice(y.shape()[1..].into());
-                    y.colmax().unwrap().reshape(&shape).unwrap()
-                };
-                let shifted = y.clone().sub(&max).unwrap();
-
-                let exp = shifted.clone().exp();
-                let norm = {
-                    let mut shape = vec![1];
-                    shape.extend_from_slice(exp.shape()[1..].into());
-                    exp.clone().sum().pow(-1).reshape(&shape).unwrap()
-                };
-                exp.mul(&norm).unwrap()
-            },
+            Self::Softmax => y.softmax().unwrap(),
             Self::Tanh => y.tanh()
         }
     }

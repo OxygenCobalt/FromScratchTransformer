@@ -1,3 +1,4 @@
+use core::f64;
 use std::{collections::HashSet, io::{self, Read, Write}, sync::{Arc, Mutex}};
 
 use crate::tensor::{Autograd, DifferentiableTensor, Field, Fill, FillUninit, Tensor, TensorIO, TensorInit, TensorMut};
@@ -39,22 +40,25 @@ macro_rules! impl_arithmetic {
         let mut lhs_strides = Vec::with_capacity(k);
         let mut rhs_strides = Vec::with_capacity(k);
         for i in 0..k {
-            let lhs = $self.shape.get(i).cloned().unwrap_or(1);
-            let rhs = $other.shape.get(i).cloned().unwrap_or(1);
-            if lhs == rhs {
-                new_shape.push(lhs);
-                lhs_strides.push($self.stride[i]);
-                rhs_strides.push($other.stride[i]);
-            } else if lhs == 1 {
-                new_shape.push(rhs);
-                lhs_strides.push(0);
-                rhs_strides.push($other.stride[i]);
-            } else if rhs == 1 {
-                new_shape.push(lhs);
-                lhs_strides.push($self.stride[i]);
-                rhs_strides.push(0);
-            } else {
-                return None;
+            let lhs = $self.shape.get(i).cloned();
+            let rhs = $other.shape.get(i).cloned();
+            match (lhs, rhs) {
+                (Some(l), Some(r)) if l == r => {
+                    new_shape.push(l);
+                    lhs_strides.push($self.stride[i]);
+                    rhs_strides.push($other.stride[i]);
+                },
+                (Some(l), Some(r)) if l == 1 => {
+                    new_shape.push(r);
+                    lhs_strides.push(0);
+                    rhs_strides.push($other.stride[i]);
+                },
+                (Some(l), Some(r)) if r == 1 => {
+                    new_shape.push(l);
+                    lhs_strides.push($self.stride[i]);
+                    rhs_strides.push(0);
+                },
+                _ => return None
             }
         }
 
@@ -781,6 +785,70 @@ impl Tensor for CPUTensor {
         }
         Some(new)
     }
+
+    fn softmax(mut self) -> Option<Self> {        
+        // technically `t` in activation can be more than just an activation vector but actually a batch of activation
+        // vectors, so we need to compute numerical stability for each activation vector in the batch.
+        // to vaguely generalize this we will assume all non-last dimensions are the activations and then the last dimension is the batch.
+        let batch_size = self.shape.last().unwrap();
+        let batch_stride = self.stride.last().unwrap();
+        let mut point = vec![0; self.ndim() - 1];
+        for i in 0..*batch_size { 
+            let mut idx = i * batch_stride;
+            let mut max = f64::MIN;
+            'iterate: loop {
+                if self.data[idx] > max {
+                    max = self.data[idx];
+                }
+                for i in 0..self.ndim() - 1 {
+                    if point[i] == self.shape[i] - 1 {
+                        idx -= self.stride[i] * point[i];
+                        point[i] = 0;
+                    } else {
+                        idx += self.stride[i];
+                        point[i] += 1;
+                        continue 'iterate;
+                    }
+                }
+                break 'iterate;
+            }
+            idx = i * batch_stride;
+            point.fill(0);
+            let mut norm = 0.0;
+            'iterate: loop {
+                self.data[idx] = (self.data[idx] - max).exp();
+                norm += self.data[idx];
+                for i in 0..self.ndim() - 1 {
+                    if point[i] == self.shape[i] - 1 {
+                        idx -= self.stride[i] * point[i];
+                        point[i] = 0;
+                    } else {
+                        idx += self.stride[i];
+                        point[i] += 1;
+                        continue 'iterate;
+                    }
+                }
+                break 'iterate;
+            }
+            idx = i * batch_stride;
+            point.fill(0);
+            'iterate: loop {
+                self.data[idx] /= norm;
+                for i in 0..self.ndim() - 1 {
+                    if point[i] == self.shape[i] - 1 {
+                        idx -= self.stride[i] * point[i];
+                        point[i] = 0;
+                    } else {
+                        idx += self.stride[i];
+                        point[i] += 1;
+                        continue 'iterate;
+                    }
+                }
+                break 'iterate;
+            }
+        }
+        Some(self)
+    }
 }
 
 impl DifferentiableTensor for CPUTensor {
@@ -1031,6 +1099,10 @@ impl Tensor for CPUAutograd {
         }
         .forward()
     }
+
+    fn softmax(self) -> Option<Self> {
+        Operation::Softmax { t: self.0.clone() }.forward()
+    }
 }
 
 type AutogradNode = Arc<AutogradNodeData>;
@@ -1165,6 +1237,9 @@ enum Operation {
         t: AutogradNode,
         of: AutogradNode,
     },
+    Softmax {
+        t: AutogradNode,
+    }
 }
 
 impl Operation {
@@ -1545,6 +1620,22 @@ impl Operation {
         at.edge.backward(t_grad);
     }
 
+    fn softmax_backwards(t: AutogradNode, grad: CPUTensor) {
+        let (t_tensor, t_edge)= unravel_tensor(t);
+        // technically `t` in activation can be more than just an activation vector but actually a batch of activation
+        // vectors, so we need to compute numerical stability for each activation vector in the batch.
+        // to vaguely generalize this we will assume all non-last dimensions are the activations and then the last dimension is the batch.
+        let orig_shape = t_tensor.shape().to_vec();
+        let batch = *t_tensor.shape().last().unwrap();
+        let act_prod = t_tensor.data.len() / batch;
+        let softmax = t_tensor.softmax().unwrap().reshape(&[act_prod, batch]).unwrap();
+        let grad = grad.reshape(&[act_prod, batch]).unwrap();
+        let s_mul_g = softmax.mul(&grad).unwrap().sum().reshape(&[1, batch]).unwrap();
+        let g_mul_sum = grad.sub(&s_mul_g).unwrap();
+        let upstream = g_mul_sum.mul(&softmax).unwrap().reshape(&orig_shape).unwrap();
+        t_edge.backward(upstream);
+    }
+
     fn forward(self) -> Option<CPUAutograd> {
         let tensor = match &self {
             Self::Add { lhs, rhs } => lhs.tensor.add(&rhs.tensor),
@@ -1564,6 +1655,7 @@ impl Operation {
             Self::Reshape { t, shape } => t.tensor.clone().reshape(shape),
             Self::Transpose { t, axes } => t.tensor.clone().transpose(&axes),
             Self::AtArgmax { t, of } => t.tensor.at_argmax(&of.tensor),
+            Self::Softmax { t } => t.tensor.clone().softmax()
         };
         tensor.map(|tensor| {
             CPUAutograd(Arc::new(AutogradNodeData {
@@ -1628,6 +1720,9 @@ impl Operation {
             }
             Self::AtArgmax { t, of } => {
                 Self::at_argmax_backward(t.clone(), of, grad);
+            },
+            Self::Softmax { t } => {
+                Self::softmax_backwards(t.clone(), grad);
             }
         }
     }
@@ -1684,6 +1779,9 @@ impl Operation {
             }
             Self::AtArgmax { t, of } => {
                 Self::at_argmax_backward(t, &of, grad);
+            },
+            Self::Softmax { t } => {
+                Self::softmax_backwards(t, grad);
             }
         }
     }
@@ -1783,5 +1881,58 @@ mod tests {
             indices_for_grad.into_grad().is_none(),
             "indices tensor should not accumulate gradient"
         );
+    }
+
+    #[test]
+    fn softmax_respects_non_contiguous_layouts() {
+        // Arrange input so last dimension (batch) is contiguous but activation values are strided.
+        let base = tensor_with_data(vec![3, 2], &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        let transposed = base.transpose(&[1, 0]).unwrap();
+
+        // Expected softmax per batch over the two activation values differing by 3.0.
+        let exp_small = 1.0_f64;
+        let exp_large = 3.0_f64.exp();
+        let denom = exp_small + exp_large;
+        let expected_first = exp_small / denom;
+        let expected_second = exp_large / denom;
+
+        let result = transposed.clone().softmax().unwrap();
+        let expected = vec![
+            expected_first,
+            expected_first,
+            expected_first,
+            expected_second,
+            expected_second,
+            expected_second,
+        ];
+
+        for (idx, (actual, expected)) in result.data.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-12,
+                "mismatch at flat index {}: expected {}, got {}",
+                idx,
+                expected,
+                actual
+            );
+        }
+    }
+
+    #[test]
+    fn softmax_backward_with_unit_upstream_grad_is_zero() {
+        // The gradient of sum(softmax(x)) w.r.t x should be zero because outputs sum to one.
+        let logits = tensor_with_data(vec![2, 1], &[1.0, 2.0]).autograd();
+        let output = logits.clone().softmax().unwrap();
+
+        output.backward();
+        let grad = logits.into_grad().expect("expected gradient for logits");
+
+        for (i, g) in grad.data.iter().enumerate() {
+            assert!(
+                g.abs() < 1e-12,
+                "expected zero gradient at position {}, got {}",
+                i,
+                g
+            );
+        }
     }
 }

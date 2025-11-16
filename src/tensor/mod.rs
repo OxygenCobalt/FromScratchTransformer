@@ -35,6 +35,7 @@ where
     fn reshape(self, shape: &[usize]) -> Option<Self>;
     fn transpose(self, axes: &[usize]) -> Option<Self>;
     fn at_argmax(&self, of: &Self) -> Option<Self>;
+    fn softmax(self) -> Option<Self>;
 }
 
 pub trait DifferentiableTensor: Tensor {
