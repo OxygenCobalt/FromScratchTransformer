@@ -797,65 +797,38 @@ impl Tensor for CPUTensor {
     }
 
     fn softmax(mut self) -> Option<Self> {        
-        // technically `t` in activation can be more than just an activation vector but actually a batch of activation
-        // vectors, so we need to compute numerical stability for each activation vector in the batch.
-        // to vaguely generalize this we will assume all non-last dimensions are the activations and then the last dimension is the batch.
-        let batch_size = self.shape.last().unwrap();
-        let batch_stride = self.stride.last().unwrap();
-        let mut point = vec![0; self.ndim() - 1];
-        for i in 0..*batch_size { 
-            let mut idx = i * batch_stride;
-            let mut max = f64::MIN;
-            'iterate: loop {
-                if self.data[idx] > max {
-                    max = self.data[idx];
+        // what we want to do is be able to take the softmax
+        // while preserving many-dimensional structures, so
+        // we flatten down to [classes, cols] where cols is
+        // just the flattened remaining dimensions that we
+        // all factor into the norm.
+        let classes = self.shape[0];
+        let cols = self.data.len() / classes;
+        let flat_strides = self.view(&[classes, cols])?;
+        let mut idx = 0;
+        for i in 0..cols { 
+            let mut max = f64::NEG_INFINITY;
+            let mut max_idx = idx;
+            for j in 0..classes {
+                let x = self.data[max_idx];
+                if x > max {
+                    max = x;
                 }
-                for i in 0..self.ndim() - 1 {
-                    if point[i] == self.shape[i] - 1 {
-                        idx -= self.stride[i] * point[i];
-                        point[i] = 0;
-                    } else {
-                        idx += self.stride[i];
-                        point[i] += 1;
-                        continue 'iterate;
-                    }
-                }
-                break 'iterate;
+                max_idx += flat_strides[0];
             }
-            idx = i * batch_stride;
-            point.fill(0);
             let mut norm = 0.0;
-            'iterate: loop {
-                self.data[idx] = (self.data[idx] - max).exp();
-                norm += self.data[idx];
-                for i in 0..self.ndim() - 1 {
-                    if point[i] == self.shape[i] - 1 {
-                        idx -= self.stride[i] * point[i];
-                        point[i] = 0;
-                    } else {
-                        idx += self.stride[i];
-                        point[i] += 1;
-                        continue 'iterate;
-                    }
-                }
-                break 'iterate;
+            let mut pass1_idx = idx;
+            for j in 0..classes {
+                self.data[pass1_idx] = (self.data[pass1_idx] - max).exp();
+                norm += self.data[pass1_idx];
+                pass1_idx += flat_strides[0];
             }
-            idx = i * batch_stride;
-            point.fill(0);
-            'iterate: loop {
-                self.data[idx] /= norm;
-                for i in 0..self.ndim() - 1 {
-                    if point[i] == self.shape[i] - 1 {
-                        idx -= self.stride[i] * point[i];
-                        point[i] = 0;
-                    } else {
-                        idx += self.stride[i];
-                        point[i] += 1;
-                        continue 'iterate;
-                    }
-                }
-                break 'iterate;
+            let mut pass2_idx = idx;
+            for j in 0..classes {
+                self.data[pass2_idx] /= norm;
+                pass2_idx += flat_strides[0];
             }
+            idx += flat_strides[1];
         }
         Some(self)
     }
@@ -1630,20 +1603,26 @@ impl Operation {
         at.edge.backward(t_grad);
     }
 
-    fn softmax_backwards(t: AutogradNode, grad: CPUTensor) {
+    fn softmax_backward(t: AutogradNode, grad: CPUTensor) {
         let (t_tensor, t_edge)= unravel_tensor(t);
-        // technically `t` in activation can be more than just an activation vector but actually a batch of activation
-        // vectors, so we need to compute numerical stability for each activation vector in the batch.
-        // to vaguely generalize this we will assume all non-last dimensions are the activations and then the last dimension is the batch.
-        let orig_shape = t_tensor.shape().to_vec();
-        let batch = *t_tensor.shape().last().unwrap();
-        let act_prod = t_tensor.data.len() / batch;
-        let softmax = t_tensor.softmax().unwrap().reshape(&[act_prod, batch]).unwrap();
-        let grad = grad.reshape(&[act_prod, batch]).unwrap();
-        let s_mul_g = softmax.mul(&grad).unwrap().sum().reshape(&[1, batch]).unwrap();
-        let g_mul_sum = grad.sub(&s_mul_g).unwrap();
-        let upstream = g_mul_sum.mul(&softmax).unwrap().reshape(&orig_shape).unwrap();
-        t_edge.backward(upstream);
+        let orig = t_tensor.shape().to_vec();
+        let classes = t_tensor.shape()[0];
+        let cols = t_tensor.data.len() / classes;
+        let softmax = t_tensor.softmax().unwrap();
+        let flat_softmax = softmax.reshape(&[classes, cols]).unwrap();
+        let flat_grad = grad.reshape(&[classes, cols]).unwrap();
+        t_edge.backward(
+            flat_softmax.mul(
+                &flat_grad.sub(
+                    &flat_softmax
+                        .mul(&flat_grad).unwrap()
+                        .sum()
+                        .reshape(&[1, cols])
+                        .unwrap()
+                    ).unwrap()
+                ).unwrap()
+                .reshape(&orig).unwrap()
+        );
     }
 
     fn forward(self) -> Option<CPUAutograd> {
@@ -1732,7 +1711,7 @@ impl Operation {
                 Self::at_argmax_backward(t.clone(), of, grad);
             },
             Self::Softmax { t } => {
-                Self::softmax_backwards(t.clone(), grad);
+                Self::softmax_backward(t.clone(), grad);
             }
         }
     }
@@ -1791,7 +1770,7 @@ impl Operation {
                 Self::at_argmax_backward(t, &of, grad);
             },
             Self::Softmax { t } => {
-                Self::softmax_backwards(t, grad);
+                Self::softmax_backward(t, grad);
             }
         }
     }
