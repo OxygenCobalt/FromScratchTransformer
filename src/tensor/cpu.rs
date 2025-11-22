@@ -53,11 +53,21 @@ macro_rules! impl_arithmetic {
                     lhs_strides.push(0);
                     rhs_strides.push($other.stride[i]);
                 },
+                (None, Some(r)) => {
+                    new_shape.push(r);
+                    lhs_strides.push(0);
+                    rhs_strides.push($other.stride[i]);
+                }
                 (Some(l), Some(r)) if r == 1 => {
                     new_shape.push(l);
                     lhs_strides.push($self.stride[i]);
                     rhs_strides.push(0);
                 },
+                (Some(l), None) => {
+                    new_shape.push(l);
+                    lhs_strides.push($self.stride[i]);
+                    rhs_strides.push(0);
+                }
                 _ => return None
             }
         }
