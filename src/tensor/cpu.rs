@@ -195,31 +195,53 @@ impl CPUTensor {
         blocks
     }
 
-    fn contiguous_within(&self, within: std::ops::Range<usize>) -> bool {
+    fn view(&self, shape: &[usize]) -> Option<Vec<usize>> {
+        if Self::len(shape) != Self::len(&self.shape) {
+            return None;
+        }
         if self.ndim() == 0 {
-            return true;
+            // short circuit case for scalar so i dont have to deal
+            // with it in general reshaping code
+            // we can just return the same scalar since shape must be []
+            // and stride is already []
+            return Some(vec![]);
         }
-        if within.end - within.start <= 1 {
-            // single dimension is trivially contiguous
-            return true;
-        }
-        // want to avoid checking dimensions outside the within range
-        for i in within.start + 1..within.end {
-            if self.stride[i] != self.stride[i - 1] * self.shape[i - 1] {
-                return false;
-            }
-        }
-        true
+        Self::raw_view(&self.shape, &self.stride, shape)
     }
 
-    fn view(&self, shape: &[usize]) -> Option<Vec<usize>> {
-        let blocks = self.blocks();
+    fn raw_blocks(shape: &[usize], stride: &[usize]) -> Vec<Block> {
+        let mut blocks = vec![];
+        let mut block_len = 1;
+        let mut block_stride = 1;
+        for i in 0..shape.len() {
+            if i > 0 && stride[i] == stride[i - 1] * shape[i - 1] {
+                block_len *= shape[i];
+            } else {
+                if i > 0 {
+                    blocks.push(Block {
+                        len: block_len,
+                        stride: block_stride,
+                    });
+                }
+                block_len = shape[i];
+                block_stride = stride[i];
+            }
+        }
+        blocks.push(Block {
+            len: block_len,
+            stride: block_stride,
+        });
+        blocks
+    }
+
+    fn raw_view(old_shape: &[usize], stride: &[usize], new_shape: &[usize]) -> Option<Vec<usize>> {
+        let blocks = Self::raw_blocks(old_shape, stride);
         let mut block_iter = blocks.into_iter();
         let mut cur_blk = block_iter.next().unwrap();
         let mut cur_len = 1;
         let mut accd_stride = cur_blk.stride;
-        let mut new_stride = Vec::with_capacity(shape.len());
-        for (i, s) in shape.iter().enumerate() {
+        let mut new_stride = Vec::with_capacity(new_shape.len());
+        for (i, s) in new_shape.iter().enumerate() {
             cur_len *= *s;
             new_stride.push(accd_stride);
             accd_stride = accd_stride.saturating_mul(*s);
@@ -228,7 +250,7 @@ impl CPUTensor {
                 if let Some(blk) = block_iter.next() {
                     cur_blk = blk;
                     accd_stride = cur_blk.stride;
-                } else if i + 1 < shape.len() {
+                } else if i + 1 < new_shape.len() {
                     // no more blocks. in this case the remaining axes
                     // must be size 1. if not we will reject it later on
                     accd_stride = 0;
@@ -243,6 +265,206 @@ impl CPUTensor {
             return None;
         }
         Some(new_stride)
+    }
+
+    fn raw_transpose(shape: &[usize], stride: &[usize], axes: &[usize]) -> Option<(Vec<usize>, Vec<usize>)> {
+        if shape.len() != axes.len() || axes.iter().any(|i| *i >= shape.len()) {
+            return None;
+        }
+        let axis_set = axes.iter().copied().collect::<HashSet<usize>>();
+        if axis_set.len() != shape.len() || axis_set != (0..shape.len()).collect() {
+            return None;
+        }
+        let old_shape = shape.to_vec();
+        let old_stride = stride.to_vec();
+        let mut new_shape = vec![0; shape.len()];
+        let mut new_stride = vec![0; shape.len()];
+        for (i, j) in axes.iter().enumerate() {
+            new_shape[i] = old_shape[*j];
+            new_stride[i] = old_stride[*j];
+        }
+        Some((new_shape, new_stride))
+    }
+
+    fn raw_dot(
+        lhs_data: &[f64],
+        lhs_shape: &[usize],
+        lhs_stride: &[usize],
+        rhs_data: &[f64],
+        rhs_shape: &[usize],
+        rhs_stride: &[usize],
+        depth: usize,
+    ) -> Option<Self> {
+
+
+        fn contiguous_within(shape: &[usize], stride: &[usize], within: std::ops::Range<usize>) -> bool {
+            if shape.len() == 0 {
+                return true;
+            }
+            if within.end - within.start <= 1 {
+                // single dimension is trivially contiguous
+                return true;
+            }
+            // want to avoid checking dimensions outside the within range
+            for i in within.start + 1..within.end {
+                if stride[i] != stride[i - 1] * shape[i - 1] {
+                    return false;
+                }
+            }
+            true
+        }
+
+        if depth > lhs_shape.len() || depth > rhs_shape.len() {
+            return None;
+        }
+        let lhs_contraction = &lhs_shape[lhs_shape.len() - depth..];
+        let rhs_contraction = &rhs_shape[..depth];
+        if lhs_contraction != rhs_contraction {
+            return None;
+        }
+        let contraction_shape = lhs_contraction;
+
+        let lhs_survivors = &lhs_shape[..lhs_shape.len() - depth];
+        let rhs_survivors = &rhs_shape[depth..];
+        let lhs_survivor_len = lhs_survivors.len();
+        let rhs_survivor_len = rhs_survivors.len();
+        let mut new_shape: Vec<usize> = lhs_survivors.to_vec();
+        new_shape.extend_from_slice(rhs_survivors);
+        if contiguous_within(lhs_shape, &lhs_stride, (lhs_shape.len() - depth)..(lhs_shape.len())) && contiguous_within(rhs_shape, &rhs_stride, 0..depth) {
+            // fast case: dense axk kxb matmul
+            // TODO: implement block intersections so i can apply this method to arbitrary 
+            // non-contiguous tensors
+            let k = contraction_shape.iter().product::<usize>();
+            let a = lhs_survivors.iter().product::<usize>();
+            let b = rhs_survivors.iter().product::<usize>();
+            let lhs_2strides = Self::raw_view(lhs_shape, lhs_stride, &[a, k])?;
+            let rhs_2strides = Self::raw_view(rhs_shape, rhs_stride, &[k, b])?;
+            let mut new = Self::tensor(unsafe { FillUninit::new(vec![a, b]) }).unwrap();
+
+            // explicit slice definitions to signal to the compiler about aliasing
+            let mut lhs_idx = 0;
+            let mut rhs_idx = 0;
+            let new_data_mut = new.data.as_mut_slice();
+            let mut new_idx = 0;
+            for _ in 0..a {
+                for _ in 0..b {
+                    let mut sum = 0.0;
+                    for _ in 0..k {
+                        unsafe {
+                            sum += *lhs_data.get_unchecked(lhs_idx) * *rhs_data.get_unchecked(rhs_idx);
+                        }
+                        lhs_idx += lhs_2strides[1];
+                        rhs_idx += rhs_2strides[0];
+                    }
+                    unsafe {
+                        *new_data_mut.get_unchecked_mut(new_idx) = sum;
+                    }
+                    // rewind indices
+                    lhs_idx -= lhs_2strides[1] * k;
+                    rhs_idx -= rhs_2strides[0] * k;
+
+                    new_idx += new.stride[1];
+                    rhs_idx += rhs_2strides[1];
+                }
+                rhs_idx = 0;
+                lhs_idx += lhs_2strides[0];
+                new_idx -= new.stride[1] * b;
+                new_idx += new.stride[0];
+            }
+            // reshape back to original shape
+            return Some(new.reshape(&new_shape).unwrap());
+        }
+
+        let mut new = Self::tensor(unsafe { FillUninit::new(new_shape) }).unwrap();
+        let mut new_point = vec![0; new.shape.len()];
+        let mut new_ptr = new.data.as_mut_ptr();
+        let mut lhs_ptr = lhs_data.as_ptr();
+        let mut rhs_ptr = rhs_data.as_ptr();
+
+        let contraction_magnitude: usize = contraction_shape.iter().product();
+        let lhs_contraction_stride = &lhs_stride[lhs_stride.len() - depth..];
+        let mut lhs_contract_offsets: Vec<usize> = Vec::with_capacity(contraction_magnitude);
+        let rhs_contraction_stride = &rhs_stride[..depth];
+        let mut rhs_contract_offsets: Vec<usize> = Vec::with_capacity(contraction_magnitude);
+
+        let mut contraction_point = vec![0; contraction_shape.len()];
+        let mut lhs_contract_idx = 0;
+        let mut rhs_contract_idx = 0;
+        'precompute: loop {
+            lhs_contract_offsets.push(lhs_contract_idx);
+            rhs_contract_offsets.push(rhs_contract_idx);
+            for i in 0..contraction_point.len() {
+                let con_ref = unsafe { contraction_point.get_unchecked_mut(i) };
+                let con = *con_ref;
+                let csh = unsafe { *contraction_shape.get_unchecked(i) };
+                let lst = unsafe { *lhs_contraction_stride.get_unchecked(i) };
+                let rst = unsafe { *rhs_contraction_stride.get_unchecked(i) };
+                if con == csh - 1 {
+                    lhs_contract_idx -= lst * con;
+                    rhs_contract_idx -= rst * con;
+                    *con_ref = 0;
+                } else {
+                    lhs_contract_idx += lst;
+                    rhs_contract_idx += rst;
+                    *con_ref += 1;
+                    continue 'precompute;
+                }
+            }
+            break;
+        }
+        'iterate: loop {
+            let mut sum = 0.0;
+            let mut i = 0;
+            let mut lhs_offset_ptr = lhs_contract_offsets.as_ptr();
+            let mut rhs_offset_ptr = rhs_contract_offsets.as_ptr();
+
+            while i < contraction_magnitude {
+                sum += unsafe { *lhs_ptr.add(*lhs_offset_ptr) * *rhs_ptr.add(*rhs_offset_ptr) };
+                i += 1;
+                lhs_offset_ptr = unsafe { lhs_offset_ptr.add(1) };
+                rhs_offset_ptr = unsafe { rhs_offset_ptr.add(1) };
+            }
+            unsafe {
+                *new_ptr = sum;
+            }
+
+            for i in 0..new.ndim() {
+                let npt_ref = unsafe { new_point.get_unchecked_mut(i) };
+                let np = *npt_ref;
+                let nsh = unsafe { *new.shape.get_unchecked(i) };
+                let nst = unsafe { *new.stride.get_unchecked(i) };
+                if np == nsh - 1 {
+                    *npt_ref = 0;
+                    new_ptr = unsafe { new_ptr.sub(nst * np) };
+                    if i < lhs_survivor_len {
+                        let lst = unsafe { *lhs_stride.get_unchecked(i) };
+                        lhs_ptr = unsafe { lhs_ptr.sub(lst * np) };
+                    }
+                    if i >= lhs_survivor_len && rhs_survivor_len > 0 {
+                        let rhs_axis = depth + (i - lhs_survivor_len);
+                        let rst = unsafe { *rhs_stride.get_unchecked(rhs_axis) };
+                        rhs_ptr = unsafe { rhs_ptr.sub(rst * np) };
+                    }
+                } else {
+                    *npt_ref += 1;
+                    new_ptr = unsafe { new_ptr.add(nst) };
+                    if i < lhs_survivor_len {
+                        let lst = unsafe { *lhs_stride.get_unchecked(i) };
+                        lhs_ptr = unsafe { lhs_ptr.add(lst) }
+                    }
+                    if i >= lhs_survivor_len {
+                        let rhs_axis = depth + (i - lhs_survivor_len);
+                        let rst = unsafe { *rhs_stride.get_unchecked(rhs_axis) };
+                        rhs_ptr = unsafe { rhs_ptr.add(rst) }
+                    }
+                    continue 'iterate;
+                }
+            }
+
+            break;
+        }
+
+        Some(new)
     }
 }
 
@@ -324,159 +546,15 @@ impl Tensor for CPUTensor {
     }
 
     fn dot(&self, other: &Self, depth: usize) -> Option<Self> {
-        if depth > self.shape.len() || depth > other.shape.len() {
-            return None;
-        }
-        let lhs_contraction = &self.shape[self.shape.len() - depth..];
-        let rhs_contraction = &other.shape[..depth];
-        if lhs_contraction != rhs_contraction {
-            return None;
-        }
-        let contraction_shape = lhs_contraction;
-
-        let lhs_survivors = &self.shape[..self.shape.len() - depth];
-        let rhs_survivors = &other.shape[depth..];
-        let lhs_survivor_len = lhs_survivors.len();
-        let rhs_survivor_len = rhs_survivors.len();
-        let mut new_shape: Vec<usize> = lhs_survivors.to_vec();
-        new_shape.extend_from_slice(rhs_survivors);
-        if self.contiguous_within((self.shape.len() - depth)..(self.shape.len())) && other.contiguous_within(0..depth) {
-            // fast case: dense axk kxb matmul
-            // TODO: implement block intersections so i can apply this method to arbitrary 
-            // non-contiguous tensors
-            let k = contraction_shape.iter().product::<usize>();
-            let a = lhs_survivors.iter().product::<usize>();
-            let b = rhs_survivors.iter().product::<usize>();
-            let lhs_2strides = self.view(&[a, k])?;
-            let rhs_2strides = other.view(&[k, b])?;
-            let mut new = Self::tensor(unsafe { FillUninit::new(vec![a, b]) }).unwrap();
-
-            // explicit slice definitions to signal to the compiler about aliasing
-            let lhs_data = self.data.as_slice();
-            let mut lhs_idx = 0;
-            let rhs_data = other.data.as_slice();
-            let mut rhs_idx = 0;
-            let new_data_mut = new.data.as_mut_slice();
-            let mut new_idx = 0;
-            for _ in 0..a {
-                for _ in 0..b {
-                    let mut sum = 0.0;
-                    for _ in 0..k {
-                        unsafe {
-                            sum += *lhs_data.get_unchecked(lhs_idx) * *rhs_data.get_unchecked(rhs_idx);
-                        }
-                        lhs_idx += lhs_2strides[1];
-                        rhs_idx += rhs_2strides[0];
-                    }
-                    unsafe {
-                        *new_data_mut.get_unchecked_mut(new_idx) = sum;
-                    }
-                    // rewind indices
-                    lhs_idx -= lhs_2strides[1] * k;
-                    rhs_idx -= rhs_2strides[0] * k;
-
-                    new_idx += new.stride[1];
-                    rhs_idx += rhs_2strides[1];
-                }
-                rhs_idx = 0;
-                lhs_idx += lhs_2strides[0];
-                new_idx -= new.stride[1] * b;
-                new_idx += new.stride[0];
-            }
-            // reshape back to original shape
-            return Some(new.reshape(&new_shape).unwrap());
-        }
-
-        let mut new = Self::tensor(unsafe { FillUninit::new(new_shape) }).unwrap();
-        let mut new_point = vec![0; new.shape.len()];
-        let mut new_ptr = new.data.as_mut_ptr();
-        let mut lhs_ptr = self.data.as_ptr();
-        let mut rhs_ptr = other.data.as_ptr();
-
-        let contraction_magnitude: usize = contraction_shape.iter().product();
-        let lhs_contraction_stride = &self.stride[self.ndim() - depth..];
-        let mut lhs_contract_offsets: Vec<usize> = Vec::with_capacity(contraction_magnitude);
-        let rhs_contraction_stride = &other.stride[..depth];
-        let mut rhs_contract_offsets: Vec<usize> = Vec::with_capacity(contraction_magnitude);
-
-        let mut contraction_point = vec![0; contraction_shape.len()];
-        let mut lhs_contract_idx = 0;
-        let mut rhs_contract_idx = 0;
-        'precompute: loop {
-            lhs_contract_offsets.push(lhs_contract_idx);
-            rhs_contract_offsets.push(rhs_contract_idx);
-            for i in 0..contraction_point.len() {
-                let con_ref = unsafe { contraction_point.get_unchecked_mut(i) };
-                let con = *con_ref;
-                let csh = unsafe { *contraction_shape.get_unchecked(i) };
-                let lst = unsafe { *lhs_contraction_stride.get_unchecked(i) };
-                let rst = unsafe { *rhs_contraction_stride.get_unchecked(i) };
-                if con == csh - 1 {
-                    lhs_contract_idx -= lst * con;
-                    rhs_contract_idx -= rst * con;
-                    *con_ref = 0;
-                } else {
-                    lhs_contract_idx += lst;
-                    rhs_contract_idx += rst;
-                    *con_ref += 1;
-                    continue 'precompute;
-                }
-            }
-            break;
-        }
-        'iterate: loop {
-            let mut sum = 0.0;
-            let mut i = 0;
-            let mut lhs_offset_ptr = lhs_contract_offsets.as_ptr();
-            let mut rhs_offset_ptr = rhs_contract_offsets.as_ptr();
-
-            while i < contraction_magnitude {
-                sum += unsafe { *lhs_ptr.add(*lhs_offset_ptr) * *rhs_ptr.add(*rhs_offset_ptr) };
-                i += 1;
-                lhs_offset_ptr = unsafe { lhs_offset_ptr.add(1) };
-                rhs_offset_ptr = unsafe { rhs_offset_ptr.add(1) };
-            }
-            unsafe {
-                *new_ptr = sum;
-            }
-
-            for i in 0..new.ndim() {
-                let npt_ref = unsafe { new_point.get_unchecked_mut(i) };
-                let np = *npt_ref;
-                let nsh = unsafe { *new.shape.get_unchecked(i) };
-                let nst = unsafe { *new.stride.get_unchecked(i) };
-                if np == nsh - 1 {
-                    *npt_ref = 0;
-                    new_ptr = unsafe { new_ptr.sub(nst * np) };
-                    if i < lhs_survivor_len {
-                        let lst = unsafe { *self.stride.get_unchecked(i) };
-                        lhs_ptr = unsafe { lhs_ptr.sub(lst * np) };
-                    }
-                    if i >= lhs_survivor_len && rhs_survivor_len > 0 {
-                        let rhs_axis = depth + (i - lhs_survivor_len);
-                        let rst = unsafe { *other.stride.get_unchecked(rhs_axis) };
-                        rhs_ptr = unsafe { rhs_ptr.sub(rst * np) };
-                    }
-                } else {
-                    *npt_ref += 1;
-                    new_ptr = unsafe { new_ptr.add(nst) };
-                    if i < lhs_survivor_len {
-                        let lst = unsafe { *self.stride.get_unchecked(i) };
-                        lhs_ptr = unsafe { lhs_ptr.add(lst) }
-                    }
-                    if i >= lhs_survivor_len {
-                        let rhs_axis = depth + (i - lhs_survivor_len);
-                        let rst = unsafe { *other.stride.get_unchecked(rhs_axis) };
-                        rhs_ptr = unsafe { rhs_ptr.add(rst) }
-                    }
-                    continue 'iterate;
-                }
-            }
-
-            break;
-        }
-
-        Some(new)
+        Self::raw_dot(
+            &self.data,
+            &self.shape,
+            &self.stride,
+            &other.data,
+            &other.shape,
+            &other.stride,
+            depth,
+        )
     }
 
     fn sum(&self) -> Self {
@@ -1333,25 +1411,35 @@ impl Operation {
     }
 
     fn dot_backward(lhs: AutogradNode, rhs: AutogradNode, depth: usize, grad: CPUTensor) {
-        let (lhs_tensor, lhs_edge) = unravel_tensor(lhs);
-        let (rhs_tensor, rhs_edge) = unravel_tensor(rhs);
-        let lhs_shift = rhs_tensor.ndim() - depth;
-        let mut rhs_axes: Vec<usize> = (0..rhs_tensor.ndim()).collect();
+        let lhs_shift = rhs.tensor.ndim() - depth;
+        let mut rhs_axes: Vec<usize> = (0..rhs.tensor.ndim()).collect();
         rhs_axes.rotate_right(lhs_shift);
-        lhs_edge.backward(
-            grad.dot(&rhs_tensor.transpose(&rhs_axes).unwrap(), lhs_shift)
-                .unwrap(),
+        let (rhs_transposed_shape, rhs_transposed_stride) = CPUTensor::raw_transpose(&rhs.tensor.shape, &rhs.tensor.stride, &rhs_axes).unwrap();
+        lhs.edge.backward(
+            CPUTensor::raw_dot(
+                &grad.data,
+                &grad.shape,
+                &grad.stride,
+                &rhs.tensor.data,
+                rhs_transposed_shape.as_slice(),
+                rhs_transposed_stride.as_slice(),
+                lhs_shift,
+            ).unwrap()
         );
-
-        let rhs_shift = lhs_tensor.ndim() - depth;
-        let mut lhs_axes: Vec<usize> = (0..lhs_tensor.ndim()).collect();
+        let rhs_shift = lhs.tensor.ndim() - depth;
+        let mut lhs_axes: Vec<usize> = (0..lhs.tensor.ndim()).collect();
         lhs_axes.rotate_left(rhs_shift);
-        rhs_edge.backward(
-            lhs_tensor
-                .transpose(&lhs_axes)
-                .unwrap()
-                .dot(&grad, rhs_shift)
-                .unwrap(),
+        let (lhs_transposed_shape, lhs_transposed_stride) = CPUTensor::raw_transpose(&lhs.tensor.shape, &lhs.tensor.stride, &lhs_axes).unwrap();
+        rhs.edge.backward(
+            CPUTensor::raw_dot(
+                &lhs.tensor.data,
+                &lhs_transposed_shape,
+                &lhs_transposed_stride,
+                &grad.data,
+                &grad.shape,
+                &grad.stride,
+                rhs_shift,
+            ).unwrap()
         );
     }
 
