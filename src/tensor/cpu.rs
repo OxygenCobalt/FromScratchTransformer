@@ -18,7 +18,26 @@ struct Block {
 
 macro_rules! impl_arithmetic {
     ($self:expr, $op:tt, $other:expr) => {{
+        if $other.ndim() == 0 {
+            // fast case 1: broadcasting scalar
+            let mut new_data = Vec::with_capacity($self.data.len());
+            unsafe { new_data.set_len($self.data.len()); }
+            let new_slice = new_data.as_mut_slice();
+            let lhs_slice = $self.data.as_slice();
+            let rhs = $other.data[0];
+            for i in 0..$self.data.len() {
+                unsafe {
+                    *new_slice.get_unchecked_mut(i) = *lhs_slice.get_unchecked(i) $op rhs;
+                }
+            }
+            return Some(Self {
+                shape: $self.shape.clone(),
+                stride: $self.stride.clone(),
+                data: new_data,
+            });
+        }
         if $self.shape == $other.shape && $self.stride == $other.stride {
+            // fast case 2: same shape and stride === zip
             let mut new_data = Vec::with_capacity($self.data.len());
             unsafe { new_data.set_len($self.data.len()); }
             let new_slice = new_data.as_mut_slice();
