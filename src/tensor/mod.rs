@@ -39,13 +39,15 @@ where
 }
 
 pub trait DifferentiableTensor: Tensor {
-    type Autograd: Autograd<Self>;
-    fn autograd(self) -> Self::Autograd;
+    type Autograd<'a>: Autograd<Parent = Self> where Self: 'a;
+    fn autograd(&self) -> Self::Autograd<'_>;
+    fn into_autograd<'a>(self) -> Self::Autograd<'a>;
 }
 
-pub trait Autograd<Parent>: Tensor {
+pub trait Autograd: Tensor {
+    type Parent: Tensor;
     fn backward(self);
-    fn into_grad(self) -> Option<Parent>;
+    fn into_grad(self) -> Option<Self::Parent>;
 }
 
 pub trait TensorMut: Tensor {

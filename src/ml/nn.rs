@@ -81,7 +81,7 @@ impl<T: TensorMut + DifferentiableTensor + Clone> NeuralNetwork<T> {
                     input: T::tensor(Tt(concat_example.input)).unwrap(),
                     output: T::tensor(Tt(concat_example.output)).unwrap(),
                 };
-                let auto_axons: Vec<Axon<T::Autograd>> =
+                let auto_axons: Vec<Axon<T::Autograd<'_>>> =
                     init.nn.axons.iter_mut().map(|a| a.train()).collect();
                 let mut current = example.input.autograd();
                 for axon in &auto_axons {
@@ -91,10 +91,14 @@ impl<T: TensorMut + DifferentiableTensor + Clone> NeuralNetwork<T> {
                 std::mem::drop(current);
                 total_loss += loss.iter().sum::<f64>() / *loss.shape().first().unwrap_or(&1) as f64;
                 loss.backward();
+                let grad_axon = auto_axons
+                    .into_iter()
+                    .map(|a| a.into_grad().unwrap())
+                    .collect::<Vec<_>>();
 
                 let c = hyperparams.learning_rate / hyperparams.batch_size as f64;
-                for (axon, auto_axon) in init.nn.axons.iter_mut().zip(auto_axons.into_iter()) {
-                    axon.commit(auto_axon, c);
+                for (axon, grad_axon) in init.nn.axons.iter_mut().zip(grad_axon.into_iter()) {
+                    axon.commit(grad_axon, c);
                 }
                 sgd_bar.inc(1);
                 sgd_bar.set_message(format!["{:.3}", total_loss / (i + 1) as f64]);
@@ -108,7 +112,7 @@ impl<T: TensorMut + DifferentiableTensor + Clone> NeuralNetwork<T> {
 
 impl<T: TensorMut + DifferentiableTensor + Send + Sync> NeuralNetwork<T>
 where
-    T::Autograd: Send,
+    for<'a> T::Autograd<'a>: Send,
 {
     pub fn par_train(
         setup: &impl Setup<T>,
@@ -152,28 +156,30 @@ where
             let total_loss = AtomicF64::new(0.0);
             for (i, batch) in batches.into_iter().enumerate() {
                 let c = hyperparams.learning_rate / hyperparams.batch_size as f64;
-                let all_auto_axons: Vec<_> = batch
+                let grad_axons: Vec<_> = batch
                     .map(|example| {
-                        let auto_axons: Vec<Axon<T::Autograd>> =
+                        let auto_axons: Vec<Axon<T::Autograd<'_>>> =
                             init.nn.axons.iter().map(|a| a.train()).collect();
-                        let mut current = example.input().autograd();
+                        let input = example.input();
+                        let mut current = input.into_autograd();
                         for axon in &auto_axons {
                             current = axon.forward(current);
                         }
-                        let loss = loss.loss(&current, &example.output().autograd());
+                        let output = example.output();
+                        let loss = loss.loss(&current, &output.into_autograd());
                         total_loss.fetch_add(
                             loss.iter().sum::<f64>() / *loss.shape().first().unwrap_or(&1) as f64,
                             Ordering::Relaxed,
                         );
                         std::mem::drop(current);
                         loss.backward();
-                        auto_axons
+                        auto_axons.into_iter().map(|a| a.into_grad().unwrap()).collect::<Vec<_>>()
                     })
                     .collect();
 
-                for auto_axon in all_auto_axons {
-                    for (axon, auto_axon) in init.nn.axons.iter_mut().zip(auto_axon.into_iter()) {
-                        axon.commit(auto_axon, c);
+                for grad_axon in grad_axons {
+                    for (axon, grad_axon) in init.nn.axons.iter_mut().zip(grad_axon.into_iter()) {
+                        axon.commit(grad_axon, c);
                     }
                 }
                 sgd_bar.inc(1);
@@ -480,12 +486,12 @@ impl<T: Tensor> Axon<T> {
 }
 
 impl<T: DifferentiableTensor + TensorMut> Axon<T> {
-    fn train<'a>(&self) -> Axon<T::Autograd> {
+    fn train<'a>(&'a self) -> Axon<T::Autograd<'a>> {
         match self {
             Self::Dense { ff } => Axon::Dense {
                 ff: FeedForward {
-                    weights: ff.weights.clone().autograd(),
-                    biases: ff.biases.clone().autograd(),
+                    weights: ff.weights.autograd(),
+                    biases: ff.biases.autograd(),
                     activation: ff.activation,
                     flattened_input_ndim: ff.flattened_input_ndim,
                     flattened_input_shape: ff.flattened_input_shape,
@@ -503,8 +509,8 @@ impl<T: DifferentiableTensor + TensorMut> Axon<T> {
                 }
                 Axon::Dense {
                     ff: FeedForward {
-                        weights: dropped_weights.autograd(),
-                        biases: ff.biases.clone().autograd(),
+                        weights: dropped_weights.into_autograd(),
+                        biases: ff.biases.clone().into_autograd(),
                         activation: ff.activation,
                         flattened_input_ndim: ff.flattened_input_ndim,
                         flattened_input_shape: ff.flattened_input_shape,
@@ -513,8 +519,8 @@ impl<T: DifferentiableTensor + TensorMut> Axon<T> {
             }
             Self::Conv2D { conv } => Axon::Conv2D {
                 conv: Conv2D {
-                    weights: conv.weights.clone().autograd(),
-                    biases: conv.biases.clone().autograd(),
+                    weights: conv.weights.autograd(),
+                    biases: conv.biases.autograd(),
                     field: conv.field,
                     activation: conv.activation,
                 },
@@ -525,52 +531,99 @@ impl<T: DifferentiableTensor + TensorMut> Axon<T> {
                     phantom: PhantomData,
                 },
             },
-            Self::Embeddings { embeddings } => Axon::Embeddings { embeddings: Embeddings { c: embeddings.c.clone().autograd() } }
+            Self::Embeddings { embeddings } => Axon::Embeddings { embeddings: Embeddings { c: embeddings.c.autograd() } }
         }
     }
 
-    pub fn commit(&mut self, axon: Axon<T::Autograd>, c: f64) -> Option<()> {
+    pub fn commit<'a>(&'a mut self, grad_axon: Axon<T>, c: f64) -> Option<()> {
         let scale = T::scalar(c);
-        match (self, axon) {
-            (Self::Dense { ff }, Axon::<T::Autograd>::Dense { ff: autoff }) => {
+        match (self, grad_axon) {
+            (Self::Dense { ff }, Axon::<T>::Dense { ff: gradff }) => {
                 ff.weights = ff
                     .weights
-                    .sub(&autoff.weights.into_grad().unwrap().mul(&scale).unwrap())
+                    .sub(&gradff.weights.mul(&scale).unwrap())
                     .unwrap();
                 ff.biases = ff
                     .biases
-                    .sub(&autoff.biases.into_grad().unwrap().mul(&scale).unwrap())
+                    .sub(&gradff.biases.mul(&scale).unwrap())
                     .unwrap();
             }
-            (Self::Dropout { ff, .. }, Axon::<T::Autograd>::Dropout { ff: autoff, .. }) => {
+            (Self::Dropout { ff, .. }, Axon::<T>::Dropout { ff: gradff, .. }) => {
                 ff.weights = ff
                     .weights
-                    .sub(&autoff.weights.into_grad().unwrap().mul(&scale).unwrap())
+                    .sub(&gradff.weights.mul(&scale).unwrap())
                     .unwrap();
                 ff.biases = ff
                     .biases
-                    .sub(&autoff.biases.into_grad().unwrap().mul(&scale).unwrap())
+                    .sub(&gradff.biases.mul(&scale).unwrap())
                     .unwrap();
             }
-            (Self::Conv2D { conv }, Axon::<T::Autograd>::Conv2D { conv: autoconv }) => {
+            (Self::Conv2D { conv }, Axon::<T>::Conv2D { conv: gradconv }) => {
                 conv.weights = conv
                     .weights
-                    .sub(&autoconv.weights.into_grad().unwrap().mul(&scale).unwrap())
+                    .sub(&gradconv.weights.mul(&scale).unwrap())
                     .unwrap();
                 conv.biases = conv
                     .biases
-                    .sub(&autoconv.biases.into_grad().unwrap().mul(&scale).unwrap())
+                    .sub(&gradconv.biases.mul(&scale).unwrap())
                     .unwrap();
             }
-            (Self::Pool2D { .. }, Axon::<T::Autograd>::Pool2D { .. }) => {
+            (Self::Pool2D { .. }, Axon::<T>::Pool2D { .. }) => {
                 // pooling layers have only a fixed field config, nothing to commit
             }
-            (Self::Embeddings { embeddings }, Axon::<T::Autograd>::Embeddings { embeddings: autoembeddings }) => {
-                embeddings.c = embeddings.c.sub(&autoembeddings.c.into_grad().unwrap().mul(&scale).unwrap()).unwrap()
+            (Self::Embeddings { embeddings }, Axon::<T>::Embeddings { embeddings: autoembeddings }) => {
+                let c_grad = autoembeddings.c;
+                // dbg!(embeddings.c.shape(), c_grad.mul(&scale).unwrap().shape());
+                embeddings.c = embeddings.c.sub(&c_grad.mul(&scale).unwrap()).unwrap();
             }
             _ => return None,
         }
         Some(())
+    }
+}
+
+impl <'a, T: Autograd> Axon<T> {
+    pub fn into_grad(self) -> Option<Axon<T::Parent>> {
+        match self {
+            Self::Dense { ff } => Some(Axon::Dense {
+                ff: FeedForward {
+                    weights: ff.weights.into_grad()?,
+                    biases: ff.biases.into_grad()?,
+                    activation: ff.activation,
+                    flattened_input_ndim: ff.flattened_input_ndim,
+                    flattened_input_shape: ff.flattened_input_shape,
+                },
+            }),
+            Self::Dropout { ff, rate } => Some(Axon::Dropout {
+                ff: FeedForward {
+                    weights: ff.weights.into_grad()?,
+                    biases: ff.biases.into_grad()?,
+                    activation: ff.activation,
+                    flattened_input_ndim: ff.flattened_input_ndim,
+                    flattened_input_shape: ff.flattened_input_shape,
+                },
+                rate,
+            }),
+            Self::Conv2D { conv } => Some(Axon::Conv2D {
+                conv: Conv2D {
+                    weights: conv.weights.into_grad()?,
+                    biases: conv.biases.into_grad()?,
+                    field: conv.field,
+                    activation: conv.activation,
+                },
+            }),
+            Self::Pool2D { pool } => Some(Axon::Pool2D {
+                pool: Pool2D {
+                    field: pool.field,
+                    phantom: PhantomData,
+                },
+            }),
+            Self::Embeddings { embeddings } => Some(Axon::Embeddings {
+                embeddings: Embeddings {
+                    c: embeddings.c.into_grad()?
+                }
+            }),
+        }
     }
 }
 

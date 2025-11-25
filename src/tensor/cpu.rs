@@ -932,10 +932,20 @@ impl Tensor for CPUTensor {
 }
 
 impl DifferentiableTensor for CPUTensor {
-    type Autograd = CPUAutograd;
-    fn autograd(self) -> Self::Autograd {
+    type Autograd<'a> = CPUAutograd<'a> where Self: 'a;
+    fn autograd(&self) -> Self::Autograd<'_> {
         CPUAutograd(AutogradNode::new(AutogradNodeData {
-            tensor: self,
+            tensor: Cow::Borrowed(self),
+            edge: AutogradEdge {
+                grad: Mutex::new(None),
+                op: None,
+            }
+        }))
+    }
+
+    fn into_autograd<'a>(self) -> Self::Autograd<'a> {
+        CPUAutograd(AutogradNode::new(AutogradNodeData {
+            tensor: Cow::Owned(self),
             edge: AutogradEdge {
                 grad: Mutex::new(None),
                 op: None,
@@ -1010,9 +1020,10 @@ impl TensorIO for CPUTensor {
 }
 
 #[derive(Clone)]
-pub struct CPUAutograd(AutogradNode);
+pub struct CPUAutograd<'a>(AutogradNode<'a>);
 
-impl Autograd<CPUTensor> for CPUAutograd {
+impl <'a> Autograd for CPUAutograd<'a> {
+    type Parent = CPUTensor;
     fn backward(self) {    
         let identity = 
             CPUTensor::tensor(Fill {
@@ -1028,10 +1039,10 @@ impl Autograd<CPUTensor> for CPUAutograd {
     }
 }
 
-impl Tensor for CPUAutograd {
+impl <'a> Tensor for CPUAutograd<'a> {
     fn scalar(c: impl Into<f64>) -> Self {
         Self(AutogradNode::new(AutogradNodeData {
-            tensor: CPUTensor::scalar(c),
+            tensor: Cow::Owned(CPUTensor::scalar(c)),
             edge: AutogradEdge {
                 grad: Mutex::new(None),
                 op: None,
@@ -1041,7 +1052,7 @@ impl Tensor for CPUAutograd {
 
     fn vector(v: impl Into<Vec<f64>>) -> Option<Self> {
         Some(Self(AutogradNode::new(AutogradNodeData {
-            tensor: CPUTensor::vector(v)?,
+            tensor: Cow::Owned(CPUTensor::vector(v)?),
             edge: AutogradEdge {
                 grad: Mutex::new(None),
                 op: None,
@@ -1051,7 +1062,7 @@ impl Tensor for CPUAutograd {
 
     fn tensor(tv: impl TensorInit) -> Option<Self> {
         Some(Self(AutogradNode::new(AutogradNodeData {
-            tensor: CPUTensor::tensor(tv)?,
+            tensor: Cow::Owned(CPUTensor::tensor(tv)?),
             edge: AutogradEdge {
                 grad: Mutex::new(None),
                 op: None,
@@ -1185,16 +1196,16 @@ impl Tensor for CPUAutograd {
     }
 }
 
-type AutogradNode = Arc<AutogradNodeData>;
+type AutogradNode<'a> = Arc<AutogradNodeData<'a>>;
 
-struct AutogradNodeData {
-    tensor: CPUTensor,
-    edge: AutogradEdge,
+struct AutogradNodeData<'a> {
+    tensor: Cow<'a, CPUTensor>,
+    edge: AutogradEdge<'a>,
 }
 
-struct AutogradEdge {
+struct AutogradEdge<'a> {
     grad: Mutex<Option<CPUTensor>>,
-    op: Option<Operation>
+    op: Option<Operation<'a>>
 }
 
 fn unravel(node: AutogradNode) -> UnraveledEdge {
@@ -1206,7 +1217,7 @@ fn unravel(node: AutogradNode) -> UnraveledEdge {
     }
 }
 
-fn unravel_tensor(node: AutogradNode) -> (CPUTensor, UnraveledEdge) {
+fn unravel_tensor<'a>(node: AutogradNode<'a>) -> (Cow<'a, CPUTensor>, UnraveledEdge<'a>) {
     if Arc::strong_count(&node) == 1 {
         let owned=  Arc::try_unwrap(node).ok().unwrap();
         (owned.tensor, UnraveledEdge::Edge(owned.edge))
@@ -1215,12 +1226,12 @@ fn unravel_tensor(node: AutogradNode) -> (CPUTensor, UnraveledEdge) {
     }
 }
     
-enum UnraveledEdge {
-    Edge(AutogradEdge),
-    Node(AutogradNode),
+enum UnraveledEdge<'a> {
+    Edge(AutogradEdge<'a>),
+    Node(AutogradNode<'a>),
 }
 
-impl UnraveledEdge {
+impl<'a> UnraveledEdge<'a> {
     pub fn backward(self, grad: CPUTensor) {
         match self {
             Self::Edge(edge) => edge.take_backward(grad),
@@ -1229,7 +1240,7 @@ impl UnraveledEdge {
     }
 }
 
-impl AutogradEdge {
+impl<'a> AutogradEdge<'a> {
     pub fn backward(&self, grad: CPUTensor) {
         if let Some(op) = &self.op {
             op.backward(grad);
@@ -1253,80 +1264,80 @@ impl AutogradEdge {
     }
 }
 
-enum Operation {
+enum Operation<'a> {
     Add {
-        lhs: AutogradNode,
-        rhs: AutogradNode,
+        lhs: AutogradNode<'a>,
+        rhs: AutogradNode<'a>,
     },
     Sub {
-        lhs: AutogradNode,
-        rhs: AutogradNode,
+        lhs: AutogradNode<'a>,
+        rhs: AutogradNode<'a>,
     },
     Mul {
-        lhs: AutogradNode,
-        rhs: AutogradNode,
+        lhs: AutogradNode<'a>,
+        rhs: AutogradNode<'a>,
     },
     Dot {
-        lhs: AutogradNode,
-        rhs: AutogradNode,
+        lhs: AutogradNode<'a>,
+        rhs: AutogradNode<'a>,
         depth: usize,
     },
     Sum {
-        t: AutogradNode,
+        t: AutogradNode<'a>,
     },
     Ln {
-        t: AutogradNode,
+        t: AutogradNode<'a>,
     },
     Exp {
-        t: AutogradNode,
+        t: AutogradNode<'a>,
     },
     Tanh {
-        t: AutogradNode,
+        t: AutogradNode<'a>,
     },
     Pow {
-        t: AutogradNode,
+        t: AutogradNode<'a>,
         i: i32,
     },
     Neg {
-        t: AutogradNode,
+        t: AutogradNode<'a>,
     },
     Max {
-        t: AutogradNode,
+        t: AutogradNode<'a>,
         u: f64,
     },
     ColsAt {
-        t: AutogradNode,
-        indices: AutogradNode,
+        t: AutogradNode<'a>,
+        indices: AutogradNode<'a>,
     },
     Colify {
-        t: AutogradNode,
+        t: AutogradNode<'a>,
         field: Field,
     },
     Colmax {
-        t: AutogradNode,
+        t: AutogradNode<'a>,
     },
     Reshape {
-        t: AutogradNode,
+        t: AutogradNode<'a>,
         shape: Vec<usize>,
     },
     Transpose {
-        t: AutogradNode,
+        t: AutogradNode<'a>,
         axes: Vec<usize>,
     },
     AtArgmax {
-        t: AutogradNode,
-        of: AutogradNode,
+        t: AutogradNode<'a>,
+        of: AutogradNode<'a>,
     },
     Softmax {
-        t: AutogradNode,
+        t: AutogradNode<'a>,
     }
 }
 
-impl Operation {
+impl <'a> Operation<'a> {
     #[inline(always)]
     fn arithmetic_backward(
-        lhs: AutogradNode,
-        rhs: AutogradNode,
+        lhs: AutogradNode<'a>,
+        rhs: AutogradNode<'a>,
         grad: CPUTensor,
         op: impl Fn(&f64, &f64) -> (f64, f64),
     ) {
@@ -1398,19 +1409,19 @@ impl Operation {
         lhs.edge.backward(lhs_grad);
     }
 
-    fn add_backward(lhs: AutogradNode, rhs: AutogradNode, grad: CPUTensor) {
+    fn add_backward(lhs: AutogradNode<'a>, rhs: AutogradNode<'a>, grad: CPUTensor) {
         Self::arithmetic_backward(lhs, rhs, grad, |_, _| (1.0, 1.0));
     }
 
-    fn sub_backward(lhs: AutogradNode, rhs: AutogradNode, grad: CPUTensor) {
+    fn sub_backward(lhs: AutogradNode<'a>, rhs: AutogradNode<'a>, grad: CPUTensor) {
         Self::arithmetic_backward(lhs, rhs, grad, |_, _| (1.0, -1.0));
     }
 
-    fn mul_backward(lhs: AutogradNode, rhs: AutogradNode, grad: CPUTensor) {
+    fn mul_backward(lhs: AutogradNode<'a>, rhs: AutogradNode<'a>, grad: CPUTensor) {
         Self::arithmetic_backward(lhs, rhs, grad, |lhs, rhs| (*rhs, *lhs));
     }
 
-    fn dot_backward(lhs: AutogradNode, rhs: AutogradNode, depth: usize, grad: CPUTensor) {
+    fn dot_backward(lhs: AutogradNode<'a>, rhs: AutogradNode<'a>, depth: usize, grad: CPUTensor) {
         let lhs_shift = rhs.tensor.ndim() - depth;
         let mut rhs_axes: Vec<usize> = (0..rhs.tensor.ndim()).collect();
         rhs_axes.rotate_right(lhs_shift);
@@ -1443,7 +1454,7 @@ impl Operation {
         );
     }
 
-    fn sum_backward(t: AutogradNode, grad: CPUTensor) {
+    fn sum_backward(t: AutogradNode<'a>, grad: CPUTensor) {
         let mut t_grad = CPUTensor::tensor(Fill {
             shape: t.tensor.shape().to_vec(),
             with: 0.0,
@@ -1470,29 +1481,30 @@ impl Operation {
         t.edge.backward(t_grad);
     }
 
-    fn ln_backward(t: AutogradNode, grad: CPUTensor) {
+    fn ln_backward(t: AutogradNode<'a>, grad: CPUTensor) {
         let (t_tensor, t_edge) = unravel_tensor(t);
-        t_edge.backward(t_tensor.pow(-1).mul(&grad).unwrap());
+        t_edge.backward(t_tensor.into_owned().pow(-1).mul(&grad).unwrap());
     }
 
-    fn exp_backward(t: AutogradNode, grad: CPUTensor) {
+    fn exp_backward(t: AutogradNode<'a>, grad: CPUTensor) {
         let (t_tensor, t_edge) = unravel_tensor(t);
-        t_edge.backward(t_tensor.exp().mul(&grad).unwrap());
+        t_edge.backward(t_tensor.into_owned().exp().mul(&grad).unwrap());
     }
 
-    fn tanh_backward(t: AutogradNode, grad: CPUTensor) {
+    fn tanh_backward(t: AutogradNode<'a>, grad: CPUTensor) {
         let (mut t_tensor, t_edge) = unravel_tensor(t);
-        t_tensor.data.iter_mut()
+        t_tensor.to_mut().data.iter_mut()
             .for_each(|x| {
                 *x = x.asinh().powi(2);
             });
         t_edge.backward(t_tensor.mul(&grad).unwrap());
     }
 
-    fn pow_backward(t: AutogradNode, i: i32, grad: CPUTensor) {
+    fn pow_backward(t: AutogradNode<'a>, i: i32, grad: CPUTensor) {
         let (t_tensor, t_edge) = unravel_tensor(t);
         t_edge.backward(
             t_tensor
+                .into_owned()
                 .pow(i - 1)
                 .mul(&Tensor::scalar(i as f64))
                 .unwrap()
@@ -1501,19 +1513,19 @@ impl Operation {
         );
     }
 
-    fn neg_backward(t: AutogradNode, grad: CPUTensor) {
+    fn neg_backward(t: AutogradNode<'a>, grad: CPUTensor) {
         let t_edge = unravel(t);
         t_edge.backward(grad.neg());
     }
 
-    fn max_backward(t: AutogradNode, u: f64, grad: CPUTensor) {
+    fn max_backward(t: AutogradNode<'a>, u: f64, grad: CPUTensor) {
         let (mut t_tensor, t_edge) = unravel_tensor(t);
-        t_tensor.iter_mut()
+        t_tensor.to_mut().iter_mut()
             .for_each(|x| *x = if *x >= u { 1.0 } else { 0.0 });
         t_edge.backward(t_tensor.mul(&grad).unwrap());
     }
 
-    fn cols_at_backward(t: AutogradNode, indices: AutogradNode, grad: CPUTensor) {
+    fn cols_at_backward(t: AutogradNode<'a>, indices: AutogradNode<'a>, grad: CPUTensor) {
         let mut t_grad = CPUTensor { shape: t.tensor.shape.clone(), stride: t.tensor.stride.clone(), data: vec![0.0; t.tensor.data.len()] };
         let mut grad_point = vec![0; grad.ndim()];
         let mut grad_idx = 0;
@@ -1545,7 +1557,7 @@ impl Operation {
         t.edge.backward(t_grad);
     }
 
-    fn colify_backward(t: AutogradNode, field: Field, grad: CPUTensor) {
+    fn colify_backward(t: AutogradNode<'a>, field: Field, grad: CPUTensor) {
         let mut t_grad = CPUTensor { shape: t.tensor.shape.clone(), stride: t.tensor.stride.clone(), data: vec![0.0; t.tensor.data.len()] };
         let locations = field
             .locations_on(*t.tensor.shape().first().unwrap())
@@ -1628,7 +1640,7 @@ impl Operation {
         t.edge.backward(t_grad);
     }
 
-    fn colmax_backward(t: AutogradNode, grad: CPUTensor) {
+    fn colmax_backward(t: AutogradNode<'a>, grad: CPUTensor) {
         let mut t_grad = CPUTensor { shape: t.tensor.shape.clone(), stride: t.tensor.stride.clone(), data: vec![0.0; t.tensor.data.len()] };
         let mut grad_point = vec![0; grad.ndim()];
         let mut grad_idx = 0;
@@ -1661,12 +1673,12 @@ impl Operation {
         t.edge.backward(t_grad);
     }
 
-    fn reshape_backward(t: AutogradNode, grad: CPUTensor) {
+    fn reshape_backward(t: AutogradNode<'a>, grad: CPUTensor) {
         let reshaped = grad.reshape(&t.tensor.shape()).unwrap();
         unravel(t).backward(reshaped)
     }
 
-    fn transpose_backward(t: AutogradNode, axes: &[usize], grad: CPUTensor) {
+    fn transpose_backward(t: AutogradNode<'a>, axes: &[usize], grad: CPUTensor) {
         let mut rev_axes = vec![0; axes.len()];
         for i in 0..axes.len() {
             rev_axes[axes[i]] = i;
@@ -1675,7 +1687,7 @@ impl Operation {
         unravel(t).backward(transposed);
     }
 
-    fn at_argmax_backward(at: AutogradNode, of: &AutogradNode, grad: CPUTensor) {
+    fn at_argmax_backward(at: AutogradNode<'a>, of: &AutogradNode<'a>, grad: CPUTensor) {
         let mut t_grad = CPUTensor::tensor(Fill {
             shape: at.tensor.shape().to_vec(),
             with: 0.0,
@@ -1710,12 +1722,12 @@ impl Operation {
         at.edge.backward(t_grad);
     }
 
-    fn softmax_backward(t: AutogradNode, grad: CPUTensor) {
+    fn softmax_backward(t: AutogradNode<'a>, grad: CPUTensor) {
         let (t_tensor, t_edge)= unravel_tensor(t);
         let orig = t_tensor.shape().to_vec();
         let classes = t_tensor.shape()[0];
         let cols = t_tensor.data.len() / classes;
-        let softmax = t_tensor.softmax().unwrap();
+        let softmax = t_tensor.into_owned().softmax().unwrap();
         let flat_softmax = softmax.reshape(&[classes, cols]).unwrap();
         let flat_grad = grad.reshape(&[classes, cols]).unwrap();
         t_edge.backward(
@@ -1732,30 +1744,30 @@ impl Operation {
         );
     }
 
-    fn forward(self) -> Option<CPUAutograd> {
+    fn forward(self) -> Option<CPUAutograd<'a>> {
         let tensor = match &self {
             Self::Add { lhs, rhs } => lhs.tensor.add(&rhs.tensor),
             Self::Sub { lhs, rhs } => lhs.tensor.sub(&rhs.tensor),
             Self::Mul { lhs, rhs } => lhs.tensor.mul(&rhs.tensor),
             Self::Dot { lhs, rhs, depth } => lhs.tensor.dot(&rhs.tensor, *depth),
             Self::Sum { t } => Some(t.tensor.sum()),
-            Self::Ln { t } => Some(t.tensor.clone().ln()),
-            Self::Exp { t } => Some(t.tensor.clone().exp()),
-            Self::Tanh { t } => Some(t.tensor.clone().tanh()),
-            Self::Pow { t, i } => Some(t.tensor.clone().pow(*i)),
-            Self::Neg { t } => Some(t.tensor.clone().neg()),
-            Self::Max { t, u } => Some(t.tensor.clone().max(*u)),
+            Self::Ln { t } => Some(t.tensor.clone().into_owned().ln()),
+            Self::Exp { t } => Some(t.tensor.clone().into_owned().exp()),
+            Self::Tanh { t } => Some(t.tensor.clone().into_owned().tanh()),
+            Self::Pow { t, i } => Some(t.tensor.clone().into_owned().pow(*i)),
+            Self::Neg { t } => Some(t.tensor.clone().into_owned().neg()),
+            Self::Max { t, u } => Some(t.tensor.clone().into_owned().max(*u)),
             Self::ColsAt { t, indices } => t.tensor.cols_at(&indices.tensor),
             Self::Colify { t, field } => t.tensor.colify(*field),
             Self::Colmax { t } => t.tensor.colmax(),
-            Self::Reshape { t, shape } => t.tensor.clone().reshape(shape),
-            Self::Transpose { t, axes } => t.tensor.clone().transpose(&axes),
+            Self::Reshape { t, shape } => t.tensor.clone().into_owned().reshape(shape),
+            Self::Transpose { t, axes } => t.tensor.clone().into_owned().transpose(&axes),
             Self::AtArgmax { t, of } => t.tensor.at_argmax(&of.tensor),
-            Self::Softmax { t } => t.tensor.clone().softmax()
+            Self::Softmax { t } => t.tensor.clone().into_owned().softmax()
         };
         tensor.map(|tensor| {
             CPUAutograd(Arc::new(AutogradNodeData {
-                tensor,
+                tensor: Cow::Owned(tensor),
                 edge: AutogradEdge {
                     grad: Mutex::new(None),
                     op: Some(self),
@@ -1962,14 +1974,15 @@ mod tests {
 
     #[test]
     fn cols_at_backward_accumulates_gradients() {
-        let tensor = tensor_with_data(vec![2, 3], &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]).autograd();
+        let tensor = tensor_with_data(vec![2, 3], &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        let autograd = tensor.autograd();
         let indices = CPUAutograd::vector(vec![2.0, 0.0]).unwrap();
         let indices_for_grad = indices.clone();
 
-        let selected = tensor.cols_at(&indices).unwrap();
+        let selected = autograd.cols_at(&indices).unwrap();
         selected.backward();
 
-        let grad = tensor.into_grad().expect("expected gradient for input tensor");
+        let grad = autograd.into_grad().expect("expected gradient for input tensor");
         assert_eq!(grad.shape(), &[2, 3]);
         assert_eq!(grad.data, vec![1.0, 1.0, 0.0, 0.0, 1.0, 1.0]);
 
@@ -2016,12 +2029,12 @@ mod tests {
     #[test]
     fn softmax_backward_with_unit_upstream_grad_is_zero() {
         // The gradient of sum(softmax(x)) w.r.t x should be zero because outputs sum to one.
-        let logits = tensor_with_data(vec![2, 1], &[1.0, 2.0]).autograd();
-        let output = logits.clone().softmax().unwrap();
+        let tensor = tensor_with_data(vec![2, 1], &[1.0, 2.0]);
+        let autograd = tensor.autograd();
+        let output = autograd.clone().softmax().unwrap();
 
         output.backward();
-        let grad = logits.into_grad().expect("expected gradient for logits");
-
+        let grad = autograd.into_grad().expect("expected gradient for logits");
         for (i, g) in grad.data.iter().enumerate() {
             assert!(
                 g.abs() < 1e-12,
