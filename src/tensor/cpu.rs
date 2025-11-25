@@ -987,6 +987,129 @@ impl DifferentiableTensor for CPUTensor {
     }
 }
 
+macro_rules! impl_arithmetic_assign {
+    ($self:expr, $other:expr, $lhs:ident, $rhs:ident => $simd:expr, $elem:expr) => {{
+        if $other.ndim() == 0 {
+            let len = $self.data.len();
+            let other = $other.data[0];
+            
+            let lhs_slice = $self.data.as_mut_slice();
+            let mut lhs_ptr = lhs_slice.as_mut_ptr();
+            let $rhs = Simd::<f64, 8>::splat(other);
+
+            let remainder = len % 8;
+            for _ in 0..(len - remainder) / 8 {
+                // fast case 1: broadcasting scalar
+                let $lhs = unsafe { std::ptr::read_unaligned(lhs_ptr as *const Simd<f64, 8>) };
+                let result: Simd<f64, 8> = $simd;
+                unsafe { std::ptr::write_unaligned(lhs_ptr as *mut Simd<f64, 8>, result) };
+                lhs_ptr = unsafe { lhs_ptr.add(8) };
+            }
+            let $rhs = other;
+            for i in (len - remainder)..len {
+                unsafe {
+                    let $lhs = *lhs_slice.get_unchecked(i);
+                    *lhs_slice.get_unchecked_mut(i) = $elem;
+                }
+            }
+            return Some(());
+        }
+        if $self.shape == $other.shape && $self.stride == $other.stride {
+            let len = $self.data.len();
+            let lhs_slice = $self.data.as_mut_slice();
+            let mut lhs_ptr = lhs_slice.as_mut_ptr();
+            let rhs_slice = $other.data.as_slice();
+            let mut rhs_ptr = rhs_slice.as_ptr();
+            let remainder = len % 8;
+            for i in 0..(len - remainder) / 8 {
+                // fast case 2: same shape and stride === zip
+                let $lhs = unsafe { std::ptr::read_unaligned(lhs_ptr as *const Simd<f64, 8>) };
+                let $rhs = unsafe { std::ptr::read_unaligned(rhs_ptr as *const Simd<f64, 8>) };
+                let result: Simd<f64, 8> = $simd;
+                unsafe { std::ptr::write_unaligned(lhs_ptr as *mut Simd<f64, 8>, result) };
+                lhs_ptr = unsafe { lhs_ptr.add(8) };
+                rhs_ptr = unsafe { rhs_ptr.add(8) };
+            }
+            for i in (len - remainder)..len {
+                unsafe {
+                    let $lhs = *lhs_slice.get_unchecked(i);
+                    let $rhs = *$other.data.get_unchecked(i);
+                    *lhs_slice.get_unchecked_mut(i) = $elem;
+                }
+            }
+            return Some(())
+        }
+        let k = $self.shape.len().max($other.shape.len());
+        let mut new_shape = Vec::with_capacity(k);
+        let mut lhs_strides = Vec::with_capacity(k);
+        let mut rhs_strides = Vec::with_capacity(k);
+        for i in 0..k {
+            let lhs_shape = $self.shape.get(i).cloned();
+            let rhs_shape = $other.shape.get(i).cloned();
+            match (lhs_shape, rhs_shape) {
+                (Some(l), Some(r)) if l == r => {
+                    new_shape.push(l);
+                    lhs_strides.push($self.stride[i]);
+                    rhs_strides.push($other.stride[i]);
+                },
+                (Some(l), Some(r)) if l == 1 => {
+                    new_shape.push(r);
+                    lhs_strides.push(0);
+                    rhs_strides.push($other.stride[i]);
+                },
+                (None, Some(r)) => {
+                    new_shape.push(r);
+                    lhs_strides.push(0);
+                    rhs_strides.push($other.stride[i]);
+                }
+                (Some(l), Some(r)) if r == 1 => {
+                    new_shape.push(l);
+                    lhs_strides.push($self.stride[i]);
+                    rhs_strides.push(0);
+                },
+                (Some(l), None) => {
+                    new_shape.push(l);
+                    lhs_strides.push($self.stride[i]);
+                    rhs_strides.push(0);
+                }
+                _ => return None
+            }
+        }
+        let mut new = Self::tensor(Fill::null(new_shape)).unwrap();
+        let mut new_point = vec![0; new.shape.len()];
+        let mut new_ptr = new.data.as_mut_ptr();
+        let mut lhs_ptr = $self.data.as_ptr();
+        let mut rhs_ptr = $other.data.as_ptr();
+
+        'iterate: loop {
+            unsafe {
+                let $lhs = *lhs_ptr;
+                let $rhs = *rhs_ptr;
+                *new_ptr = $elem;
+            }
+            for i in 0..new_point.len() {
+                let np_ref = unsafe { new_point.get_unchecked_mut(i) };
+                let np = *np_ref;
+                if np == unsafe { new.shape.get_unchecked(i) } - 1 {
+                    new_ptr = unsafe { new_ptr.sub(*new.stride.get_unchecked(i) * np) };
+                    lhs_ptr = unsafe { lhs_ptr.sub(*lhs_strides.get_unchecked(i) * np) };
+                    rhs_ptr = unsafe { rhs_ptr.sub(*rhs_strides.get_unchecked(i) * np) };
+                    *np_ref = 0;
+                } else {
+                    new_ptr = unsafe { new_ptr.add(*new.stride.get_unchecked(i)) };
+                    lhs_ptr = unsafe { lhs_ptr.add(*lhs_strides.get_unchecked(i)) };
+                    rhs_ptr = unsafe { rhs_ptr.add(*rhs_strides.get_unchecked(i)) };
+                    *np_ref += 1;
+                    continue 'iterate;
+                }
+            }
+            break;
+        }
+        *$self = new;
+        Some(())
+    }};
+}
+
 impl TensorMut for CPUTensor {
     fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64> {
         self.point_index(point).and_then(|i| self.data.get_mut(i))
@@ -994,6 +1117,15 @@ impl TensorMut for CPUTensor {
 
     fn iter_mut(&mut self) -> impl Iterator<Item = &mut f64> {
         self.data.iter_mut()
+    }
+
+    fn add_assign(&mut self, other: &Self) -> Option<()> {
+        impl_arithmetic_assign!(self, other, lhs, rhs => lhs + rhs, lhs + rhs)
+    }
+
+    fn descend(&mut self, c: f64, y: &Self) -> Option<()> {
+        let simd_c = Simd::splat(c);
+        impl_arithmetic_assign!(self, y, lhs, rhs => lhs - simd_c * rhs, lhs - c * rhs)
     }
 }
 

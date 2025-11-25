@@ -53,6 +53,8 @@ pub trait Autograd: Tensor {
 pub trait TensorMut: Tensor {
     fn get_mut(&mut self, point: &[usize]) -> Option<&mut f64>;
     fn iter_mut(&mut self) -> impl Iterator<Item = &mut f64>;
+    fn add_assign(&mut self, other: &Self) -> Option<()>;
+    fn descend(&mut self, c: f64, y: &Self) -> Option<()>;
 }
 
 pub trait TensorIO: Tensor {

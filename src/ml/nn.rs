@@ -2,7 +2,7 @@ use atomic_float::AtomicF64;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand_distr::{Distribution, Normal};
-use rayon::iter::ParallelIterator;
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
@@ -156,7 +156,7 @@ where
             let total_loss = AtomicF64::new(0.0);
             for (i, batch) in batches.into_iter().enumerate() {
                 let c = hyperparams.learning_rate / hyperparams.batch_size as f64;
-                let grad_axons: Vec<_> = batch
+                let grad_axons: Vec<Axon<T>> = batch
                     .map(|example| {
                         let auto_axons: Vec<Axon<T::Autograd<'_>>> =
                             init.nn.axons.iter().map(|a| a.train()).collect();
@@ -173,15 +173,30 @@ where
                         );
                         std::mem::drop(current);
                         loss.backward();
-                        auto_axons.into_iter().map(|a| a.into_grad().unwrap()).collect::<Vec<_>>()
+                        auto_axons
                     })
-                    .collect();
+                    .fold(|| Vec::new(), |mut a: Vec<Axon<T>>, b: Vec<Axon<T::Autograd<'_>>>| {
+                        if a.is_empty() {
+                            return b.into_iter().map(|a| a.into_grad().unwrap()).collect();
+                        }
+                        for (axon, other_axon) in a.iter_mut().zip(b.into_iter()) {
+                            axon.merge(other_axon.into_grad().unwrap());
+                        }
+                        a
+                    })
+                    .reduce(|| Vec::new(), |mut a: Vec<Axon<T>>, b: Vec<Axon<T>>| {
+                        if a.is_empty() {
+                            return b;
+                        }
+                        for (axon, other_axon) in a.iter_mut().zip(b.into_iter()) {
+                            axon.merge(other_axon);
+                        }
+                        a
+                    });
 
-                for grad_axon in grad_axons {
-                    for (axon, grad_axon) in init.nn.axons.iter_mut().zip(grad_axon.into_iter()) {
-                        axon.commit(grad_axon, c);
-                    }
-                }
+                 init.nn.axons.par_iter_mut().zip(grad_axons.into_par_iter()).for_each(|(axon, grad_axon)| {
+                    axon.commit(grad_axon, c);
+                 });
                 sgd_bar.inc(1);
                 sgd_bar.set_message(format![
                     "{:.3}",
@@ -539,46 +554,50 @@ impl<T: DifferentiableTensor + TensorMut> Axon<T> {
         let scale = T::scalar(c);
         match (self, grad_axon) {
             (Self::Dense { ff }, Axon::<T>::Dense { ff: gradff }) => {
-                ff.weights = ff
-                    .weights
-                    .sub(&gradff.weights.mul(&scale).unwrap())
-                    .unwrap();
-                ff.biases = ff
-                    .biases
-                    .sub(&gradff.biases.mul(&scale).unwrap())
-                    .unwrap();
+                ff.weights.descend(c, &gradff.weights).unwrap();
+                ff.biases.descend(c, &gradff.biases).unwrap();
             }
             (Self::Dropout { ff, .. }, Axon::<T>::Dropout { ff: gradff, .. }) => {
-                ff.weights = ff
-                    .weights
-                    .sub(&gradff.weights.mul(&scale).unwrap())
-                    .unwrap();
-                ff.biases = ff
-                    .biases
-                    .sub(&gradff.biases.mul(&scale).unwrap())
-                    .unwrap();
+                ff.weights.descend(c, &gradff.weights).unwrap();
+                ff.biases.descend(c, &gradff.biases).unwrap();
             }
             (Self::Conv2D { conv }, Axon::<T>::Conv2D { conv: gradconv }) => {
-                conv.weights = conv
-                    .weights
-                    .sub(&gradconv.weights.mul(&scale).unwrap())
-                    .unwrap();
-                conv.biases = conv
-                    .biases
-                    .sub(&gradconv.biases.mul(&scale).unwrap())
-                    .unwrap();
+                conv.weights.descend(c, &gradconv.weights).unwrap();
+                conv.biases.descend(c, &gradconv.biases).unwrap();
             }
             (Self::Pool2D { .. }, Axon::<T>::Pool2D { .. }) => {
                 // pooling layers have only a fixed field config, nothing to commit
             }
             (Self::Embeddings { embeddings }, Axon::<T>::Embeddings { embeddings: autoembeddings }) => {
-                let c_grad = autoembeddings.c;
-                // dbg!(embeddings.c.shape(), c_grad.mul(&scale).unwrap().shape());
-                embeddings.c = embeddings.c.sub(&c_grad.mul(&scale).unwrap()).unwrap();
+                embeddings.c.descend(c, &autoembeddings.c).unwrap();
             }
             _ => return None,
         }
         Some(())
+    }
+
+    pub fn merge(&mut self, other: Axon<T>) {
+        match (self, other) {
+            (Self::Dense { ff }, Axon::<T>::Dense { ff: otherff }) => {
+                ff.weights.add_assign(&otherff.weights).unwrap();
+                ff.biases.add_assign(&otherff.biases).unwrap();
+            }
+            (Self::Dropout { ff, .. }, Axon::<T>::Dropout { ff: otherff, .. }) => {
+                ff.weights.add_assign(&otherff.weights).unwrap();
+                ff.biases.add_assign(&otherff.biases).unwrap();
+            }
+            (Self::Conv2D { conv }, Axon::<T>::Conv2D { conv: otherconv }) => {
+                conv.weights.add_assign(&otherconv.weights).unwrap();
+                conv.biases.add_assign(&otherconv.biases).unwrap();
+            }
+            (Self::Pool2D { .. }, Axon::<T>::Pool2D { .. }) => {
+                // pooling layers have only a fixed field config, nothing to merge
+            }
+            (Self::Embeddings { embeddings }, Axon::<T>::Embeddings { embeddings: otherembeddings }) => {
+                embeddings.c.add_assign(&otherembeddings.c).unwrap();
+            }
+            _ => {}
+        }
     }
 }
 
