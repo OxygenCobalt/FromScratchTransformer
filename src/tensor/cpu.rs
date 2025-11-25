@@ -1,7 +1,7 @@
 use core::f64;
-use std::{collections::HashSet, io::{self, Read, Write}, sync::{Arc, Mutex}};
+use std::{borrow::Cow, collections::HashSet, io::{self, Read, Write}, sync::{Arc, Mutex}, simd::{Simd}};
 
-use crate::tensor::{Autograd, DifferentiableTensor, Field, Fill, FillUninit, Tensor, TensorIO, TensorInit, TensorMut};
+use crate::{tensor::{Autograd, DifferentiableTensor, Field, Fill, FillUninit, Tensor, TensorIO, TensorInit, TensorMut}};
 
 
 #[derive(Clone, PartialEq)]
@@ -17,17 +17,32 @@ struct Block {
 }
 
 macro_rules! impl_arithmetic {
-    ($self:expr, $op:tt, $other:expr) => {{
+    ($self:expr, $other:expr, $lhs:ident, $rhs:ident => $simd:expr, $elem:expr) => {{
         if $other.ndim() == 0 {
-            // fast case 1: broadcasting scalar
             let mut new_data = Vec::with_capacity($self.data.len());
             unsafe { new_data.set_len($self.data.len()); }
-            let new_slice = new_data.as_mut_slice();
+            let other = $other.data[0];
+            
             let lhs_slice = $self.data.as_slice();
-            let rhs = $other.data[0];
-            for i in 0..$self.data.len() {
+            let mut lhs_ptr = lhs_slice.as_ptr();
+            let $rhs = Simd::<f64, 8>::splat(other);
+            let new_slice = new_data.as_mut_slice();
+            let mut new_ptr: *mut f64 = new_slice.as_mut_ptr();
+
+            let remainder = $self.data.len() % 8;
+            for _ in 0..($self.data.len() - remainder) / 8 {
+                // fast case 1: broadcasting scalar
+                let $lhs = unsafe { std::ptr::read_unaligned(lhs_ptr as *const Simd<f64, 8>) };
+                let result: Simd<f64, 8> = $simd;
+                unsafe { std::ptr::write_unaligned(new_ptr as *mut Simd<f64, 8>, result) };
+                lhs_ptr = unsafe { lhs_ptr.add(8) };
+                new_ptr = unsafe { new_ptr.add(8) };
+            }
+            let $rhs = other;
+            for i in ($self.data.len() - remainder)..$self.data.len() {
                 unsafe {
-                    *new_slice.get_unchecked_mut(i) = *lhs_slice.get_unchecked(i) $op rhs;
+                    let $lhs = *lhs_slice.get_unchecked(i);
+                    *new_slice.get_unchecked_mut(i) = $elem;
                 }
             }
             return Some(Self {
@@ -37,15 +52,30 @@ macro_rules! impl_arithmetic {
             });
         }
         if $self.shape == $other.shape && $self.stride == $other.stride {
-            // fast case 2: same shape and stride === zip
             let mut new_data = Vec::with_capacity($self.data.len());
             unsafe { new_data.set_len($self.data.len()); }
-            let new_slice = new_data.as_mut_slice();
             let lhs_slice = $self.data.as_slice();
+            let mut lhs_ptr = lhs_slice.as_ptr();
             let rhs_slice = $other.data.as_slice();
-            for i in 0..$self.data.len() {
+            let mut rhs_ptr = rhs_slice.as_ptr();
+            let new_slice = new_data.as_mut_slice();
+            let mut new_ptr: *mut f64 = new_slice.as_mut_ptr();
+            let remainder = $self.data.len() % 8;
+            for i in 0..($self.data.len() - remainder) / 8 {
+                // fast case 2: same shape and stride === zip
+                let $lhs = unsafe { std::ptr::read_unaligned(lhs_ptr as *const Simd<f64, 8>) };
+                let $rhs = unsafe { std::ptr::read_unaligned(rhs_ptr as *const Simd<f64, 8>) };
+                let result: Simd<f64, 8> = $simd;
+                unsafe { std::ptr::write_unaligned(new_ptr as *mut Simd<f64, 8>, result) };
+                new_ptr = unsafe { new_ptr.add(8) };
+                lhs_ptr = unsafe { lhs_ptr.add(8) };
+                rhs_ptr = unsafe { rhs_ptr.add(8) };
+            }
+            for i in ($self.data.len() - remainder)..$self.data.len() {
                 unsafe {
-                    *new_slice.get_unchecked_mut(i) = *lhs_slice.get_unchecked(i) $op *rhs_slice.get_unchecked(i);
+                    let $lhs = *lhs_slice.get_unchecked(i);
+                    let $rhs = *$other.data.get_unchecked(i);
+                    *new_slice.get_unchecked_mut(i) = $elem;
                 }
             }
             return Some(Self {
@@ -59,9 +89,9 @@ macro_rules! impl_arithmetic {
         let mut lhs_strides = Vec::with_capacity(k);
         let mut rhs_strides = Vec::with_capacity(k);
         for i in 0..k {
-            let lhs = $self.shape.get(i).cloned();
-            let rhs = $other.shape.get(i).cloned();
-            match (lhs, rhs) {
+            let lhs_shape = $self.shape.get(i).cloned();
+            let rhs_shape = $other.shape.get(i).cloned();
+            match (lhs_shape, rhs_shape) {
                 (Some(l), Some(r)) if l == r => {
                     new_shape.push(l);
                     lhs_strides.push($self.stride[i]);
@@ -90,7 +120,6 @@ macro_rules! impl_arithmetic {
                 _ => return None
             }
         }
-
         let mut new = Self::tensor(Fill::null(new_shape)).unwrap();
         let mut new_point = vec![0; new.shape.len()];
         let mut new_ptr = new.data.as_mut_ptr();
@@ -98,7 +127,11 @@ macro_rules! impl_arithmetic {
         let mut rhs_ptr = $other.data.as_ptr();
 
         'iterate: loop {
-            unsafe { *new_ptr = *lhs_ptr $op *rhs_ptr; }
+            unsafe {
+                let $lhs = *lhs_ptr;
+                let $rhs = *rhs_ptr;
+                *new_ptr = $elem;
+            }
             for i in 0..new_point.len() {
                 let np_ref = unsafe { new_point.get_unchecked_mut(i) };
                 let np = *np_ref;
@@ -534,15 +567,15 @@ impl Tensor for CPUTensor {
     }
 
     fn add(&self, other: &Self) -> Option<Self> {
-        impl_arithmetic!(self, +, other)
+        impl_arithmetic!(self, other, lhs, rhs => lhs + rhs, lhs + rhs)
     }
 
     fn sub(&self, other: &Self) -> Option<Self> {
-        impl_arithmetic!(self, -, other)
+        impl_arithmetic!(self, other, lhs, rhs => lhs - rhs, lhs - rhs)
     }
 
     fn mul(&self, other: &Self) -> Option<Self> {
-        impl_arithmetic!(self, *, other)
+        impl_arithmetic!(self, other, lhs, rhs => lhs * rhs, lhs * rhs)
     }
 
     fn dot(&self, other: &Self, depth: usize) -> Option<Self> {
