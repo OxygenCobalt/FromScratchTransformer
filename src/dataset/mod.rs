@@ -1,6 +1,7 @@
 pub mod mnist;
 pub mod wikitext;
 pub mod distill;
+pub mod shakespeare;
 
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};

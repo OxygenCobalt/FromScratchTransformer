@@ -5,7 +5,7 @@ use colored::Colorize;
 use rayon::ThreadPoolBuilder;
 
 use crate::{
-    dataset::{TestSet, TrainSet, distill::Distill, mnist::Mnist, wikitext::WikiText2}, ml::{activation::Activation, language::{FixedSequencer, TokenizedExample, Tokenizer, WordTokenizer}, loss::{AccuracyOf, Loss, LossesOn}, nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork}}, tensor::{Field, cpu::CPUTensor}
+    dataset::{TestSet, TrainSet, distill::Distill, mnist::Mnist, shakespeare::Shakespeare, wikitext::WikiText2}, ml::{activation::Activation, language::{FixedSequencer, TokenizedExample, Tokenizer, WordTokenizer}, loss::{AccuracyOf, Loss, LossesOn}, nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork}}, tensor::{Field, cpu::CPUTensor}
 };
 
 mod tensor;
@@ -21,7 +21,7 @@ fn main() {
         Some(arg) => arg.clone(),
         None => {
             println!(
-                "{}: please specify an experiment: shallow_mnist, dropout_mnist, conv_mnist, shallow_wikitext",
+                "{}: please specify an experiment: shallow_mnist, dropout_mnist, conv_mnist, shallow_shakespeare",
                 "error".red()
             );
             return;
@@ -45,8 +45,8 @@ fn main() {
         ref exp if exp == "conv_mnist" => {
             conv_mnist();
         }
-        ref exp if exp == "shallow_wikitext" => {
-            shallow_wikitext();
+        ref exp if exp == "shallow_shakespeare" => {
+            shallow_shakespeare();
         }
         _ => {
             println!("{}: unknown experiment '{}'", "error".red(), experiment);
@@ -158,20 +158,23 @@ fn conv_mnist() {
     .unwrap();
 }
 
-fn shallow_wikitext() {
-    let wikitext = WikiText2(PathBuf::from("data/wikitext"));
-    let distill = Distill(0.01);
+fn shallow_shakespeare() {
+    let wikitext = Shakespeare(PathBuf::from("data/tiny_shakespeare"));
+    let distill = Distill(1.0);
     let train = distill.train(wikitext.train().unwrap());
     let test = distill.test(wikitext.test().unwrap());
+    println!("{}", train.iter().next().unwrap());
     let tokenizer = WordTokenizer::train(&train, &test, None);
     let context = FixedSequencer::new(5);
     let train = train.map(|s| {
-        context.split(&tokenizer.forward(&s).unwrap()).iter()
+        let stripped = s.replace("\n", " ");
+        context.split(&tokenizer.forward(&stripped).unwrap()).iter()
             .map(|s| TokenizedExample::from(s, &tokenizer))
             .collect::<Vec<TokenizedExample>>().into_iter()
     });
     let test = test.map(|s| {
-        context.split(&tokenizer.forward(&s).unwrap()).iter()
+        let stripped = s.replace("\n", " ");
+        context.split(&tokenizer.forward(&stripped).unwrap()).iter()
             .map(|s| TokenizedExample::from(s, &tokenizer))
             .collect::<Vec<TokenizedExample>>().into_iter()
     });
