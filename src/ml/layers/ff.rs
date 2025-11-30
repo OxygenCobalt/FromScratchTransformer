@@ -48,6 +48,7 @@ impl FeedForward<CPUTensor<'_>> {
         let mut flat_activations_out = CPUTensor::init(unsafe { FillUninit::new(vec![self.neurons, trailer])}).unwrap();
 
         // forward pass: Wx + b -> [neurons, flattened] x [flattened, trailer] -> [neurons, trailer] + [neurons]
+        let flat_activations_in_t = flat_activations_in.transpose(&[1, 0]).unwrap().materialize();
         let mut lhs_idx = 0;
         let mut rhs_idx = 0;
         let mut bias_idx = 0;
@@ -60,17 +61,17 @@ impl FeedForward<CPUTensor<'_>> {
                 let mut sum: f64 = 0.0;
                 for _ in 0..self.flattened_input_shape {
                     let lhs = unsafe { *self.weights.data.get_unchecked(lhs_idx) };
-                    let rhs = unsafe { *flat_activations_in.data.get_unchecked(rhs_idx) };
+                    let rhs = unsafe { *flat_activations_in_t.data.get_unchecked(rhs_idx) };
                     sum += lhs * rhs;
                     lhs_idx += self.weights.stride[1];
-                    rhs_idx += flat_activations_in.stride[0];
+                    rhs_idx += flat_activations_in_t.stride[1];
                 }
                 unsafe {
                     *out_data.get_unchecked_mut(out_idx) = sum + bias;
                 }
                 lhs_idx -= self.weights.stride[1] * self.flattened_input_shape;
-                rhs_idx -= flat_activations_in.stride[0] * self.flattened_input_shape;
-                rhs_idx += flat_activations_in.stride[1];
+                rhs_idx -= flat_activations_in_t.stride[1] * self.flattened_input_shape;
+                rhs_idx += flat_activations_in_t.stride[0];
                 out_idx += flat_activations_out.stride[1];
             }
             lhs_idx += self.weights.stride[0];
