@@ -1,3 +1,5 @@
+use std::simd::Simd;
+
 use rand_distr::{Normal, Distribution};
 use crate::{ml::activation::Activation, tensor::{cpu2::{self, FillUninit, CPUTensor, Fill, Generate}}};
 
@@ -114,27 +116,42 @@ impl FeedForward<CPUTensor<'_>> {
         // todo: fuse with pass 4 since their bounds are the same just in a different order
         // todo: evaluate if fusing with bias backwards with a branch is better than two distinct passes
         let mut a_grad = flat_activations_in.cloned_view();
-        let weights_t = self.weights.transpose(&[1, 0]).unwrap();
+        let weights_t = self.weights.transpose(&[1, 0]).unwrap().materialize();
+        let grad_t = flat_grad.transpose(&[1, 0]).unwrap().materialize();
         let mut lhs_idx = 0;
         let mut rhs_idx = 0;
         let mut out_idx = 0;
         let out_data: &mut [f64] = a_grad.data.to_mut().as_mut_slice();
         for _ in 0..self.flattened_input_shape {
             for _ in 0..trailer {
-                let mut sum: f64 = 0.0;
-                for _ in 0..self.neurons {
+                let chunks = self.neurons / LANES;
+                let remainder = self.neurons % LANES;
+                let mut sum_simd: Simd<f64, LANES> = Simd::splat(0.0);
+                let mut lhs_ptr = unsafe { weights_t.data.as_ptr().add(lhs_idx) };
+                let mut rhs_ptr = unsafe { grad_t.data.as_ptr().add(rhs_idx) };
+                for _ in 0..chunks {
+                    let lhs_simd = unsafe { std::ptr::read_unaligned(lhs_ptr as *const Simd<f64, LANES>) };
+                    let rhs_simd = unsafe { std::ptr::read_unaligned(rhs_ptr as *const Simd<f64, LANES>) };
+                    sum_simd += lhs_simd * rhs_simd;
+                    lhs_ptr = unsafe { lhs_ptr.add(LANES) };
+                    rhs_ptr = unsafe { rhs_ptr.add(LANES) };
+                    lhs_idx += weights_t.stride[1] * LANES;
+                    rhs_idx += grad_t.stride[1] * LANES;
+                }
+                let mut sum = sum_simd.reduce_sum();
+                for _ in (self.neurons - remainder)..self.neurons {
                     let lhs = unsafe { *weights_t.data.get_unchecked(lhs_idx) };
-                    let rhs = unsafe { *grad.data.get_unchecked(rhs_idx) };
+                    let rhs = unsafe { *grad_t.data.get_unchecked(rhs_idx) };
                     sum += lhs * rhs;
                     lhs_idx += weights_t.stride[1];
-                    rhs_idx += grad.stride[0];
+                    rhs_idx += grad_t.stride[1];
                 }
                 unsafe {
                     *out_data.get_unchecked_mut(out_idx) = sum;
                 }
                 lhs_idx -= weights_t.stride[1] * self.neurons;
-                rhs_idx -= flat_grad.stride[0] * self.neurons;
-                rhs_idx += flat_grad.stride[1];
+                rhs_idx -= grad_t.stride[1] * self.neurons;
+                rhs_idx += grad_t.stride[0];
                 out_idx += a_grad.stride[1];
             }
             lhs_idx += weights_t.stride[0];
