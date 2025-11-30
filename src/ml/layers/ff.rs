@@ -69,11 +69,10 @@ impl FeedForward<CPUTensor<'_>> {
                     sum_simd += lhs_simd * rhs_simd;
                     lhs_ptr = unsafe { lhs_ptr.add(LANES) };
                     rhs_ptr = unsafe { rhs_ptr.add(LANES) };
-                    lhs_idx += self.weights.stride[1] * LANES;
-                    rhs_idx += flat_activations_in_t.stride[1] * LANES;
                 }
-                
                 let mut sum: f64 = sum_simd.reduce_sum();
+                lhs_idx += self.weights.stride[1] * LANES * chunks;
+                rhs_idx += flat_activations_in_t.stride[1] * LANES * chunks;
                 for _ in (self.flattened_input_shape - remainder)..self.flattened_input_shape {
                     let lhs = unsafe { *self.weights.data.get_unchecked(lhs_idx) };
                     let rhs = unsafe { *flat_activations_in_t.data.get_unchecked(rhs_idx) };
@@ -153,10 +152,10 @@ impl FeedForward<CPUTensor<'_>> {
                     sum_simd += lhs_simd * rhs_simd;
                     lhs_ptr = unsafe { lhs_ptr.add(LANES) };
                     rhs_ptr = unsafe { rhs_ptr.add(LANES) };
-                    lhs_idx += weights_t.stride[1] * LANES;
-                    rhs_idx += grad_t.stride[1] * LANES;
                 }
                 let mut sum = sum_simd.reduce_sum();
+                lhs_idx += weights_t.stride[1] * LANES * chunks;
+                rhs_idx += grad_t.stride[1] * LANES * chunks;
                 for _ in (self.neurons - remainder)..self.neurons {
                     let lhs = unsafe { *weights_t.data.get_unchecked(lhs_idx) };
                     let rhs = unsafe { *grad_t.data.get_unchecked(rhs_idx) };
