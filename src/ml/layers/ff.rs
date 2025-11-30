@@ -58,8 +58,23 @@ impl FeedForward<CPUTensor<'_>> {
         for _ in 0..self.neurons {
             let bias=  unsafe { *self.biases.data.get_unchecked(bias_idx) };
             for _ in 0..trailer {
-                let mut sum: f64 = 0.0;
-                for _ in 0..self.flattened_input_shape {
+                let chunks = self.flattened_input_shape / LANES;
+                let remainder = self.flattened_input_shape % LANES;
+                let mut lhs_ptr = unsafe { self.weights.data.as_ptr().add(lhs_idx) };
+                let mut rhs_ptr = unsafe { flat_activations_in_t.data.as_ptr().add(rhs_idx) };
+                let mut sum_simd: Simd<f64, LANES> = Simd::splat(0.0);
+                for _ in 0..chunks {
+                    let lhs_simd = unsafe { std::ptr::read_unaligned(lhs_ptr as *const Simd<f64, LANES>) };
+                    let rhs_simd = unsafe { std::ptr::read_unaligned(rhs_ptr as *const Simd<f64, LANES>) };
+                    sum_simd += lhs_simd * rhs_simd;
+                    lhs_ptr = unsafe { lhs_ptr.add(LANES) };
+                    rhs_ptr = unsafe { rhs_ptr.add(LANES) };
+                    lhs_idx += self.weights.stride[1] * LANES;
+                    rhs_idx += flat_activations_in_t.stride[1] * LANES;
+                }
+                
+                let mut sum: f64 = sum_simd.reduce_sum();
+                for _ in (self.flattened_input_shape - remainder)..self.flattened_input_shape {
                     let lhs = unsafe { *self.weights.data.get_unchecked(lhs_idx) };
                     let rhs = unsafe { *flat_activations_in_t.data.get_unchecked(rhs_idx) };
                     sum += lhs * rhs;
