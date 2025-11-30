@@ -1,7 +1,9 @@
-use std::simd::Simd;
+use std::simd::{Simd, num::SimdFloat};
 
 use rand_distr::{Normal, Distribution};
 use crate::{ml::activation::Activation, tensor::{cpu2::{self, FillUninit, CPUTensor, Fill, Generate}}};
+
+const LANES: usize = 8; // number of SIMD lanes
 
 pub struct FeedForward<T> {
     weights: T,
