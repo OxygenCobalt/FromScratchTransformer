@@ -178,46 +178,46 @@ impl FeedForward<CPUTensor<'_>> {
         }
 
         // pass 4: weights backwards (grad dot a_in^T) [neurons, trailer] dot [trailer, flattened] -> [neurons, flattened] -> lhs_grad
-        let mut lhs_idx = 0;
+        let flat_activations_in_t = flat_activations_in.transpose(&[1, 0]).unwrap().materialize();
+        let mut lhs_idx: usize = 0;
         let mut rhs_idx = 0;
         let mut out_idx = 0;
         let out_data = self.weights.data.to_mut().as_mut_slice();
         for _ in 0..self.neurons {
-            for _ in 0..self.flattened_input_shape {
-                let chunks = trailer / LANES;
-                let remainder = trailer % LANES;
-                let mut sum_simd: Simd<f64, LANES> = Simd::splat(0.0);
-                let mut lhs_ptr = unsafe { flat_grad.data.as_ptr().add(lhs_idx) };
-                let mut rhs_ptr = unsafe { flat_activations_in.data.as_ptr().add(rhs_idx) };
+            for _ in 0..trailer {
+                let g = unsafe { *flat_grad.data.get_unchecked(lhs_idx) };
+                let g_simd = Simd::splat(g);
+                let c_simd = Simd::splat(c);
+                let chunks = self.flattened_input_shape / LANES;
+                let remainder = self.flattened_input_shape % LANES;
+                let mut rhs_ptr = unsafe { flat_activations_in_t.data.as_ptr().add(rhs_idx) };
+                let mut out_ptr = unsafe { out_data.as_mut_ptr().add(out_idx) };
                 for _ in 0..chunks {
-                    let lhs_simd = unsafe { std::ptr::read_unaligned(lhs_ptr as *const Simd<f64, LANES>) };
                     let rhs_simd = unsafe { std::ptr::read_unaligned(rhs_ptr as *const Simd<f64, LANES>) };
-                    sum_simd += lhs_simd * rhs_simd;
-                    lhs_ptr = unsafe { lhs_ptr.add(LANES) };
+                    let out_simd = unsafe { std::ptr::read_unaligned(out_ptr as *const Simd<f64, LANES>) };
+                    let descended = out_simd - g_simd * rhs_simd * c_simd;
+                    unsafe { std::ptr::write_unaligned(out_ptr as *mut Simd<f64, LANES>, descended) };
                     rhs_ptr = unsafe { rhs_ptr.add(LANES) };
+                    out_ptr = unsafe { out_ptr.add(LANES) };
                 }
-                lhs_idx += flat_grad.stride[1] * LANES * chunks;
-                rhs_idx += flat_activations_in.stride[1] * LANES * chunks;
-                let mut sum: f64 = sum_simd.reduce_sum();
-                for _ in (trailer - remainder)..trailer {
-                    let lhs = unsafe { *flat_grad.data.get_unchecked(lhs_idx) };
-                    let rhs = unsafe { *flat_activations_in.data.get_unchecked(rhs_idx) };
-                    sum += lhs * rhs;
-                    lhs_idx += flat_grad.stride[1];
-                    rhs_idx += flat_activations_in.stride[1];
+                rhs_idx += flat_activations_in_t.stride[1] * LANES * chunks;
+                out_idx += self.weights.stride[1] * LANES * chunks;
+                for _ in (self.flattened_input_shape - remainder)..self.flattened_input_shape {
+                    let rhs = unsafe { *flat_activations_in_t.data.get_unchecked(rhs_idx) };
+                    let out = unsafe { out_data.get_unchecked_mut(out_idx) };
+                    *out -= c * g * rhs;
+                    rhs_idx += flat_activations_in_t.stride[1];
+                    out_idx += self.weights.stride[1];
                 }
-                unsafe {
-                    let out = out_data.get_unchecked_mut(out_idx);
-                    *out -= c * sum;
-                }
-                lhs_idx -= flat_grad.stride[1] * trailer;
-                rhs_idx -= flat_activations_in.stride[1] * trailer;
-                rhs_idx += flat_activations_in.stride[0];
-                out_idx += self.weights.stride[1];
+
+                lhs_idx += flat_grad.stride[1];
+                rhs_idx -= flat_activations_in_t.stride[1] * self.flattened_input_shape;
+                rhs_idx += flat_activations_in_t.stride[0];
+                out_idx -= self.weights.stride[1] * self.flattened_input_shape;
             }
-            rhs_idx = 0;
+            lhs_idx -= flat_grad.stride[1] * trailer;
             lhs_idx += flat_grad.stride[0];
-            out_idx -= self.weights.stride[1] * self.flattened_input_shape;
+            rhs_idx -= flat_activations_in_t.stride[0] * trailer;
             out_idx += self.weights.stride[0];
         }
         
