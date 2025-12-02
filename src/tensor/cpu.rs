@@ -1204,6 +1204,12 @@ impl <'a> Autograd for CPUAutograd<'a> {
     }
 }
 
+impl<'a> CPUAutograd<'a> {
+    pub fn backward_with_grad(self, grad: CPUTensor) {
+        self.0.edge.backward(grad);
+    }
+}
+
 impl <'a> Tensor for CPUAutograd<'a> {
     fn scalar(c: impl Into<f64>) -> Self {
         Self(AutogradNode::new(AutogradNodeData {
