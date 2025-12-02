@@ -55,6 +55,17 @@ impl FeedForward<CPUTensor<'_>> {
         let mut out_idx = 0;
         // explicit slice definitions to signal to the compiler about aliasing
         let out_data = flat_activations_out.data.to_mut().as_mut_slice();
+        let flat_activations_out_stride0 = flat_activations_out.stride[0];
+        let flat_activations_out_stride1 = flat_activations_out.stride[1];
+        let flat_activations_out_stride1t = flat_activations_out_stride1 * trailer;
+        let flat_activations_in_t_stride0 = flat_activations_in_t.stride[0];
+        let flat_activations_in_t_stride1 = flat_activations_in_t.stride[1];
+        let flat_activations_in_t_stride1f = flat_activations_in_t_stride1 * self.flattened_input_shape;
+        
+        let weights_stride0 = self.weights.stride[0];
+        let weights_stride1 = self.weights.stride[1];
+        let weights_stride1f = weights_stride1 * self.flattened_input_shape;
+        let biases_stride0 = self.biases.stride[0];
         for _ in 0..self.neurons {
             let bias=  unsafe { *self.biases.data.get_unchecked(bias_idx) };
             for _ in 0..trailer {
@@ -71,28 +82,28 @@ impl FeedForward<CPUTensor<'_>> {
                     rhs_ptr = unsafe { rhs_ptr.add(LANES) };
                 }
                 let mut sum: f64 = sum_simd.reduce_sum();
-                lhs_idx += self.weights.stride[1] * LANES * chunks;
-                rhs_idx += flat_activations_in_t.stride[1] * LANES * chunks;
+                lhs_idx += weights_stride1 * LANES * chunks;
+                rhs_idx += flat_activations_in_t_stride1 * LANES * chunks;
                 for _ in (self.flattened_input_shape - remainder)..self.flattened_input_shape {
                     let lhs = unsafe { *self.weights.data.get_unchecked(lhs_idx) };
                     let rhs = unsafe { *flat_activations_in_t.data.get_unchecked(rhs_idx) };
                     sum += lhs * rhs;
-                    lhs_idx += self.weights.stride[1];
-                    rhs_idx += flat_activations_in_t.stride[1];
+                    lhs_idx += weights_stride1;
+                    rhs_idx += flat_activations_in_t_stride1;
                 }
                 unsafe {
                     *out_data.get_unchecked_mut(out_idx) = sum + bias;
                 }
-                lhs_idx -= self.weights.stride[1] * self.flattened_input_shape;
-                rhs_idx -= flat_activations_in_t.stride[1] * self.flattened_input_shape;
-                rhs_idx += flat_activations_in_t.stride[0];
-                out_idx += flat_activations_out.stride[1];
+                lhs_idx -= weights_stride1f;
+                rhs_idx -= flat_activations_in_t_stride1f;
+                rhs_idx += flat_activations_in_t_stride0;
+                out_idx += flat_activations_out_stride1;
             }
-            lhs_idx += self.weights.stride[0];
+            lhs_idx += weights_stride0;
             rhs_idx = 0;
-            bias_idx += self.biases.stride[0];
-            out_idx -= flat_activations_out.stride[1] * trailer;
-            out_idx += flat_activations_out.stride[0];
+            bias_idx += biases_stride0;
+            out_idx -= flat_activations_out_stride1t;
+            out_idx += flat_activations_out_stride0;
         }
 
         self.activation.forward_all(flat_activations_out.into_reshape(&out_shape).unwrap())
@@ -113,6 +124,10 @@ impl FeedForward<CPUTensor<'_>> {
         let mut bias_idx = 0;
         let mut grad_idx = 0;
         let bias_data = self.biases.data.to_mut().as_mut_slice();
+        let bias_stride0 = self.biases.stride[0];
+        let flat_grad_stride0 = flat_grad.stride[0];
+        let flat_grad_stride1 = flat_grad.stride[1];
+        let flat_grad_stride1t = flat_grad_stride1 * trailer;
         for _ in 0..self.neurons {
             for _ in 0..trailer {
                 let bias = unsafe {
@@ -122,11 +137,11 @@ impl FeedForward<CPUTensor<'_>> {
                     flat_grad.data.get_unchecked(grad_idx)
                 };
                 *bias -= c * *grad;
-                grad_idx += flat_grad.stride[1];
+                grad_idx += flat_grad_stride1;
             }
-            bias_idx += self.biases.stride[0];
-            grad_idx -= flat_grad.stride[1] * trailer;
-            grad_idx += flat_grad.stride[0];
+            bias_idx += bias_stride0;
+            grad_idx -= flat_grad_stride1t;
+            grad_idx += flat_grad_stride0;
         }
 
         // pass 3: activations backwards (W^T dot grad) [flattened, neurons] x [neurons, trailer] -> [flattened, trailer]
@@ -139,10 +154,22 @@ impl FeedForward<CPUTensor<'_>> {
         let mut rhs_idx = 0;
         let mut out_idx = 0;
         let out_data: &mut [f64] = a_grad.data.to_mut().as_mut_slice();
+
+        let chunks = self.neurons / LANES;
+        let remainder = self.neurons % LANES;
+        let weights_t_stride0 = weights_t.stride[0];
+        let weights_t_stride1 = weights_t.stride[1];
+        let weights_t_stride1n = weights_t_stride1 * self.neurons;
+        let weights_t_stride1lc = weights_t_stride1 * LANES * chunks;
+        let grad_t_stride0 = grad_t.stride[0];
+        let grad_t_stride1 = grad_t.stride[1];
+        let grad_t_stride1n = grad_t_stride1 * self.neurons;
+        let grad_t_stride1lc = grad_t_stride1 * LANES * chunks;
+        let a_grad_stride0 = a_grad.stride[0];
+        let a_grad_stride1 = a_grad.stride[1];
+        let a_grad_stride1t = a_grad_stride1 * trailer;
         for _ in 0..self.flattened_input_shape {
             for _ in 0..trailer {
-                let chunks = self.neurons / LANES;
-                let remainder = self.neurons % LANES;
                 let mut sum_simd: Simd<f64, LANES> = Simd::splat(0.0);
                 let mut lhs_ptr = unsafe { weights_t.data.as_ptr().add(lhs_idx) };
                 let mut rhs_ptr = unsafe { grad_t.data.as_ptr().add(rhs_idx) };
@@ -154,27 +181,27 @@ impl FeedForward<CPUTensor<'_>> {
                     rhs_ptr = unsafe { rhs_ptr.add(LANES) };
                 }
                 let mut sum = sum_simd.reduce_sum();
-                lhs_idx += weights_t.stride[1] * LANES * chunks;
-                rhs_idx += grad_t.stride[1] * LANES * chunks;
+                lhs_idx += weights_t_stride1lc;
+                rhs_idx += grad_t_stride1lc;
                 for _ in (self.neurons - remainder)..self.neurons {
                     let lhs = unsafe { *weights_t.data.get_unchecked(lhs_idx) };
                     let rhs = unsafe { *grad_t.data.get_unchecked(rhs_idx) };
                     sum += lhs * rhs;
-                    lhs_idx += weights_t.stride[1];
-                    rhs_idx += grad_t.stride[1];
+                    lhs_idx += weights_t_stride1;
+                    rhs_idx += grad_t_stride1;
                 }
                 unsafe {
                     *out_data.get_unchecked_mut(out_idx) = sum;
                 }
-                lhs_idx -= weights_t.stride[1] * self.neurons;
-                rhs_idx -= grad_t.stride[1] * self.neurons;
-                rhs_idx += grad_t.stride[0];
-                out_idx += a_grad.stride[1];
+                lhs_idx -= weights_t_stride1n;
+                rhs_idx -= grad_t_stride1n;
+                rhs_idx += grad_t_stride0;
+                out_idx += a_grad_stride1;
             }
-            lhs_idx += weights_t.stride[0];
+            lhs_idx += weights_t_stride0;
             rhs_idx = 0;
-            out_idx -= a_grad.stride[1] * trailer;
-            out_idx += a_grad.stride[0];
+            out_idx -= a_grad_stride1t;
+            out_idx += a_grad_stride0;
         }
 
         // pass 4: weights backwards (grad dot a_in^T) [neurons, trailer] dot [trailer, flattened] -> [neurons, flattened] -> lhs_grad
@@ -183,13 +210,26 @@ impl FeedForward<CPUTensor<'_>> {
         let mut rhs_idx = 0;
         let mut out_idx = 0;
         let out_data = self.weights.data.to_mut().as_mut_slice();
+
+        let chunks = self.flattened_input_shape / LANES;
+        let remainder = self.flattened_input_shape % LANES;
+        let weights_stride0 = self.weights.stride[0];
+        let weights_stride1 = self.weights.stride[1];
+        let weights_stride1f = weights_stride1 * self.flattened_input_shape;
+        let weights_stride1lc = weights_stride1 * LANES * chunks;
+        let flat_grad_stride0 = flat_grad.stride[0];
+        let flat_grad_stride1 = flat_grad.stride[1];
+        let flat_grad_stride1t = flat_grad_stride1 * trailer;
+        let flat_activations_in_t_stride0 = flat_activations_in_t.stride[0];
+        let flat_activations_in_t_stride0t = flat_activations_in_t_stride0 * trailer;
+        let flat_activations_in_t_stride1 = flat_activations_in_t.stride[1];
+        let flat_activations_in_t_stride1f = flat_activations_in_t_stride1 * self.flattened_input_shape;
+        let flat_activations_in_t_stride1lc = flat_activations_in_t_stride1 * LANES * chunks;
         for _ in 0..self.neurons {
             for _ in 0..trailer {
                 let g = unsafe { *flat_grad.data.get_unchecked(lhs_idx) };
                 let g_simd = Simd::splat(g);
                 let c_simd = Simd::splat(c);
-                let chunks = self.flattened_input_shape / LANES;
-                let remainder = self.flattened_input_shape % LANES;
                 let mut rhs_ptr = unsafe { flat_activations_in_t.data.as_ptr().add(rhs_idx) };
                 let mut out_ptr = unsafe { out_data.as_mut_ptr().add(out_idx) };
                 for _ in 0..chunks {
@@ -200,25 +240,25 @@ impl FeedForward<CPUTensor<'_>> {
                     rhs_ptr = unsafe { rhs_ptr.add(LANES) };
                     out_ptr = unsafe { out_ptr.add(LANES) };
                 }
-                rhs_idx += flat_activations_in_t.stride[1] * LANES * chunks;
-                out_idx += self.weights.stride[1] * LANES * chunks;
+                rhs_idx += flat_activations_in_t_stride1lc;
+                out_idx += weights_stride1lc;
                 for _ in (self.flattened_input_shape - remainder)..self.flattened_input_shape {
                     let rhs = unsafe { *flat_activations_in_t.data.get_unchecked(rhs_idx) };
                     let out = unsafe { out_data.get_unchecked_mut(out_idx) };
                     *out -= c * g * rhs;
-                    rhs_idx += flat_activations_in_t.stride[1];
-                    out_idx += self.weights.stride[1];
+                    rhs_idx += flat_activations_in_t_stride1;
+                    out_idx += weights_stride1;
                 }
 
-                lhs_idx += flat_grad.stride[1];
-                rhs_idx -= flat_activations_in_t.stride[1] * self.flattened_input_shape;
-                rhs_idx += flat_activations_in_t.stride[0];
-                out_idx -= self.weights.stride[1] * self.flattened_input_shape;
+                lhs_idx += flat_grad_stride1;
+                rhs_idx -= flat_activations_in_t_stride1f;
+                rhs_idx += flat_activations_in_t_stride0;
+                out_idx -= weights_stride1f;
             }
-            lhs_idx -= flat_grad.stride[1] * trailer;
-            lhs_idx += flat_grad.stride[0];
-            rhs_idx -= flat_activations_in_t.stride[0] * trailer;
-            out_idx += self.weights.stride[0];
+            lhs_idx -= flat_grad_stride1t;
+            lhs_idx += flat_grad_stride0;
+            rhs_idx -= flat_activations_in_t_stride0t;
+            out_idx += weights_stride0;
         }
         
         a_grad.into_reshape(&original_shape).unwrap()
