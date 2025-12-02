@@ -188,7 +188,7 @@ fn shallow_shakespeare() {
     let hyperparams = Hyperparams {
         epochs: 1,
         batch_size: 10,
-        learning_rate: 0.1,
+        learning_rate: 0.01,
     };
     NeuralNetwork::<CPUTensor>::par_train(
         &layers,
