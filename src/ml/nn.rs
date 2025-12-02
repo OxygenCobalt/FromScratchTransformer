@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 
 use crate::dataset::{EagerExample, Example, Train};
 use crate::tensor::{
-    Autograd, cpu::CPUTensor, DifferentiableTensor, Field, Fill, Generate, Tensor, TensorIO, TensorMut, Tt
+    Autograd, cpu::{CPUAutograd, CPUTensor}, DifferentiableTensor, Field, Fill, Generate, Tensor, TensorIO, TensorMut, Tt
 };
 
 use super::{activation::Activation, loss::Loss};
@@ -702,7 +702,7 @@ impl<T: TensorIO> Axon<T> {
     }
 }
 
-struct FeedForward<T: Tensor> {
+pub struct FeedForward<T: Tensor> {
     weights: T,
     biases: T,
     activation: Activation,
@@ -711,7 +711,7 @@ struct FeedForward<T: Tensor> {
 }
 
 impl<T: Tensor> FeedForward<T> {
-    fn new(input_shape: Vec<usize>, neurons: usize, activation: Activation) -> Self {
+    pub fn new(input_shape: Vec<usize>, neurons: usize, activation: Activation) -> Self {
         let flattened = CPUTensor::len(&input_shape);
         let xavier = Normal::new(0.0, 2.0 / (flattened + neurons) as f64).unwrap();
         Self {
@@ -731,7 +731,7 @@ impl<T: Tensor> FeedForward<T> {
         }
     }
 
-    fn forward(&self, activations: T) -> T {
+    pub fn forward(&self, activations: T) -> T {
         // we ignore any additional batching parameters that would be appended to the activation shape
         let mut flattened_shape = vec![self.flattened_input_shape];
         flattened_shape.extend_from_slice(&activations.shape()[self.flattened_input_ndim..]);
@@ -784,6 +784,38 @@ impl<T: TensorIO> FeedForward<T> {
         write.write_all(&self.flattened_input_shape.to_le_bytes())?;
         self.weights.write(write)?;
         self.biases.write(write)
+    }
+}
+
+impl FeedForward<CPUTensor> {
+    pub fn autograd(&self) -> FeedForward<CPUAutograd<'_>> {
+        FeedForward {
+            weights: self.weights.autograd(),
+            biases: self.biases.autograd(),
+            activation: self.activation,
+            flattened_input_shape: self.flattened_input_shape,
+            flattened_input_ndim: self.flattened_input_ndim,
+        }
+    }
+}
+
+impl<T: TensorMut> FeedForward<T> {
+    pub fn descend(&mut self, c: f64, grad: &FeedForward<T>) -> Option<()> {
+        self.weights.descend(c, &grad.weights)?;
+        self.biases.descend(c, &grad.biases)?;
+        Some(())
+    }
+}
+
+impl<'a, T: Autograd> FeedForward<T> {
+    pub fn into_grad(self) -> Option<FeedForward<T::Parent>> {
+        Some(FeedForward {
+            weights: self.weights.into_grad()?,
+            biases: self.biases.into_grad()?,
+            activation: self.activation,
+            flattened_input_shape: self.flattened_input_shape,
+            flattened_input_ndim: self.flattened_input_ndim,
+        })
     }
 }
 
