@@ -1,4 +1,5 @@
 pub mod cpu;
+pub mod cpu2;
 
 use core::f64;
 use std::{
