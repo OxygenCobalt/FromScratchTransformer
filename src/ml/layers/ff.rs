@@ -109,10 +109,10 @@ impl FeedForward<CPUTensor<'_>> {
         self.activation.forward_all(flat_activations_out.into_reshape(&out_shape).unwrap())
     }
 
-    pub fn backward<'i, 'o>(&mut self, c: f64, activations_in: CPUTensor<'i>, mut grad: CPUTensor<'i>) -> CPUTensor<'o> {
+    pub fn backward<'i, 'o>(&mut self, c: f64, activations_in: CPUTensor<'i>, activations_out: CPUTensor<'i>, mut grad: CPUTensor<'i>) -> CPUTensor<'o> {
         // pass 1: backwards gradient
         // todo: fuse activations when feasible
-        grad = self.activation.backward_all(&activations_in, grad);
+        grad = self.activation.backward_all(&activations_out, grad);
 
         // flatten out extra dims (batch etc)
         let original_shape = activations_in.shape.clone();
@@ -407,7 +407,8 @@ mod tests {
         let grad = tensor_with_data(vec![2], &[0.2, -0.4]);
 
         let lr = 0.1;
-        let input_grad = ff.backward(lr, input, grad);
+        let activations_out = ff.forward(input.cloned_view());
+        let input_grad = ff.backward(lr, input, activations_out, grad);
 
         assert_eq!(input_grad.shape, vec![3]);
         let expected_input_grad = vec![0.0, -0.6, 0.3];
@@ -418,6 +419,88 @@ mod tests {
 
         let expected_weights = vec![0.96, -1.06, 0.42, 0.58, 1.12, -0.34];
         assert_close(ff.weights.data.as_ref(), &expected_weights, 1e-12);
+    }
+
+    #[test]
+    fn backward_small_batch_gates_inactive_neurons() {
+        let activation = Activation::ReLU;
+        let mut ff = ff_with_params(
+            &[1.0, 2.0, -1.0, 1.0],
+            &[0.0, -3.0],
+            vec![2],
+            activation,
+        );
+        let input = tensor_with_data(vec![2, 1], &[1.0, 2.0]);
+        let grad = tensor_with_data(vec![2, 1], &[0.5, 1.0]);
+
+        let lr = 0.1;
+        let activations_out = ff.forward(input.cloned_view());
+        let input_grad = ff.backward(lr, input, activations_out, grad);
+
+        let expected_weights = vec![0.95, 1.9, -1.0, 1.0];
+        assert_close(ff.weights.data.as_ref(), &expected_weights, 1e-12);
+        let expected_biases = vec![-0.05, -3.0];
+        assert_close(ff.biases.data.as_ref(), &expected_biases, 1e-12);
+        let expected_input_grad = vec![0.5, 1.0];
+        assert_close(input_grad.data.as_ref(), &expected_input_grad, 1e-12);
+    }
+
+    #[test]
+    fn backward_large_batch_accumulates_gradients() {
+        let activation = Activation::ReLU;
+        let batch = 64;
+        let mut ff = ff_with_params(
+            &[1.0, 2.0, 0.5, 1.5],
+            &[0.1, -0.2],
+            vec![2],
+            activation,
+        );
+
+        let mut input =
+            CPUTensor::init(Fill { shape: vec![2, batch], with: 0.0 }).unwrap();
+        {
+            let data = input.data.to_mut();
+            for b in 0..batch {
+                data[0 * batch + b] = 1.0;
+                data[1 * batch + b] = 2.0;
+            }
+        }
+
+        let mut grad =
+            CPUTensor::init(Fill { shape: vec![2, batch], with: 0.0 }).unwrap();
+        {
+            let data = grad.data.to_mut();
+            for b in 0..batch {
+                data[0 * batch + b] = 0.3;
+                data[1 * batch + b] = -0.7;
+            }
+        }
+
+        let lr = 0.01;
+        let activations_out = ff.forward(input.cloned_view());
+        let a_grad = ff.backward(lr, input, activations_out, grad);
+
+        let expected_weights = vec![0.808, 1.616, 0.948, 2.396];
+        assert_close(ff.weights.data.as_ref(), &expected_weights, 1e-12);
+        let expected_biases = vec![-0.092, 0.248];
+        assert_close(ff.biases.data.as_ref(), &expected_biases, 1e-12);
+
+        for b in 0..batch {
+            let idx0 = 0 * batch + b;
+            let idx1 = 1 * batch + b;
+            assert!(
+                (a_grad.data[idx0] + 0.05).abs() <= 1e-12,
+                "expected dL/dx0=-0.05 at batch {}, got {}",
+                b,
+                a_grad.data[idx0]
+            );
+            assert!(
+                (a_grad.data[idx1] + 0.45).abs() <= 1e-12,
+                "expected dL/dx1=-0.45 at batch {}, got {}",
+                b,
+                a_grad.data[idx1]
+            );
+        }
     }
 
     #[test]
@@ -519,7 +602,8 @@ mod tests {
         }
 
         let lr = 0.1;
-        let a_grad = ff.backward(lr, input, grad);
+        let activations_out = ff.forward(input.cloned_view());
+        let a_grad = ff.backward(lr, input, activations_out, grad);
 
         // Input gradient: only neurons with positive pre-activation (0 and last) contribute.
         assert_eq!(a_grad.shape, vec![features, batch]);
