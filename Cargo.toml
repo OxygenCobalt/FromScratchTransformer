@@ -21,6 +21,6 @@ codegen-units = 1
 lto = 'fat'
 opt-level = 3
 
-[profile.benchmark]
+[profile.bench]
 inherits = 'release'
 debug = true
