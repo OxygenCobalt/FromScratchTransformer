@@ -5,7 +5,6 @@ use crate::{
     tensor::cpu2::{self, CPUTensor, Fill, FillUninit, Generate},
 };
 use rand_distr::{Distribution, Normal};
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 const LANES: usize = 8; // number of SIMD lanes
 
@@ -19,7 +18,6 @@ pub struct FeedForward<T> {
     // avoid recomputing these every forward/backward pass
     flattened_input_shape: usize,
     flattened_input_ndim: usize,
-    parallelism: usize
 }
 
 impl FeedForward<CPUTensor<'_>> {
@@ -41,7 +39,6 @@ impl FeedForward<CPUTensor<'_>> {
             neurons,
             flattened_input_shape: flattened,
             flattened_input_ndim: input_shape.len(),
-            parallelism: rayon::current_num_threads(),
         }
     }
 
@@ -63,9 +60,12 @@ impl FeedForward<CPUTensor<'_>> {
             .transpose(&[1, 0])
             .unwrap()
             .materialize();
+        let mut lhs_idx = 0;
+        let mut rhs_idx = 0;
+        let mut bias_idx = 0;
+        let mut out_idx = 0;
         // explicit slice definitions to signal to the compiler about aliasing
         let out_data = flat_activations_out.data.to_mut().as_mut_slice();
-        let out_addr = out_data.as_mut_ptr() as usize;
         let flat_activations_out_stride0 = flat_activations_out.stride[0];
         let flat_activations_out_stride1 = flat_activations_out.stride[1];
         let flat_activations_in_t_stride0 = flat_activations_in_t.stride[0];
@@ -73,14 +73,7 @@ impl FeedForward<CPUTensor<'_>> {
         let weights_stride0 = self.weights.stride[0];
         let weights_stride1 = self.weights.stride[1];
         let biases_stride0 = self.biases.stride[0];
-        let grain = self.neurons / self.parallelism;
-        (0..self.neurons).into_par_iter().with_min_len(grain).for_each(|n| {
-            let mut lhs_idx = n * weights_stride0;
-            let mut rhs_idx = 0;
-            let mut bias_idx = n * biases_stride0;
-            let mut out_idx = n * flat_activations_out_stride0;
-            let mut out_data = unsafe { std::slice::from_raw_parts_mut(out_addr as *mut f64, out_data.len()) };
-
+        for _ in 0..self.neurons {
             let bias = unsafe { *self.biases.data.get_unchecked(bias_idx) };
             for _ in 0..trailer {
                 let chunks = self.flattened_input_shape / LANES;
@@ -115,7 +108,12 @@ impl FeedForward<CPUTensor<'_>> {
                 rhs_idx += flat_activations_in_t_stride0;
                 out_idx += flat_activations_out_stride1;
             }
-        });
+            lhs_idx += weights_stride0;
+            rhs_idx = 0;
+            bias_idx += biases_stride0;
+            out_idx -= flat_activations_out_stride1 * trailer;
+            out_idx += flat_activations_out_stride0;
+        }
 
         self.activation
             .forward_all(flat_activations_out.into_reshape(&out_shape).unwrap())
@@ -327,7 +325,6 @@ mod tests {
             neurons,
             flattened_input_shape: flattened,
             flattened_input_ndim: input_shape.len(),
-            parallelism: rayon::current_num_threads(),
         }
     }
 
@@ -352,7 +349,6 @@ mod tests {
             neurons,
             flattened_input_shape: flattened,
             flattened_input_ndim: input_shape.len(),
-            parallelism: rayon::current_num_threads(),
         }
     }
 
