@@ -10,19 +10,33 @@ pub struct CPUTensor<'a> {
     pub data: Cow<'a, Vec<f64>>,
 }
 
-impl <'a> CPUTensor<'a> {
+impl<'a> CPUTensor<'a> {
     pub fn init(init: impl TensorInit) -> Option<Self> {
         let (shape, data) = init.make()?;
         let stride = stride_of(&shape);
-        Some(Self { shape, stride, data: Cow::Owned(data) })
+        Some(Self {
+            shape,
+            stride,
+            data: Cow::Owned(data),
+        })
     }
 
     pub fn reshape(&'a self, shape: &[usize]) -> Option<CPUTensor<'a>> {
-        reshape_impl(Cow::Borrowed(&self.shape), Cow::Borrowed(&self.stride), Cow::Borrowed(&self.data), shape)
+        reshape_impl(
+            Cow::Borrowed(&self.shape),
+            Cow::Borrowed(&self.stride),
+            Cow::Borrowed(&self.data),
+            shape,
+        )
     }
 
     pub fn into_reshape(self, shape: &[usize]) -> Option<CPUTensor<'a>> {
-        reshape_impl(Cow::Owned(self.shape), Cow::Owned(self.stride), self.data, shape)
+        reshape_impl(
+            Cow::Owned(self.shape),
+            Cow::Owned(self.stride),
+            self.data,
+            shape,
+        )
     }
 
     pub fn transpose(&'a self, axes: &[usize]) -> Option<CPUTensor<'a>> {
@@ -67,16 +81,15 @@ impl <'a> CPUTensor<'a> {
         }
         new
     }
-    
+
     pub fn cloned_view<'o>(&self) -> CPUTensor<'o> {
         CPUTensor {
             shape: self.shape.clone(),
             stride: self.stride.clone(),
             data: Cow::Owned(self.data.clone().into_owned()),
         }
-    } 
+    }
 }
-
 
 pub fn stride_of(shape: &[usize]) -> Vec<usize> {
     let mut stride = vec![1; shape.len()];
@@ -90,7 +103,12 @@ pub fn length_of(shape: &[usize]) -> usize {
     shape.iter().product()
 }
 
-fn reshape_impl<'a>(shape: Cow<'a, Vec<usize>>, stride: Cow<'a, Vec<usize>>, with_data: Cow<'a, Vec<f64>>, to_shape: &[usize]) -> Option<CPUTensor<'a>> {
+fn reshape_impl<'a>(
+    shape: Cow<'a, Vec<usize>>,
+    stride: Cow<'a, Vec<usize>>,
+    with_data: Cow<'a, Vec<f64>>,
+    to_shape: &[usize],
+) -> Option<CPUTensor<'a>> {
     if length_of(&shape) != length_of(&to_shape) {
         return None;
     }
@@ -196,8 +214,12 @@ fn reshape_impl<'a>(shape: Cow<'a, Vec<usize>>, stride: Cow<'a, Vec<usize>>, wit
     })
 }
 
-
-fn transpose_impl<'a>(shape: &[usize], stride: &[usize], with_data: Cow<'a, Vec<f64>>, axes: &[usize]) -> Option<CPUTensor<'a>> {
+fn transpose_impl<'a>(
+    shape: &[usize],
+    stride: &[usize],
+    with_data: Cow<'a, Vec<f64>>,
+    axes: &[usize],
+) -> Option<CPUTensor<'a>> {
     if shape.len() != axes.len() || axes.iter().any(|i| *i >= shape.len()) {
         return None;
     }
@@ -208,9 +230,13 @@ fn transpose_impl<'a>(shape: &[usize], stride: &[usize], with_data: Cow<'a, Vec<
     let old_shape = shape.to_vec();
     let old_stride = stride.to_vec();
     let mut new_shape = Vec::with_capacity(shape.len());
-    unsafe { new_shape.set_len(shape.len()); }
+    unsafe {
+        new_shape.set_len(shape.len());
+    }
     let mut new_stride = Vec::with_capacity(shape.len());
-    unsafe { new_stride.set_len(shape.len()); }
+    unsafe {
+        new_stride.set_len(shape.len());
+    }
     for (i, j) in axes.iter().enumerate() {
         new_shape[i] = old_shape[*j];
         new_stride[i] = old_stride[*j];

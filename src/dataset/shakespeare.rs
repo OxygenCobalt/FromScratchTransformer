@@ -1,12 +1,17 @@
-use std::{fs::File, io::{self, BufRead, BufReader}, path::{Path, PathBuf}};
+use std::{
+    fs::File,
+    io::{self, BufRead, BufReader},
+    path::{Path, PathBuf},
+};
 
-use arrow::{array::{Array, BinaryArray, Int64Array, StructArray}};
+use arrow::array::{Array, BinaryArray, Int64Array, StructArray};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ArrowReaderBuilder;
 
 use crate::{
-    dataset::{Example, Test, TestSet, Train, TrainSet, Validation, ValidationSet}, tensor::Tensor
+    dataset::{Example, Test, TestSet, Train, TrainSet, Validation, ValidationSet},
+    tensor::Tensor,
 };
 
 pub struct Shakespeare(pub PathBuf);
@@ -15,7 +20,7 @@ fn load_shakespeare(path: &Path) -> io::Result<Vec<String>> {
     let file = File::open(path)?;
     let buf_reader = BufReader::new(file);
     let mut sequences = Vec::new();
-    let mut current_sequence=  String::new();
+    let mut current_sequence = String::new();
     for line in buf_reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -34,7 +39,6 @@ fn load_shakespeare(path: &Path) -> io::Result<Vec<String>> {
     }
     Ok(sequences)
 }
-
 
 impl TrainSet for Shakespeare {
     type Example = String;

@@ -1,14 +1,18 @@
 use std::marker::PhantomData;
 
+use crate::{
+    dataset::{Example, Test},
+    ml::nn::{NeuralNetwork, Reporting},
+    tensor::Tensor,
+};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
-use crate::{dataset::{Example, Test}, ml::nn::{NeuralNetwork, Reporting}, tensor::Tensor};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Loss {
     MSE,
     LogLikelihood,
-    Accuracy(AccuracyOf)
+    Accuracy(AccuracyOf),
 }
 
 impl Loss {
@@ -22,7 +26,7 @@ impl Loss {
                 } else {
                     T::scalar(0.0)
                 }
-            },
+            }
         }
     }
 }
@@ -41,14 +45,16 @@ impl AccuracyOf {
                     tensor
                         .iter()
                         .enumerate()
-                        .max_by(|(_, x), (_, y)| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal))
+                        .max_by(|(_, x), (_, y)| {
+                            x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                        })
                         .unwrap()
                         .0
                 }
                 let predicted = flat_argmax(batch_activations);
                 let actual = flat_argmax(output);
                 predicted == actual
-            },
+            }
         }
     }
 }
@@ -56,15 +62,15 @@ impl AccuracyOf {
 pub struct LossesOn<'a, T: Tensor, E: Example<T>> {
     t: PhantomData<T>,
     test: &'a Test<E>,
-    losses: &'a [Loss]
+    losses: &'a [Loss],
 }
 
-impl <'a, T: Tensor, E: Example<T>> LossesOn<'a, T, E> {
+impl<'a, T: Tensor, E: Example<T>> LossesOn<'a, T, E> {
     pub fn new(test: &'a Test<E>, losses: &'a [Loss]) -> Self {
         Self {
             t: PhantomData,
             test,
-            losses
+            losses,
         }
     }
 }
@@ -72,10 +78,21 @@ impl <'a, T: Tensor, E: Example<T>> LossesOn<'a, T, E> {
 impl<'a, T: Tensor, E: Example<T>> Reporting<T> for LossesOn<'a, T, E> {
     fn report(&self, nn: &NeuralNetwork<T>, epoch: Option<u64>) -> std::io::Result<()> {
         let eval_bar = ProgressBar::new(self.test.len() as u64)
-            .with_style(ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}]")
-                            .unwrap()
-                            .progress_chars("=> "))
-            .with_prefix(format!["eval@epoch {}", epoch.map(|e| (e + 1).to_string()).unwrap_or("init".to_string())].blue().to_string());
+            .with_style(
+                ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}]")
+                    .unwrap()
+                    .progress_chars("=> "),
+            )
+            .with_prefix(
+                format![
+                    "eval@epoch {}",
+                    epoch
+                        .map(|e| (e + 1).to_string())
+                        .unwrap_or("init".to_string())
+                ]
+                .blue()
+                .to_string(),
+            );
         let mut avg_losses = vec![0.0; self.losses.len()];
         for example in self.test.iter() {
             let activations = nn.test(&example.input());
@@ -91,7 +108,9 @@ impl<'a, T: Tensor, E: Example<T>> Reporting<T> for LossesOn<'a, T, E> {
             println!(
                 "{}: epoch {}: avg. {} = {:.3}",
                 "losses_on".purple(),
-                epoch.map(|e| e.to_string()).unwrap_or_else(|| "init".to_string()),
+                epoch
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "init".to_string()),
                 match loss {
                     Loss::MSE => "mse",
                     Loss::LogLikelihood => "log-lik",
@@ -150,14 +169,13 @@ impl<'a, T: Tensor, E: Example<T>> Reporting<T> for LossesOn<'a, T, E> {
 //     }
 // }
 
-
 // pub struct Argmax;
 
 // impl AccuracyFunction for Argmax {
 //     fn tag() -> String {
 //         "argmax".to_string()
 //     }
-    
+
 //     fn accuracy<T: Tensor>(&self, batch_activations: &T, output: &T) -> bool {
 //         fn flat_argmax<T: Tensor>(tensor: &T) -> usize {
 //             tensor
@@ -174,5 +192,5 @@ impl<'a, T: Tensor, E: Example<T>> Reporting<T> for LossesOn<'a, T, E> {
 // }
 
 // pub trait Losses<L: Loss> {
-//     fn 
+//     fn
 // }

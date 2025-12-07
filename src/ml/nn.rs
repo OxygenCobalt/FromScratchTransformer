@@ -2,7 +2,10 @@ use atomic_float::AtomicF64;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand_distr::{Distribution, Normal};
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rayon::iter::{
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
+    IntoParallelRefMutIterator, ParallelIterator,
+};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
@@ -11,7 +14,8 @@ use std::sync::atomic::Ordering;
 
 use crate::dataset::{EagerExample, Example, Train};
 use crate::tensor::{
-    Autograd, cpu::{CPUAutograd, CPUTensor}, DifferentiableTensor, Field, Fill, Generate, Tensor, TensorIO, TensorMut, Tt
+    Autograd, DifferentiableTensor, Field, Fill, Generate, Tensor, TensorIO, TensorMut, Tt,
+    cpu::{CPUAutograd, CPUTensor},
 };
 
 use super::{activation::Activation, loss::Loss};
@@ -20,7 +24,7 @@ pub struct NeuralNetwork<T: Tensor> {
     axons: Vec<Axon<T>>,
 }
 
-impl <T: Tensor> NeuralNetwork<T> {
+impl<T: Tensor> NeuralNetwork<T> {
     pub fn test(&self, input: &T) -> T {
         let mut current = input.clone();
         for axon in &self.axons {
@@ -72,7 +76,10 @@ impl<T: TensorMut + DifferentiableTensor + Clone> NeuralNetwork<T> {
                 .with_prefix(format!["train@epoch {}", epoch + 1].blue().to_string());
             let mut total_loss = 0.0;
             for (i, batch) in batches.into_iter().enumerate() {
-                let mut concat_example = EagerExample { input: vec![], output: vec![] };
+                let mut concat_example = EagerExample {
+                    input: vec![],
+                    output: vec![],
+                };
                 for example in batch {
                     concat_example.input.push(example.input());
                     concat_example.output.push(example.output());
@@ -119,7 +126,7 @@ where
         reporting: &impl Reporting<T>,
         train: &Train<impl Example<T> + Send + Sync>,
         hyperparams: &Hyperparams,
-        loss: Loss
+        loss: Loss,
     ) -> io::Result<Self> {
         println!(
             "{}: epochs = {} / batch size = {} / learning rate = {}",
@@ -175,28 +182,38 @@ where
                         loss.backward();
                         auto_axons
                     })
-                    .fold(|| Vec::new(), |mut a: Vec<Axon<T>>, b: Vec<Axon<T::Autograd<'_>>>| {
-                        if a.is_empty() {
-                            return b.into_iter().map(|a| a.into_grad().unwrap()).collect();
-                        }
-                        for (axon, other_axon) in a.iter_mut().zip(b.into_iter()) {
-                            axon.merge(other_axon.into_grad().unwrap());
-                        }
-                        a
-                    })
-                    .reduce(|| Vec::new(), |mut a: Vec<Axon<T>>, b: Vec<Axon<T>>| {
-                        if a.is_empty() {
-                            return b;
-                        }
-                        for (axon, other_axon) in a.iter_mut().zip(b.into_iter()) {
-                            axon.merge(other_axon);
-                        }
-                        a
-                    });
+                    .fold(
+                        || Vec::new(),
+                        |mut a: Vec<Axon<T>>, b: Vec<Axon<T::Autograd<'_>>>| {
+                            if a.is_empty() {
+                                return b.into_iter().map(|a| a.into_grad().unwrap()).collect();
+                            }
+                            for (axon, other_axon) in a.iter_mut().zip(b.into_iter()) {
+                                axon.merge(other_axon.into_grad().unwrap());
+                            }
+                            a
+                        },
+                    )
+                    .reduce(
+                        || Vec::new(),
+                        |mut a: Vec<Axon<T>>, b: Vec<Axon<T>>| {
+                            if a.is_empty() {
+                                return b;
+                            }
+                            for (axon, other_axon) in a.iter_mut().zip(b.into_iter()) {
+                                axon.merge(other_axon);
+                            }
+                            a
+                        },
+                    );
 
-                 init.nn.axons.par_iter_mut().zip(grad_axons.into_par_iter()).for_each(|(axon, grad_axon)| {
-                    axon.commit(grad_axon, c);
-                 });
+                init.nn
+                    .axons
+                    .par_iter_mut()
+                    .zip(grad_axons.into_par_iter())
+                    .for_each(|(axon, grad_axon)| {
+                        axon.commit(grad_axon, c);
+                    });
                 sgd_bar.inc(1);
                 sgd_bar.set_message(format![
                     "{:.3}",
@@ -264,7 +281,7 @@ impl Layers {
     }
 }
 
-impl <T: Tensor> Setup<T> for Layers {
+impl<T: Tensor> Setup<T> for Layers {
     fn setup(&self) -> io::Result<Init<T>> {
         let mut axons = vec![];
         for i in 0..self.0.len() {
@@ -347,11 +364,7 @@ impl<'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Setup<T> for Checkpoint<'a, 
 }
 
 impl<'a, T: TensorIO, S: Setup<T>, R: Reporting<T>> Reporting<T> for Checkpoint<'a, T, S, R> {
-    fn report(
-        &self,
-        nn: &NeuralNetwork<T>,
-        epoch: Option<u64>,
-    ) -> io::Result<()> {
+    fn report(&self, nn: &NeuralNetwork<T>, epoch: Option<u64>) -> io::Result<()> {
         self.reporting.report(nn, epoch)?;
         let path = self.checkpoint_path(epoch);
         println!(
@@ -397,8 +410,8 @@ pub enum Layer {
     Embeddings {
         size: usize,
         vocab: usize,
-        context: usize
-    }
+        context: usize,
+    },
 }
 
 impl Layer {
@@ -443,7 +456,9 @@ impl Layer {
             Self::Pool2D { field, .. } => Axon::Pool2D {
                 pool: Pool2D::new(*field),
             },
-            Self::Embeddings { size, vocab, .. } => Axon::Embeddings { embeddings: Embeddings::new(*size, *vocab) }
+            Self::Embeddings { size, vocab, .. } => Axon::Embeddings {
+                embeddings: Embeddings::new(*size, *vocab),
+            },
         }
     }
 
@@ -472,7 +487,7 @@ impl Layer {
                     field.locations_on(*input_size).unwrap(),
                     field.locations_on(*input_size).unwrap(),
                 ]
-            },
+            }
             Self::Embeddings { size, context, .. } => {
                 vec![*size, *context]
             }
@@ -485,7 +500,7 @@ enum Axon<T: Tensor> {
     Dropout { ff: FeedForward<T>, rate: f64 },
     Conv2D { conv: Conv2D<T> },
     Pool2D { pool: Pool2D<T> },
-    Embeddings { embeddings: Embeddings<T> }
+    Embeddings { embeddings: Embeddings<T> },
 }
 
 impl<T: Tensor> Axon<T> {
@@ -495,7 +510,7 @@ impl<T: Tensor> Axon<T> {
             Self::Dropout { ff, .. } => ff.forward(activations),
             Self::Conv2D { conv } => conv.forward(&activations),
             Self::Pool2D { pool } => pool.forward(activations),
-            Self::Embeddings { embeddings } => embeddings.forward(activations)
+            Self::Embeddings { embeddings } => embeddings.forward(activations),
         }
     }
 }
@@ -546,7 +561,11 @@ impl<T: DifferentiableTensor + TensorMut> Axon<T> {
                     phantom: PhantomData,
                 },
             },
-            Self::Embeddings { embeddings } => Axon::Embeddings { embeddings: Embeddings { c: embeddings.c.autograd() } }
+            Self::Embeddings { embeddings } => Axon::Embeddings {
+                embeddings: Embeddings {
+                    c: embeddings.c.autograd(),
+                },
+            },
         }
     }
 
@@ -568,7 +587,12 @@ impl<T: DifferentiableTensor + TensorMut> Axon<T> {
             (Self::Pool2D { .. }, Axon::<T>::Pool2D { .. }) => {
                 // pooling layers have only a fixed field config, nothing to commit
             }
-            (Self::Embeddings { embeddings }, Axon::<T>::Embeddings { embeddings: autoembeddings }) => {
+            (
+                Self::Embeddings { embeddings },
+                Axon::<T>::Embeddings {
+                    embeddings: autoembeddings,
+                },
+            ) => {
                 embeddings.c.descend(c, &autoembeddings.c).unwrap();
             }
             _ => return None,
@@ -593,7 +617,12 @@ impl<T: DifferentiableTensor + TensorMut> Axon<T> {
             (Self::Pool2D { .. }, Axon::<T>::Pool2D { .. }) => {
                 // pooling layers have only a fixed field config, nothing to merge
             }
-            (Self::Embeddings { embeddings }, Axon::<T>::Embeddings { embeddings: otherembeddings }) => {
+            (
+                Self::Embeddings { embeddings },
+                Axon::<T>::Embeddings {
+                    embeddings: otherembeddings,
+                },
+            ) => {
                 embeddings.c.add_assign(&otherembeddings.c).unwrap();
             }
             _ => {}
@@ -601,7 +630,7 @@ impl<T: DifferentiableTensor + TensorMut> Axon<T> {
     }
 }
 
-impl <'a, T: Autograd> Axon<T> {
+impl<'a, T: Autograd> Axon<T> {
     pub fn into_grad(self) -> Option<Axon<T::Parent>> {
         match self {
             Self::Dense { ff } => Some(Axon::Dense {
@@ -639,8 +668,8 @@ impl <'a, T: Autograd> Axon<T> {
             }),
             Self::Embeddings { embeddings } => Some(Axon::Embeddings {
                 embeddings: Embeddings {
-                    c: embeddings.c.into_grad()?
-                }
+                    c: embeddings.c.into_grad()?,
+                },
             }),
         }
     }
@@ -693,7 +722,7 @@ impl<T: TensorIO> Axon<T> {
             Self::Pool2D { pool } => {
                 write.write_all(b"AxonPl2D")?;
                 pool.write(write)
-            },
+            }
             Self::Embeddings { embeddings } => {
                 write.write_all(b"AxonEmbg")?;
                 embeddings.write(write)
@@ -938,13 +967,19 @@ impl<T: TensorIO> Pool2D<T> {
 }
 
 struct Embeddings<T: Tensor> {
-    c: T
+    c: T,
 }
 
-impl <T: Tensor> Embeddings<T> {
+impl<T: Tensor> Embeddings<T> {
     fn new(size: usize, vocab: usize) -> Self {
         let xavier = Normal::new(0.0, 1.0 / (size as f64).sqrt()).unwrap();
-        Self { c: T::tensor(Generate { shape: vec![size, vocab], with: || xavier.sample(&mut rand::rng()) }).unwrap() }
+        Self {
+            c: T::tensor(Generate {
+                shape: vec![size, vocab],
+                with: || xavier.sample(&mut rand::rng()),
+            })
+            .unwrap(),
+        }
     }
 
     fn forward(&self, activations: T) -> T {
@@ -952,7 +987,7 @@ impl <T: Tensor> Embeddings<T> {
     }
 }
 
-impl <T: TensorIO> Embeddings<T> {
+impl<T: TensorIO> Embeddings<T> {
     fn write(&self, write: &mut impl Write) -> io::Result<()> {
         self.c.write(write)
     }

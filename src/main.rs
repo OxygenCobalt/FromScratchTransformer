@@ -5,12 +5,22 @@ use colored::Colorize;
 use rayon::ThreadPoolBuilder;
 
 use crate::{
-    dataset::{TestSet, TrainSet, distill::Distill, mnist::Mnist, shakespeare::Shakespeare, wikitext::WikiText2}, ml::{activation::Activation, language::{FixedSequencer, TokenizedExample, Tokenizer, WordTokenizer}, loss::{AccuracyOf, Loss, LossesOn}, nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork}}, tensor::{Field, cpu::CPUTensor}
+    dataset::{
+        TestSet, TrainSet, distill::Distill, mnist::Mnist, shakespeare::Shakespeare,
+        wikitext::WikiText2,
+    },
+    ml::{
+        activation::Activation,
+        language::{FixedSequencer, TokenizedExample, Tokenizer, WordTokenizer},
+        loss::{AccuracyOf, Loss, LossesOn},
+        nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork},
+    },
+    tensor::{Field, cpu::CPUTensor},
 };
 
-mod tensor;
 mod dataset;
 mod ml;
+mod tensor;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -71,14 +81,24 @@ fn shallow_mnist() {
     .unwrap();
     let test = mnist.test().unwrap();
     let reporting = LossesOn::new(&test, &[Loss::MSE, Loss::Accuracy(AccuracyOf::Argmax)]);
-    let checkpointing =
-        Checkpoint::new(&layers, &reporting, Path::new("data/checkpoints/mnist/shallow"));
+    let checkpointing = Checkpoint::new(
+        &layers,
+        &reporting,
+        Path::new("data/checkpoints/mnist/shallow"),
+    );
     let hyperparams = Hyperparams {
         epochs: 30,
         batch_size: 10,
         learning_rate: 3.0,
     };
-    NeuralNetwork::<CPUTensor>::train(&checkpointing, &checkpointing, &mnist.train().unwrap(), &hyperparams, Loss::MSE).unwrap();
+    NeuralNetwork::<CPUTensor>::train(
+        &checkpointing,
+        &checkpointing,
+        &mnist.train().unwrap(),
+        &hyperparams,
+        Loss::MSE,
+    )
+    .unwrap();
 }
 
 fn dropout_mnist() {
@@ -100,14 +120,24 @@ fn dropout_mnist() {
     let train = mnist.train().unwrap();
     let test = mnist.test().unwrap();
     let reporting = LossesOn::new(&test, &[Loss::MSE, Loss::Accuracy(AccuracyOf::Argmax)]);
-    let checkpointing =
-        Checkpoint::new(&layers, &reporting, Path::new("data/checkpoints/mnist/dropout"));
+    let checkpointing = Checkpoint::new(
+        &layers,
+        &reporting,
+        Path::new("data/checkpoints/mnist/dropout"),
+    );
     let hyperparams = Hyperparams {
         epochs: 30,
         batch_size: 10,
         learning_rate: 3.0,
     };
-    NeuralNetwork::<CPUTensor>::train(&checkpointing, &checkpointing, &train, &hyperparams, Loss::MSE).unwrap();
+    NeuralNetwork::<CPUTensor>::train(
+        &checkpointing,
+        &checkpointing,
+        &train,
+        &hyperparams,
+        Loss::MSE,
+    )
+    .unwrap();
 }
 
 fn conv_mnist() {
@@ -141,8 +171,15 @@ fn conv_mnist() {
     .unwrap();
     let train = mnist.train().unwrap();
     let test = mnist.test().unwrap();
-    let reporting = LossesOn::new(&test, &[Loss::LogLikelihood, Loss::Accuracy(AccuracyOf::Argmax)]);
-    let checkpointing = Checkpoint::new(&layers, &reporting, Path::new("data/checkpoints/mnist/conv"));
+    let reporting = LossesOn::new(
+        &test,
+        &[Loss::LogLikelihood, Loss::Accuracy(AccuracyOf::Argmax)],
+    );
+    let checkpointing = Checkpoint::new(
+        &layers,
+        &reporting,
+        Path::new("data/checkpoints/mnist/conv"),
+    );
     let hyperparams = Hyperparams {
         epochs: 60,
         batch_size: 10,
@@ -168,22 +205,41 @@ fn shallow_shakespeare() {
     let context = FixedSequencer::new(5);
     let train = train.map(|s| {
         let stripped = s.replace("\n", " ");
-        context.split(&tokenizer.forward(&stripped).unwrap()).iter()
+        context
+            .split(&tokenizer.forward(&stripped).unwrap())
+            .iter()
             .map(|s| TokenizedExample::from(s, &tokenizer))
-            .collect::<Vec<TokenizedExample>>().into_iter()
+            .collect::<Vec<TokenizedExample>>()
+            .into_iter()
     });
     let test = test.map(|s| {
         let stripped = s.replace("\n", " ");
-        context.split(&tokenizer.forward(&stripped).unwrap()).iter()
+        context
+            .split(&tokenizer.forward(&stripped).unwrap())
+            .iter()
             .map(|s| TokenizedExample::from(s, &tokenizer))
-            .collect::<Vec<TokenizedExample>>().into_iter()
+            .collect::<Vec<TokenizedExample>>()
+            .into_iter()
     });
     let reporting = LossesOn::new(&test, &[Loss::LogLikelihood]);
     let layers = Layers::new(vec![
-        Layer::Embeddings { size: 60, vocab: tokenizer.vocab(), context: 5 },
-        Layer::Dense { input_shape: None, neurons: 128, activation: Activation::Tanh },
-        Layer::Dense { input_shape: None, neurons: tokenizer.vocab(), activation: Activation::Softmax },
-    ]).unwrap();
+        Layer::Embeddings {
+            size: 60,
+            vocab: tokenizer.vocab(),
+            context: 5,
+        },
+        Layer::Dense {
+            input_shape: None,
+            neurons: 128,
+            activation: Activation::Tanh,
+        },
+        Layer::Dense {
+            input_shape: None,
+            neurons: tokenizer.vocab(),
+            activation: Activation::Softmax,
+        },
+    ])
+    .unwrap();
     // let checkpointing = Checkpoint::new(&layers, &reporting, Path::new("data/wikitext"));
     let hyperparams = Hyperparams {
         epochs: 1,
@@ -198,5 +254,4 @@ fn shallow_shakespeare() {
         Loss::LogLikelihood,
     )
     .unwrap();
-    
 }

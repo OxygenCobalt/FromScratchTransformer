@@ -2,9 +2,7 @@ pub mod cpu;
 pub mod cpu2;
 
 use core::f64;
-use std::{
-    io::{self, Read, Write}
-};
+use std::io::{self, Read, Write};
 
 use crate::tensor::cpu::CPUTensor;
 
@@ -40,7 +38,9 @@ where
 }
 
 pub trait DifferentiableTensor: Tensor {
-    type Autograd<'a>: Autograd<Parent = Self> where Self: 'a;
+    type Autograd<'a>: Autograd<Parent = Self>
+    where
+        Self: 'a;
     fn autograd(&self) -> Self::Autograd<'_>;
     fn into_autograd<'a>(self) -> Self::Autograd<'a>;
 }

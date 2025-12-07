@@ -1,4 +1,8 @@
-use std::{fs::File, io, path::{Path, PathBuf}};
+use std::{
+    fs::File,
+    io,
+    path::{Path, PathBuf},
+};
 
 use arrow::array::{Array, BinaryArray, Int64Array, StructArray};
 use colored::Colorize;
@@ -6,7 +10,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ArrowReaderBuilder;
 
 use crate::{
-    dataset::{Example, Test, TestSet, Train, TrainSet}, tensor::Tensor
+    dataset::{Example, Test, TestSet, Train, TrainSet},
+    tensor::Tensor,
 };
 
 pub struct Mnist(pub PathBuf);
@@ -87,12 +92,17 @@ pub struct MnistDigit {
     label: i64,
 }
 
-impl <T: Tensor> Example<T> for MnistDigit {
+impl<T: Tensor> Example<T> for MnistDigit {
     fn input(&self) -> T {
-        T::vector(self.pixels.iter().map(|&b| b as f64 / 255.0).collect::<Vec<f64>>())
-            .unwrap()
-            .reshape(&[self.width as usize, self.height as usize])
-            .unwrap()
+        T::vector(
+            self.pixels
+                .iter()
+                .map(|&b| b as f64 / 255.0)
+                .collect::<Vec<f64>>(),
+        )
+        .unwrap()
+        .reshape(&[self.width as usize, self.height as usize])
+        .unwrap()
     }
 
     fn output(&self) -> T {

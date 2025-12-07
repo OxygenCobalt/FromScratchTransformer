@@ -1,5 +1,5 @@
 pub mod activation;
 pub mod language;
-pub mod nn;
-pub mod loss;
 pub mod layers;
+pub mod loss;
+pub mod nn;

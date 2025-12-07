@@ -1,8 +1,16 @@
 use core::f64;
-use std::{borrow::Cow, collections::HashSet, io::{self, Read, Write}, sync::{Arc, Mutex}, simd::{Simd}};
+use std::{
+    borrow::Cow,
+    collections::HashSet,
+    io::{self, Read, Write},
+    simd::Simd,
+    sync::{Arc, Mutex},
+};
 
-use crate::{tensor::{Autograd, DifferentiableTensor, Field, Fill, FillUninit, Tensor, TensorIO, TensorInit, TensorMut}};
-
+use crate::tensor::{
+    Autograd, DifferentiableTensor, Field, Fill, FillUninit, Tensor, TensorIO, TensorInit,
+    TensorMut,
+};
 
 #[derive(Clone, PartialEq)]
 pub struct CPUTensor {
@@ -20,9 +28,11 @@ macro_rules! impl_arithmetic {
     ($self:expr, $other:expr, $lhs:ident, $rhs:ident => $simd:expr, $elem:expr) => {{
         if $other.ndim() == 0 {
             let mut new_data = Vec::with_capacity($self.data.len());
-            unsafe { new_data.set_len($self.data.len()); }
+            unsafe {
+                new_data.set_len($self.data.len());
+            }
             let other = $other.data[0];
-            
+
             let lhs_slice = $self.data.as_slice();
             let mut lhs_ptr = lhs_slice.as_ptr();
             let $rhs = Simd::<f64, 8>::splat(other);
@@ -53,7 +63,9 @@ macro_rules! impl_arithmetic {
         }
         if $self.shape == $other.shape && $self.stride == $other.stride {
             let mut new_data = Vec::with_capacity($self.data.len());
-            unsafe { new_data.set_len($self.data.len()); }
+            unsafe {
+                new_data.set_len($self.data.len());
+            }
             let lhs_slice = $self.data.as_slice();
             let mut lhs_ptr = lhs_slice.as_ptr();
             let rhs_slice = $other.data.as_slice();
@@ -96,12 +108,12 @@ macro_rules! impl_arithmetic {
                     new_shape.push(l);
                     lhs_strides.push($self.stride[i]);
                     rhs_strides.push($other.stride[i]);
-                },
+                }
                 (Some(l), Some(r)) if l == 1 => {
                     new_shape.push(r);
                     lhs_strides.push(0);
                     rhs_strides.push($other.stride[i]);
-                },
+                }
                 (None, Some(r)) => {
                     new_shape.push(r);
                     lhs_strides.push(0);
@@ -111,13 +123,13 @@ macro_rules! impl_arithmetic {
                     new_shape.push(l);
                     lhs_strides.push($self.stride[i]);
                     rhs_strides.push(0);
-                },
+                }
                 (Some(l), None) => {
                     new_shape.push(l);
                     lhs_strides.push($self.stride[i]);
                     rhs_strides.push(0);
                 }
-                _ => return None
+                _ => return None,
             }
         }
         let mut new = Self::tensor(Fill::null(new_shape)).unwrap();
@@ -300,7 +312,11 @@ impl CPUTensor {
         Some(new_stride)
     }
 
-    fn raw_transpose(shape: &[usize], stride: &[usize], axes: &[usize]) -> Option<(Vec<usize>, Vec<usize>)> {
+    fn raw_transpose(
+        shape: &[usize],
+        stride: &[usize],
+        axes: &[usize],
+    ) -> Option<(Vec<usize>, Vec<usize>)> {
         if shape.len() != axes.len() || axes.iter().any(|i| *i >= shape.len()) {
             return None;
         }
@@ -328,9 +344,11 @@ impl CPUTensor {
         rhs_stride: &[usize],
         depth: usize,
     ) -> Option<Self> {
-
-
-        fn contiguous_within(shape: &[usize], stride: &[usize], within: std::ops::Range<usize>) -> bool {
+        fn contiguous_within(
+            shape: &[usize],
+            stride: &[usize],
+            within: std::ops::Range<usize>,
+        ) -> bool {
             if shape.len() == 0 {
                 return true;
             }
@@ -363,9 +381,14 @@ impl CPUTensor {
         let rhs_survivor_len = rhs_survivors.len();
         let mut new_shape: Vec<usize> = lhs_survivors.to_vec();
         new_shape.extend_from_slice(rhs_survivors);
-        if contiguous_within(lhs_shape, &lhs_stride, (lhs_shape.len() - depth)..(lhs_shape.len())) && contiguous_within(rhs_shape, &rhs_stride, 0..depth) {
+        if contiguous_within(
+            lhs_shape,
+            &lhs_stride,
+            (lhs_shape.len() - depth)..(lhs_shape.len()),
+        ) && contiguous_within(rhs_shape, &rhs_stride, 0..depth)
+        {
             // fast case: dense axk kxb matmul
-            // TODO: implement block intersections so i can apply this method to arbitrary 
+            // TODO: implement block intersections so i can apply this method to arbitrary
             // non-contiguous tensors
             let k = contraction_shape.iter().product::<usize>();
             let a = lhs_survivors.iter().product::<usize>();
@@ -384,7 +407,8 @@ impl CPUTensor {
                     let mut sum = 0.0;
                     for _ in 0..k {
                         unsafe {
-                            sum += *lhs_data.get_unchecked(lhs_idx) * *rhs_data.get_unchecked(rhs_idx);
+                            sum +=
+                                *lhs_data.get_unchecked(lhs_idx) * *rhs_data.get_unchecked(rhs_idx);
                         }
                         lhs_idx += lhs_2strides[1];
                         rhs_idx += rhs_2strides[0];
@@ -662,7 +686,11 @@ impl Tensor for CPUTensor {
         }
         let mut new_shape = self.shape.clone();
         new_shape[1] = indices.shape[0];
-        let mut new = Self::tensor(Fill { shape: new_shape, with: 0.0 }).unwrap();
+        let mut new = Self::tensor(Fill {
+            shape: new_shape,
+            with: 0.0,
+        })
+        .unwrap();
         let mut new_point = vec![0; new.ndim()];
         let mut new_idx = 0;
         while new_point[1] < indices.shape[0] {
@@ -926,7 +954,7 @@ impl Tensor for CPUTensor {
         Some(new)
     }
 
-    fn softmax(mut self) -> Option<Self> {        
+    fn softmax(mut self) -> Option<Self> {
         // what we want to do is be able to take the softmax
         // while preserving many-dimensional structures, so
         // we flatten down to [classes, cols] where cols is
@@ -936,7 +964,7 @@ impl Tensor for CPUTensor {
         let cols = self.data.len() / classes;
         let flat_strides = self.view(&[classes, cols])?;
         let mut idx = 0;
-        for i in 0..cols { 
+        for i in 0..cols {
             let mut max = f64::NEG_INFINITY;
             let mut max_idx = idx;
             for j in 0..classes {
@@ -965,14 +993,17 @@ impl Tensor for CPUTensor {
 }
 
 impl DifferentiableTensor for CPUTensor {
-    type Autograd<'a> = CPUAutograd<'a> where Self: 'a;
+    type Autograd<'a>
+        = CPUAutograd<'a>
+    where
+        Self: 'a;
     fn autograd(&self) -> Self::Autograd<'_> {
         CPUAutograd(AutogradNode::new(AutogradNodeData {
             tensor: Cow::Borrowed(self),
             edge: AutogradEdge {
                 grad: Mutex::new(None),
                 op: None,
-            }
+            },
         }))
     }
 
@@ -982,7 +1013,7 @@ impl DifferentiableTensor for CPUTensor {
             edge: AutogradEdge {
                 grad: Mutex::new(None),
                 op: None,
-            }
+            },
         }))
     }
 }
@@ -992,7 +1023,7 @@ macro_rules! impl_arithmetic_assign {
         if $other.ndim() == 0 {
             let len = $self.data.len();
             let other = $other.data[0];
-            
+
             let lhs_slice = $self.data.as_mut_slice();
             let mut lhs_ptr = lhs_slice.as_mut_ptr();
             let $rhs = Simd::<f64, 8>::splat(other);
@@ -1037,7 +1068,7 @@ macro_rules! impl_arithmetic_assign {
                     *lhs_slice.get_unchecked_mut(i) = $elem;
                 }
             }
-            return Some(())
+            return Some(());
         }
         let k = $self.shape.len().max($other.shape.len());
         let mut new_shape = Vec::with_capacity(k);
@@ -1051,12 +1082,12 @@ macro_rules! impl_arithmetic_assign {
                     new_shape.push(l);
                     lhs_strides.push($self.stride[i]);
                     rhs_strides.push($other.stride[i]);
-                },
+                }
                 (Some(l), Some(r)) if l == 1 => {
                     new_shape.push(r);
                     lhs_strides.push(0);
                     rhs_strides.push($other.stride[i]);
-                },
+                }
                 (None, Some(r)) => {
                     new_shape.push(r);
                     lhs_strides.push(0);
@@ -1066,13 +1097,13 @@ macro_rules! impl_arithmetic_assign {
                     new_shape.push(l);
                     lhs_strides.push($self.stride[i]);
                     rhs_strides.push(0);
-                },
+                }
                 (Some(l), None) => {
                     new_shape.push(l);
                     lhs_strides.push($self.stride[i]);
                     rhs_strides.push(0);
                 }
-                _ => return None
+                _ => return None,
             }
         }
         let mut new = Self::tensor(Fill::null(new_shape)).unwrap();
@@ -1187,15 +1218,14 @@ impl TensorIO for CPUTensor {
 #[derive(Clone)]
 pub struct CPUAutograd<'a>(AutogradNode<'a>);
 
-impl <'a> Autograd for CPUAutograd<'a> {
+impl<'a> Autograd for CPUAutograd<'a> {
     type Parent = CPUTensor;
-    fn backward(self) {    
-        let identity = 
-            CPUTensor::tensor(Fill {
-                shape: self.0.tensor.shape().to_vec(),
-                with: 1.0,
-            })
-            .unwrap();
+    fn backward(self) {
+        let identity = CPUTensor::tensor(Fill {
+            shape: self.0.tensor.shape().to_vec(),
+            with: 1.0,
+        })
+        .unwrap();
         self.0.edge.backward(identity);
     }
 
@@ -1210,14 +1240,14 @@ impl<'a> CPUAutograd<'a> {
     }
 }
 
-impl <'a> Tensor for CPUAutograd<'a> {
+impl<'a> Tensor for CPUAutograd<'a> {
     fn scalar(c: impl Into<f64>) -> Self {
         Self(AutogradNode::new(AutogradNodeData {
             tensor: Cow::Owned(CPUTensor::scalar(c)),
             edge: AutogradEdge {
                 grad: Mutex::new(None),
                 op: None,
-            }
+            },
         }))
     }
 
@@ -1227,7 +1257,7 @@ impl <'a> Tensor for CPUAutograd<'a> {
             edge: AutogradEdge {
                 grad: Mutex::new(None),
                 op: None,
-            }
+            },
         })))
     }
 
@@ -1237,7 +1267,7 @@ impl <'a> Tensor for CPUAutograd<'a> {
             edge: AutogradEdge {
                 grad: Mutex::new(None),
                 op: None,
-            }
+            },
         })))
     }
 
@@ -1309,7 +1339,7 @@ impl <'a> Tensor for CPUAutograd<'a> {
     fn tanh(self) -> Self {
         Operation::Exp { t: self.0.clone() }.forward().unwrap()
     }
-    
+
     fn neg(self) -> Self {
         Operation::Neg { t: self.0 }.forward().unwrap()
     }
@@ -1376,12 +1406,12 @@ struct AutogradNodeData<'a> {
 
 struct AutogradEdge<'a> {
     grad: Mutex<Option<CPUTensor>>,
-    op: Option<Operation<'a>>
+    op: Option<Operation<'a>>,
 }
 
 fn unravel(node: AutogradNode) -> UnraveledEdge {
     if Arc::strong_count(&node) == 1 {
-        let owned=  Arc::try_unwrap(node).ok().unwrap();
+        let owned = Arc::try_unwrap(node).ok().unwrap();
         UnraveledEdge::Edge(owned.edge)
     } else {
         UnraveledEdge::Node(node.clone())
@@ -1390,13 +1420,13 @@ fn unravel(node: AutogradNode) -> UnraveledEdge {
 
 fn unravel_tensor<'a>(node: AutogradNode<'a>) -> (Cow<'a, CPUTensor>, UnraveledEdge<'a>) {
     if Arc::strong_count(&node) == 1 {
-        let owned=  Arc::try_unwrap(node).ok().unwrap();
+        let owned = Arc::try_unwrap(node).ok().unwrap();
         (owned.tensor, UnraveledEdge::Edge(owned.edge))
     } else {
         (node.tensor.clone(), UnraveledEdge::Node(node.clone()))
     }
 }
-    
+
 enum UnraveledEdge<'a> {
     Edge(AutogradEdge<'a>),
     Node(AutogradNode<'a>),
@@ -1501,10 +1531,10 @@ enum Operation<'a> {
     },
     Softmax {
         t: AutogradNode<'a>,
-    }
+    },
 }
 
-impl <'a> Operation<'a> {
+impl<'a> Operation<'a> {
     #[inline(always)]
     fn arithmetic_backward(
         lhs: AutogradNode<'a>,
@@ -1535,8 +1565,16 @@ impl <'a> Operation<'a> {
             }
         }
 
-        let mut lhs_grad = CPUTensor { shape: lhs.tensor.shape.clone(), stride: lhs.tensor.stride.clone(), data: vec![0.0; lhs.tensor.data.len()] };
-        let mut rhs_grad = CPUTensor { shape: rhs.tensor.shape.clone(), stride: rhs.tensor.stride.clone(), data: vec![0.0; rhs.tensor.data.len()] };
+        let mut lhs_grad = CPUTensor {
+            shape: lhs.tensor.shape.clone(),
+            stride: lhs.tensor.stride.clone(),
+            data: vec![0.0; lhs.tensor.data.len()],
+        };
+        let mut rhs_grad = CPUTensor {
+            shape: rhs.tensor.shape.clone(),
+            stride: rhs.tensor.stride.clone(),
+            data: vec![0.0; rhs.tensor.data.len()],
+        };
 
         let mut grad_point = vec![0; grad.ndim()];
         let mut grad_ptr = grad.data.as_ptr();
@@ -1551,16 +1589,22 @@ impl <'a> Operation<'a> {
             let (lhs_scale, rhs_scale) = op(&lhs_val, &rhs_val);
             let upstream = unsafe { *grad_ptr };
 
-            unsafe { *lhs_grad_ptr += lhs_scale * upstream; }
-            unsafe { *rhs_grad_ptr += rhs_scale * upstream; }
+            unsafe {
+                *lhs_grad_ptr += lhs_scale * upstream;
+            }
+            unsafe {
+                *rhs_grad_ptr += rhs_scale * upstream;
+            }
 
             for axis in 0..grad.ndim() {
                 if grad_point[axis] == grad.shape()[axis] - 1 {
                     grad_ptr = unsafe { grad_ptr.sub(grad.stride[axis] * grad_point[axis]) };
                     lhs_ptr = unsafe { lhs_ptr.sub(lhs_strides[axis] * grad_point[axis]) };
-                    lhs_grad_ptr = unsafe { lhs_grad_ptr.sub(lhs_strides[axis] * grad_point[axis]) };
+                    lhs_grad_ptr =
+                        unsafe { lhs_grad_ptr.sub(lhs_strides[axis] * grad_point[axis]) };
                     rhs_ptr = unsafe { rhs_ptr.sub(rhs_strides[axis] * grad_point[axis]) };
-                    rhs_grad_ptr = unsafe { rhs_grad_ptr.sub(rhs_strides[axis] * grad_point[axis]) };
+                    rhs_grad_ptr =
+                        unsafe { rhs_grad_ptr.sub(rhs_strides[axis] * grad_point[axis]) };
                     grad_point[axis] = 0;
                 } else {
                     grad_point[axis] += 1;
@@ -1596,7 +1640,8 @@ impl <'a> Operation<'a> {
         let lhs_shift = rhs.tensor.ndim() - depth;
         let mut rhs_axes: Vec<usize> = (0..rhs.tensor.ndim()).collect();
         rhs_axes.rotate_right(lhs_shift);
-        let (rhs_transposed_shape, rhs_transposed_stride) = CPUTensor::raw_transpose(&rhs.tensor.shape, &rhs.tensor.stride, &rhs_axes).unwrap();
+        let (rhs_transposed_shape, rhs_transposed_stride) =
+            CPUTensor::raw_transpose(&rhs.tensor.shape, &rhs.tensor.stride, &rhs_axes).unwrap();
         lhs.edge.backward(
             CPUTensor::raw_dot(
                 &grad.data,
@@ -1606,12 +1651,14 @@ impl <'a> Operation<'a> {
                 rhs_transposed_shape.as_slice(),
                 rhs_transposed_stride.as_slice(),
                 lhs_shift,
-            ).unwrap()
+            )
+            .unwrap(),
         );
         let rhs_shift = lhs.tensor.ndim() - depth;
         let mut lhs_axes: Vec<usize> = (0..lhs.tensor.ndim()).collect();
         lhs_axes.rotate_left(rhs_shift);
-        let (lhs_transposed_shape, lhs_transposed_stride) = CPUTensor::raw_transpose(&lhs.tensor.shape, &lhs.tensor.stride, &lhs_axes).unwrap();
+        let (lhs_transposed_shape, lhs_transposed_stride) =
+            CPUTensor::raw_transpose(&lhs.tensor.shape, &lhs.tensor.stride, &lhs_axes).unwrap();
         rhs.edge.backward(
             CPUTensor::raw_dot(
                 &lhs.tensor.data,
@@ -1621,7 +1668,8 @@ impl <'a> Operation<'a> {
                 &grad.shape,
                 &grad.stride,
                 rhs_shift,
-            ).unwrap()
+            )
+            .unwrap(),
         );
     }
 
@@ -1664,10 +1712,9 @@ impl <'a> Operation<'a> {
 
     fn tanh_backward(t: AutogradNode<'a>, grad: CPUTensor) {
         let (mut t_tensor, t_edge) = unravel_tensor(t);
-        t_tensor.to_mut().data.iter_mut()
-            .for_each(|x| {
-                *x = x.asinh().powi(2);
-            });
+        t_tensor.to_mut().data.iter_mut().for_each(|x| {
+            *x = x.asinh().powi(2);
+        });
         t_edge.backward(t_tensor.mul(&grad).unwrap());
     }
 
@@ -1691,13 +1738,19 @@ impl <'a> Operation<'a> {
 
     fn max_backward(t: AutogradNode<'a>, u: f64, grad: CPUTensor) {
         let (mut t_tensor, t_edge) = unravel_tensor(t);
-        t_tensor.to_mut().iter_mut()
+        t_tensor
+            .to_mut()
+            .iter_mut()
             .for_each(|x| *x = if *x >= u { 1.0 } else { 0.0 });
         t_edge.backward(t_tensor.mul(&grad).unwrap());
     }
 
     fn cols_at_backward(t: AutogradNode<'a>, indices: AutogradNode<'a>, grad: CPUTensor) {
-        let mut t_grad = CPUTensor { shape: t.tensor.shape.clone(), stride: t.tensor.stride.clone(), data: vec![0.0; t.tensor.data.len()] };
+        let mut t_grad = CPUTensor {
+            shape: t.tensor.shape.clone(),
+            stride: t.tensor.stride.clone(),
+            data: vec![0.0; t.tensor.data.len()],
+        };
         let mut grad_point = vec![0; grad.ndim()];
         let mut grad_idx = 0;
         while grad_point[1] < indices.tensor.shape[0] {
@@ -1729,7 +1782,11 @@ impl <'a> Operation<'a> {
     }
 
     fn colify_backward(t: AutogradNode<'a>, field: Field, grad: CPUTensor) {
-        let mut t_grad = CPUTensor { shape: t.tensor.shape.clone(), stride: t.tensor.stride.clone(), data: vec![0.0; t.tensor.data.len()] };
+        let mut t_grad = CPUTensor {
+            shape: t.tensor.shape.clone(),
+            stride: t.tensor.stride.clone(),
+            data: vec![0.0; t.tensor.data.len()],
+        };
         let locations = field
             .locations_on(*t.tensor.shape().first().unwrap())
             .unwrap();
@@ -1812,7 +1869,11 @@ impl <'a> Operation<'a> {
     }
 
     fn colmax_backward(t: AutogradNode<'a>, grad: CPUTensor) {
-        let mut t_grad = CPUTensor { shape: t.tensor.shape.clone(), stride: t.tensor.stride.clone(), data: vec![0.0; t.tensor.data.len()] };
+        let mut t_grad = CPUTensor {
+            shape: t.tensor.shape.clone(),
+            stride: t.tensor.stride.clone(),
+            data: vec![0.0; t.tensor.data.len()],
+        };
         let mut grad_point = vec![0; grad.ndim()];
         let mut grad_idx = 0;
         let mut t_idx = 0;
@@ -1894,7 +1955,7 @@ impl <'a> Operation<'a> {
     }
 
     fn softmax_backward(t: AutogradNode<'a>, grad: CPUTensor) {
-        let (t_tensor, t_edge)= unravel_tensor(t);
+        let (t_tensor, t_edge) = unravel_tensor(t);
         let orig = t_tensor.shape().to_vec();
         let classes = t_tensor.shape()[0];
         let cols = t_tensor.data.len() / classes;
@@ -1902,16 +1963,22 @@ impl <'a> Operation<'a> {
         let flat_softmax = softmax.reshape(&[classes, cols]).unwrap();
         let flat_grad = grad.reshape(&[classes, cols]).unwrap();
         t_edge.backward(
-            flat_softmax.mul(
-                &flat_grad.sub(
-                    &flat_softmax
-                        .mul(&flat_grad).unwrap()
-                        .sum()
-                        .reshape(&[1, cols])
-                        .unwrap()
-                    ).unwrap()
-                ).unwrap()
-                .reshape(&orig).unwrap()
+            flat_softmax
+                .mul(
+                    &flat_grad
+                        .sub(
+                            &flat_softmax
+                                .mul(&flat_grad)
+                                .unwrap()
+                                .sum()
+                                .reshape(&[1, cols])
+                                .unwrap(),
+                        )
+                        .unwrap(),
+                )
+                .unwrap()
+                .reshape(&orig)
+                .unwrap(),
         );
     }
 
@@ -1934,7 +2001,7 @@ impl <'a> Operation<'a> {
             Self::Reshape { t, shape } => t.tensor.clone().into_owned().reshape(shape),
             Self::Transpose { t, axes } => t.tensor.clone().into_owned().transpose(&axes),
             Self::AtArgmax { t, of } => t.tensor.at_argmax(&of.tensor),
-            Self::Softmax { t } => t.tensor.clone().into_owned().softmax()
+            Self::Softmax { t } => t.tensor.clone().into_owned().softmax(),
         };
         tensor.map(|tensor| {
             CPUAutograd(Arc::new(AutogradNodeData {
@@ -1942,11 +2009,11 @@ impl <'a> Operation<'a> {
                 edge: AutogradEdge {
                     grad: Mutex::new(None),
                     op: Some(self),
-                }
+                },
             }))
         })
     }
- 
+
     fn backward(&self, grad: CPUTensor) {
         match self {
             Self::Add { lhs, rhs } => {
@@ -1999,7 +2066,7 @@ impl <'a> Operation<'a> {
             }
             Self::AtArgmax { t, of } => {
                 Self::at_argmax_backward(t.clone(), of, grad);
-            },
+            }
             Self::Softmax { t } => {
                 Self::softmax_backward(t.clone(), grad);
             }
@@ -2058,7 +2125,7 @@ impl <'a> Operation<'a> {
             }
             Self::AtArgmax { t, of } => {
                 Self::at_argmax_backward(t, &of, grad);
-            },
+            }
             Self::Softmax { t } => {
                 Self::softmax_backward(t, grad);
             }
@@ -2153,7 +2220,9 @@ mod tests {
         let selected = autograd.cols_at(&indices).unwrap();
         selected.backward();
 
-        let grad = autograd.into_grad().expect("expected gradient for input tensor");
+        let grad = autograd
+            .into_grad()
+            .expect("expected gradient for input tensor");
         assert_eq!(grad.shape(), &[2, 3]);
         assert_eq!(grad.data, vec![1.0, 1.0, 0.0, 0.0, 1.0, 1.0]);
 

@@ -14,9 +14,14 @@ impl Distill {
         let len = (test.0.len() as f64 * self.0) as usize;
         Test::new(test.0.into_iter().choose_multiple(&mut rand::rng(), len))
     }
-    
+
     pub fn validation<T>(&self, validation: Validation<T>) -> Validation<T> {
         let len = (validation.0.len() as f64 * self.0) as usize;
-        Validation::new(validation.0.into_iter().choose_multiple(&mut rand::rng(), len))
+        Validation::new(
+            validation
+                .0
+                .into_iter()
+                .choose_multiple(&mut rand::rng(), len),
+        )
     }
 }

@@ -3,10 +3,17 @@ use std::collections::HashMap;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 
-use crate::{dataset::{Example, Test, Train, Validation}, tensor::Tensor};
+use crate::{
+    dataset::{Example, Test, Train, Validation},
+    tensor::Tensor,
+};
 
 pub trait Tokenizer {
-    fn train(train: &Train<String>, test: &Test<String>, validation: Option<&Validation<String>>) -> Self;
+    fn train(
+        train: &Train<String>,
+        test: &Test<String>,
+        validation: Option<&Validation<String>>,
+    ) -> Self;
     fn forward(&self, string: &str) -> Option<Vec<usize>>;
     fn backward(&self, tokens: &[usize]) -> Option<String>;
     fn vocab(&self) -> usize;
@@ -14,19 +21,33 @@ pub trait Tokenizer {
 
 pub struct WordTokenizer {
     forward: HashMap<String, usize>,
-    backward: Vec<String>
+    backward: Vec<String>,
 }
 
 impl Tokenizer for WordTokenizer {
-    fn train(train: &Train<String>, test: &Test<String>, validation: Option<&Validation<String>>) -> Self {
-        let train_bar = ProgressBar::new((train.len() + test.len() + validation.map(|v| v.len()).unwrap_or(0)) as u64)
-            .with_style(ProgressStyle::with_template("{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}] / vocab size = {msg}")
-                            .unwrap()
-                            .progress_chars("=> "))
-            .with_prefix("wordtok".red().to_string());
+    fn train(
+        train: &Train<String>,
+        test: &Test<String>,
+        validation: Option<&Validation<String>>,
+    ) -> Self {
+        let train_bar = ProgressBar::new(
+            (train.len() + test.len() + validation.map(|v| v.len()).unwrap_or(0)) as u64,
+        )
+        .with_style(
+            ProgressStyle::with_template(
+                "{prefix}: {bar:40} {pos:>4}/{len:4} [{eta_precise}] / vocab size = {msg}",
+            )
+            .unwrap()
+            .progress_chars("=> "),
+        )
+        .with_prefix("wordtok".red().to_string());
         let mut forward = HashMap::new();
         let mut backward = Vec::new();
-        for sentence in train.iter().chain(test.iter()).chain(validation.into_iter().flat_map(|v| v.iter())) {
+        for sentence in train
+            .iter()
+            .chain(test.iter())
+            .chain(validation.into_iter().flat_map(|v| v.iter()))
+        {
             for word in sentence.split_whitespace() {
                 let lowercase = word.to_lowercase();
                 if !forward.contains_key(&lowercase) {
@@ -47,7 +68,7 @@ impl Tokenizer for WordTokenizer {
         for word in string.split_whitespace() {
             match self.forward.get(&word.to_lowercase()) {
                 Some(&index) => tokens.push(index),
-                None => return None
+                None => return None,
             }
         }
         Some(tokens)
@@ -58,7 +79,7 @@ impl Tokenizer for WordTokenizer {
         for &token in tokens {
             match self.backward.get(token) {
                 Some(word) => words.push(word.clone()),
-                None => return None
+                None => return None,
             }
         }
         Some(words.join(" "))
@@ -86,7 +107,7 @@ impl TokenizedExample {
     }
 }
 
-impl <T: Tensor> Example<T> for TokenizedExample {
+impl<T: Tensor> Example<T> for TokenizedExample {
     fn input(&self) -> T {
         T::vector(self.input.iter().map(|i| *i as f64).collect::<Vec<f64>>()).unwrap()
     }
@@ -99,7 +120,7 @@ impl <T: Tensor> Example<T> for TokenizedExample {
 }
 
 pub struct FixedSequencer {
-    context: usize
+    context: usize,
 }
 
 impl FixedSequencer {

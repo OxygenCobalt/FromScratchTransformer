@@ -6,7 +6,7 @@ pub enum Activation {
     ReLU,
     SiLU,
     Softmax,
-    Tanh
+    Tanh,
 }
 
 impl Activation {
@@ -37,14 +37,20 @@ impl Activation {
             Self::ReLU => y.max(0.0),
             Self::SiLU => y.clone().mul(&Self::Sigmoid.activate(y)).unwrap(),
             Self::Softmax => y.softmax().unwrap(),
-            Self::Tanh => y.tanh()
+            Self::Tanh => y.tanh(),
         }
     }
 
     pub fn forward(&self, x: f64) -> f64 {
         match self {
             Self::Sigmoid => 1.0 / (1.0 + (-x).exp()),
-            Self::ReLU => if x > 0.0 { x } else { 0.0 },
+            Self::ReLU => {
+                if x > 0.0 {
+                    x
+                } else {
+                    0.0
+                }
+            }
             Self::SiLU => x / (1.0 + (-x).exp()),
             Self::Softmax => x, // Softmax is typically applied over a vector, not a single value
             Self::Tanh => x.tanh(),
@@ -53,9 +59,21 @@ impl Activation {
 
     pub fn forward_all<'i>(&self, mut x: cpu2::CPUTensor<'i>) -> cpu2::CPUTensor<'i> {
         match self {
-            Self::Sigmoid => x.data.to_mut().iter_mut().for_each(|v| *v = 1.0 / (1.0 + (-*v).exp())),
-            Self::ReLU => x.data.to_mut().iter_mut().for_each(|v| *v = if *v > 0.0 { *v } else { 0.0 }),
-            Self::SiLU => x.data.to_mut().iter_mut().for_each(|v| *v = *v / (1.0 + (-*v).exp())),
+            Self::Sigmoid => x
+                .data
+                .to_mut()
+                .iter_mut()
+                .for_each(|v| *v = 1.0 / (1.0 + (-*v).exp())),
+            Self::ReLU => x
+                .data
+                .to_mut()
+                .iter_mut()
+                .for_each(|v| *v = if *v > 0.0 { *v } else { 0.0 }),
+            Self::SiLU => x
+                .data
+                .to_mut()
+                .iter_mut()
+                .for_each(|v| *v = *v / (1.0 + (-*v).exp())),
             Self::Softmax => {
                 // what we want to do is be able to take the softmax
                 // while preserving many-dimensional structures, so
@@ -67,7 +85,7 @@ impl Activation {
                 let mut flat_x = x.reshape(&[classes, cols]).unwrap();
                 let mut idx = 0;
                 let flat_x_data = flat_x.data.to_mut().as_mut_slice();
-                for _ in 0..cols { 
+                for _ in 0..cols {
                     let mut max = f64::NEG_INFINITY;
                     let mut max_idx = idx;
                     for j in 0..classes {
@@ -97,26 +115,46 @@ impl Activation {
         x
     }
 
-    pub fn backward_all<'i>(&self, x: &cpu2::CPUTensor<'i>, mut grad: cpu2::CPUTensor<'i>) -> cpu2::CPUTensor<'i> {
+    pub fn backward_all<'i>(
+        &self,
+        x: &cpu2::CPUTensor<'i>,
+        mut grad: cpu2::CPUTensor<'i>,
+    ) -> cpu2::CPUTensor<'i> {
         match self {
-            Self::Sigmoid => x.data.iter().zip(grad.data.to_mut().iter_mut()).for_each(|(v, g)| {
-                let sig = 1.0 / (1.0 + (-*v).exp());
-                *g = sig * (1.0 - sig) * (*g);
-            }),
-            Self::ReLU => x.data.iter().zip(grad.data.to_mut().iter_mut()).for_each(|(v, g)| {
-                *g = if *v > 0.0 { *g } else { 0.0 };
-            }),
-            Self::SiLU => x.data.iter().zip(grad.data.to_mut().iter_mut()).for_each(|(v, g)| {
-                let sig = 1.0 / (1.0 + (-*v).exp());
-                *g = sig + *v * sig * (1.0 - sig);
-            }),
+            Self::Sigmoid => x
+                .data
+                .iter()
+                .zip(grad.data.to_mut().iter_mut())
+                .for_each(|(v, g)| {
+                    let sig = 1.0 / (1.0 + (-*v).exp());
+                    *g = sig * (1.0 - sig) * (*g);
+                }),
+            Self::ReLU => x
+                .data
+                .iter()
+                .zip(grad.data.to_mut().iter_mut())
+                .for_each(|(v, g)| {
+                    *g = if *v > 0.0 { *g } else { 0.0 };
+                }),
+            Self::SiLU => x
+                .data
+                .iter()
+                .zip(grad.data.to_mut().iter_mut())
+                .for_each(|(v, g)| {
+                    let sig = 1.0 / (1.0 + (-*v).exp());
+                    *g = sig + *v * sig * (1.0 - sig);
+                }),
             Self::Softmax => {
                 todo!("Softmax backward pass is not implemented yet");
             }
-            Self::Tanh => x.data.iter().zip(grad.data.to_mut().iter_mut()).for_each(|(v, g)| {
-                let t = v.tanh();
-                *g = (1.0 - t * t) * (*g);
-            }),
+            Self::Tanh => x
+                .data
+                .iter()
+                .zip(grad.data.to_mut().iter_mut())
+                .for_each(|(v, g)| {
+                    let t = v.tanh();
+                    *g = (1.0 - t * t) * (*g);
+                }),
         }
         grad
     }
