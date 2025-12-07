@@ -1550,15 +1550,17 @@ impl<'a> Operation<'a> {
         for axis in 0..k {
             let lhs_dim = lhs.tensor.shape.get(axis).copied().unwrap_or(1);
             let rhs_dim = rhs.tensor.shape.get(axis).copied().unwrap_or(1);
+            let lhs_stride = lhs.tensor.stride.get(axis).copied().unwrap_or(0);
+            let rhs_stride = rhs.tensor.stride.get(axis).copied().unwrap_or(0);
 
             if lhs_dim == rhs_dim {
-                lhs_strides.push(lhs.tensor.stride[axis]);
-                rhs_strides.push(rhs.tensor.stride[axis]);
+                lhs_strides.push(lhs_stride);
+                rhs_strides.push(rhs_stride);
             } else if lhs_dim == 1 {
                 lhs_strides.push(0);
-                rhs_strides.push(rhs.tensor.stride[axis]);
+                rhs_strides.push(rhs_stride);
             } else if rhs_dim == 1 {
-                lhs_strides.push(lhs.tensor.stride[axis]);
+                lhs_strides.push(lhs_stride);
                 rhs_strides.push(0);
             } else {
                 unreachable!();
