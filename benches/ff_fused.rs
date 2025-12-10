@@ -51,6 +51,11 @@ fn fused_forward_512_to_8096_batch8(b: &mut Bencher) {
 }
 
 #[bench]
+fn fused_forward_512_to_8096_batch10(b: &mut Bencher) {
+    bench_fused_forward(b, 512, 8_096, 10);
+}
+
+#[bench]
 fn fused_forward_512_to_8096_batch16(b: &mut Bencher) {
     bench_fused_forward(b, 512, 8_096, 16);
 }
@@ -66,6 +71,11 @@ fn fused_forward_512_to_8096_batch64(b: &mut Bencher) {
 }
 
 #[bench]
+fn fused_forward_512_to_8096_batch100(b: &mut Bencher) {
+    bench_fused_forward(b, 512, 8_096, 100);
+}
+
+#[bench]
 fn fused_forward_256_to_4096_batch1(b: &mut Bencher) {
     bench_fused_forward(b, 256, 4_096, 1);
 }
@@ -73,6 +83,11 @@ fn fused_forward_256_to_4096_batch1(b: &mut Bencher) {
 #[bench]
 fn fused_forward_256_to_4096_batch8(b: &mut Bencher) {
     bench_fused_forward(b, 256, 4_096, 8);
+}
+
+#[bench]
+fn fused_forward_256_to_4096_batch10(b: &mut Bencher) {
+    bench_fused_forward(b, 256, 4_096, 10);
 }
 
 #[bench]
@@ -91,6 +106,11 @@ fn fused_forward_256_to_4096_batch64(b: &mut Bencher) {
 }
 
 #[bench]
+fn fused_forward_256_to_4096_batch100(b: &mut Bencher) {
+    bench_fused_forward(b, 256, 4_096, 100);
+}
+
+#[bench]
 fn fused_forward_128_to_1024_batch1(b: &mut Bencher) {
     bench_fused_forward(b, 128, 1_024, 1);
 }
@@ -98,6 +118,11 @@ fn fused_forward_128_to_1024_batch1(b: &mut Bencher) {
 #[bench]
 fn fused_forward_128_to_1024_batch8(b: &mut Bencher) {
     bench_fused_forward(b, 128, 1_024, 8);
+}
+
+#[bench]
+fn fused_forward_128_to_1024_batch10(b: &mut Bencher) {
+    bench_fused_forward(b, 128, 1_024, 10);
 }
 
 #[bench]
@@ -116,6 +141,11 @@ fn fused_forward_128_to_1024_batch64(b: &mut Bencher) {
 }
 
 #[bench]
+fn fused_forward_128_to_1024_batch100(b: &mut Bencher) {
+    bench_fused_forward(b, 128, 1_024, 100);
+}
+
+#[bench]
 fn fused_forward_64_to_256_batch1(b: &mut Bencher) {
     bench_fused_forward(b, 64, 256, 1);
 }
@@ -123,6 +153,11 @@ fn fused_forward_64_to_256_batch1(b: &mut Bencher) {
 #[bench]
 fn fused_forward_64_to_256_batch8(b: &mut Bencher) {
     bench_fused_forward(b, 64, 256, 8);
+}
+
+#[bench]
+fn fused_forward_64_to_256_batch10(b: &mut Bencher) {
+    bench_fused_forward(b, 64, 256, 10);
 }
 
 #[bench]
@@ -138,6 +173,292 @@ fn fused_forward_64_to_256_batch32(b: &mut Bencher) {
 #[bench]
 fn fused_forward_64_to_256_batch64(b: &mut Bencher) {
     bench_fused_forward(b, 64, 256, 64);
+}
+
+#[bench]
+fn fused_forward_64_to_256_batch100(b: &mut Bencher) {
+    bench_fused_forward(b, 64, 256, 100);
+}
+
+#[bench]
+fn fused_forward_8096_to_512_batch1(b: &mut Bencher) {
+    bench_fused_forward(b, 8_096, 512, 1);
+}
+
+#[bench]
+fn fused_forward_8096_to_512_batch8(b: &mut Bencher) {
+    bench_fused_forward(b, 8_096, 512, 8);
+}
+
+#[bench]
+fn fused_forward_8096_to_512_batch10(b: &mut Bencher) {
+    bench_fused_forward(b, 8_096, 512, 10);
+}
+
+#[bench]
+fn fused_forward_8096_to_512_batch16(b: &mut Bencher) {
+    bench_fused_forward(b, 8_096, 512, 16);
+}
+
+#[bench]
+fn fused_forward_8096_to_512_batch32(b: &mut Bencher) {
+    bench_fused_forward(b, 8_096, 512, 32);
+}
+
+#[bench]
+fn fused_forward_8096_to_512_batch64(b: &mut Bencher) {
+    bench_fused_forward(b, 8_096, 512, 64);
+}
+
+#[bench]
+fn fused_forward_8096_to_512_batch100(b: &mut Bencher) {
+    bench_fused_forward(b, 8_096, 512, 100);
+}
+
+#[bench]
+fn fused_forward_4096_to_256_batch1(b: &mut Bencher) {
+    bench_fused_forward(b, 4_096, 256, 1);
+}
+
+#[bench]
+fn fused_forward_4096_to_256_batch8(b: &mut Bencher) {
+    bench_fused_forward(b, 4_096, 256, 8);
+}
+
+#[bench]
+fn fused_forward_4096_to_256_batch10(b: &mut Bencher) {
+    bench_fused_forward(b, 4_096, 256, 10);
+}
+
+#[bench]
+fn fused_forward_4096_to_256_batch16(b: &mut Bencher) {
+    bench_fused_forward(b, 4_096, 256, 16);
+}
+
+#[bench]
+fn fused_forward_4096_to_256_batch32(b: &mut Bencher) {
+    bench_fused_forward(b, 4_096, 256, 32);
+}
+
+#[bench]
+fn fused_forward_4096_to_256_batch64(b: &mut Bencher) {
+    bench_fused_forward(b, 4_096, 256, 64);
+}
+
+#[bench]
+fn fused_forward_4096_to_256_batch100(b: &mut Bencher) {
+    bench_fused_forward(b, 4_096, 256, 100);
+}
+
+#[bench]
+fn fused_forward_1024_to_128_batch1(b: &mut Bencher) {
+    bench_fused_forward(b, 1_024, 128, 1);
+}
+
+#[bench]
+fn fused_forward_1024_to_128_batch8(b: &mut Bencher) {
+    bench_fused_forward(b, 1_024, 128, 8);
+}
+
+#[bench]
+fn fused_forward_1024_to_128_batch10(b: &mut Bencher) {
+    bench_fused_forward(b, 1_024, 128, 10);
+}
+
+#[bench]
+fn fused_forward_1024_to_128_batch16(b: &mut Bencher) {
+    bench_fused_forward(b, 1_024, 128, 16);
+}
+
+#[bench]
+fn fused_forward_1024_to_128_batch32(b: &mut Bencher) {
+    bench_fused_forward(b, 1_024, 128, 32);
+}
+
+#[bench]
+fn fused_forward_1024_to_128_batch64(b: &mut Bencher) {
+    bench_fused_forward(b, 1_024, 128, 64);
+}
+
+#[bench]
+fn fused_forward_1024_to_128_batch100(b: &mut Bencher) {
+    bench_fused_forward(b, 1_024, 128, 100);
+}
+
+#[bench]
+fn fused_forward_256_to_64_batch1(b: &mut Bencher) {
+    bench_fused_forward(b, 256, 64, 1);
+}
+
+#[bench]
+fn fused_forward_256_to_64_batch8(b: &mut Bencher) {
+    bench_fused_forward(b, 256, 64, 8);
+}
+
+#[bench]
+fn fused_forward_256_to_64_batch10(b: &mut Bencher) {
+    bench_fused_forward(b, 256, 64, 10);
+}
+
+#[bench]
+fn fused_forward_256_to_64_batch16(b: &mut Bencher) {
+    bench_fused_forward(b, 256, 64, 16);
+}
+
+#[bench]
+fn fused_forward_256_to_64_batch32(b: &mut Bencher) {
+    bench_fused_forward(b, 256, 64, 32);
+}
+
+#[bench]
+fn fused_forward_256_to_64_batch64(b: &mut Bencher) {
+    bench_fused_forward(b, 256, 64, 64);
+}
+
+#[bench]
+fn fused_forward_256_to_64_batch100(b: &mut Bencher) {
+    bench_fused_forward(b, 256, 64, 100);
+}
+
+// Power-of-10 shapes that do not align with SIMD lanes.
+#[bench]
+fn fused_forward_10_to_100_batch1(b: &mut Bencher) {
+    bench_fused_forward(b, 10, 100, 1);
+}
+
+#[bench]
+fn fused_forward_10_to_100_batch8(b: &mut Bencher) {
+    bench_fused_forward(b, 10, 100, 8);
+}
+
+#[bench]
+fn fused_forward_10_to_100_batch10(b: &mut Bencher) {
+    bench_fused_forward(b, 10, 100, 10);
+}
+
+#[bench]
+fn fused_forward_10_to_100_batch16(b: &mut Bencher) {
+    bench_fused_forward(b, 10, 100, 16);
+}
+
+#[bench]
+fn fused_forward_10_to_100_batch32(b: &mut Bencher) {
+    bench_fused_forward(b, 10, 100, 32);
+}
+
+#[bench]
+fn fused_forward_10_to_100_batch64(b: &mut Bencher) {
+    bench_fused_forward(b, 10, 100, 64);
+}
+
+#[bench]
+fn fused_forward_10_to_100_batch100(b: &mut Bencher) {
+    bench_fused_forward(b, 10, 100, 100);
+}
+
+#[bench]
+fn fused_forward_100_to_10_batch1(b: &mut Bencher) {
+    bench_fused_forward(b, 100, 10, 1);
+}
+
+#[bench]
+fn fused_forward_100_to_10_batch8(b: &mut Bencher) {
+    bench_fused_forward(b, 100, 10, 8);
+}
+
+#[bench]
+fn fused_forward_100_to_10_batch10(b: &mut Bencher) {
+    bench_fused_forward(b, 100, 10, 10);
+}
+
+#[bench]
+fn fused_forward_100_to_10_batch16(b: &mut Bencher) {
+    bench_fused_forward(b, 100, 10, 16);
+}
+
+#[bench]
+fn fused_forward_100_to_10_batch32(b: &mut Bencher) {
+    bench_fused_forward(b, 100, 10, 32);
+}
+
+#[bench]
+fn fused_forward_100_to_10_batch64(b: &mut Bencher) {
+    bench_fused_forward(b, 100, 10, 64);
+}
+
+#[bench]
+fn fused_forward_100_to_10_batch100(b: &mut Bencher) {
+    bench_fused_forward(b, 100, 10, 100);
+}
+
+#[bench]
+fn fused_forward_1000_to_10000_batch1(b: &mut Bencher) {
+    bench_fused_forward(b, 1_000, 10_000, 1);
+}
+
+#[bench]
+fn fused_forward_1000_to_10000_batch8(b: &mut Bencher) {
+    bench_fused_forward(b, 1_000, 10_000, 8);
+}
+
+#[bench]
+fn fused_forward_1000_to_10000_batch10(b: &mut Bencher) {
+    bench_fused_forward(b, 1_000, 10_000, 10);
+}
+
+#[bench]
+fn fused_forward_1000_to_10000_batch16(b: &mut Bencher) {
+    bench_fused_forward(b, 1_000, 10_000, 16);
+}
+
+#[bench]
+fn fused_forward_1000_to_10000_batch32(b: &mut Bencher) {
+    bench_fused_forward(b, 1_000, 10_000, 32);
+}
+
+#[bench]
+fn fused_forward_1000_to_10000_batch64(b: &mut Bencher) {
+    bench_fused_forward(b, 1_000, 10_000, 64);
+}
+
+#[bench]
+fn fused_forward_1000_to_10000_batch100(b: &mut Bencher) {
+    bench_fused_forward(b, 1_000, 10_000, 100);
+}
+
+#[bench]
+fn fused_forward_10000_to_1000_batch1(b: &mut Bencher) {
+    bench_fused_forward(b, 10_000, 1_000, 1);
+}
+
+#[bench]
+fn fused_forward_10000_to_1000_batch8(b: &mut Bencher) {
+    bench_fused_forward(b, 10_000, 1_000, 8);
+}
+
+#[bench]
+fn fused_forward_10000_to_1000_batch10(b: &mut Bencher) {
+    bench_fused_forward(b, 10_000, 1_000, 10);
+}
+
+#[bench]
+fn fused_forward_10000_to_1000_batch16(b: &mut Bencher) {
+    bench_fused_forward(b, 10_000, 1_000, 16);
+}
+
+#[bench]
+fn fused_forward_10000_to_1000_batch32(b: &mut Bencher) {
+    bench_fused_forward(b, 10_000, 1_000, 32);
+}
+
+#[bench]
+fn fused_forward_10000_to_1000_batch64(b: &mut Bencher) {
+    bench_fused_forward(b, 10_000, 1_000, 64);
+}
+
+#[bench]
+fn fused_forward_10000_to_1000_batch100(b: &mut Bencher) {
+    bench_fused_forward(b, 10_000, 1_000, 100);
 }
 
 fn fused_backward_impl<'a>(
@@ -194,6 +515,11 @@ fn fused_backward_512_to_8096_batch8(b: &mut Bencher) {
 }
 
 #[bench]
+fn fused_backward_512_to_8096_batch10(b: &mut Bencher) {
+    bench_fused_backward(b, 512, 8_096, 10);
+}
+
+#[bench]
 fn fused_backward_512_to_8096_batch16(b: &mut Bencher) {
     bench_fused_backward(b, 512, 8_096, 16);
 }
@@ -209,6 +535,11 @@ fn fused_backward_512_to_8096_batch64(b: &mut Bencher) {
 }
 
 #[bench]
+fn fused_backward_512_to_8096_batch100(b: &mut Bencher) {
+    bench_fused_backward(b, 512, 8_096, 100);
+}
+
+#[bench]
 fn fused_backward_256_to_4096_batch1(b: &mut Bencher) {
     bench_fused_backward(b, 256, 4_096, 1);
 }
@@ -216,6 +547,11 @@ fn fused_backward_256_to_4096_batch1(b: &mut Bencher) {
 #[bench]
 fn fused_backward_256_to_4096_batch8(b: &mut Bencher) {
     bench_fused_backward(b, 256, 4_096, 8);
+}
+
+#[bench]
+fn fused_backward_256_to_4096_batch10(b: &mut Bencher) {
+    bench_fused_backward(b, 256, 4_096, 10);
 }
 
 #[bench]
@@ -234,6 +570,11 @@ fn fused_backward_256_to_4096_batch64(b: &mut Bencher) {
 }
 
 #[bench]
+fn fused_backward_256_to_4096_batch100(b: &mut Bencher) {
+    bench_fused_backward(b, 256, 4_096, 100);
+}
+
+#[bench]
 fn fused_backward_128_to_1024_batch1(b: &mut Bencher) {
     bench_fused_backward(b, 128, 1_024, 1);
 }
@@ -241,6 +582,11 @@ fn fused_backward_128_to_1024_batch1(b: &mut Bencher) {
 #[bench]
 fn fused_backward_128_to_1024_batch8(b: &mut Bencher) {
     bench_fused_backward(b, 128, 1_024, 8);
+}
+
+#[bench]
+fn fused_backward_128_to_1024_batch10(b: &mut Bencher) {
+    bench_fused_backward(b, 128, 1_024, 10);
 }
 
 #[bench]
@@ -259,6 +605,11 @@ fn fused_backward_128_to_1024_batch64(b: &mut Bencher) {
 }
 
 #[bench]
+fn fused_backward_128_to_1024_batch100(b: &mut Bencher) {
+    bench_fused_backward(b, 128, 1_024, 100);
+}
+
+#[bench]
 fn fused_backward_64_to_256_batch1(b: &mut Bencher) {
     bench_fused_backward(b, 64, 256, 1);
 }
@@ -266,6 +617,11 @@ fn fused_backward_64_to_256_batch1(b: &mut Bencher) {
 #[bench]
 fn fused_backward_64_to_256_batch8(b: &mut Bencher) {
     bench_fused_backward(b, 64, 256, 8);
+}
+
+#[bench]
+fn fused_backward_64_to_256_batch10(b: &mut Bencher) {
+    bench_fused_backward(b, 64, 256, 10);
 }
 
 #[bench]
@@ -281,4 +637,289 @@ fn fused_backward_64_to_256_batch32(b: &mut Bencher) {
 #[bench]
 fn fused_backward_64_to_256_batch64(b: &mut Bencher) {
     bench_fused_backward(b, 64, 256, 64);
+}
+
+#[bench]
+fn fused_backward_64_to_256_batch100(b: &mut Bencher) {
+    bench_fused_backward(b, 64, 256, 100);
+}
+
+#[bench]
+fn fused_backward_8096_to_512_batch1(b: &mut Bencher) {
+    bench_fused_backward(b, 8_096, 512, 1);
+}
+
+#[bench]
+fn fused_backward_8096_to_512_batch8(b: &mut Bencher) {
+    bench_fused_backward(b, 8_096, 512, 8);
+}
+
+#[bench]
+fn fused_backward_8096_to_512_batch10(b: &mut Bencher) {
+    bench_fused_backward(b, 8_096, 512, 10);
+}
+
+#[bench]
+fn fused_backward_8096_to_512_batch16(b: &mut Bencher) {
+    bench_fused_backward(b, 8_096, 512, 16);
+}
+
+#[bench]
+fn fused_backward_8096_to_512_batch32(b: &mut Bencher) {
+    bench_fused_backward(b, 8_096, 512, 32);
+}
+
+#[bench]
+fn fused_backward_8096_to_512_batch64(b: &mut Bencher) {
+    bench_fused_backward(b, 8_096, 512, 64);
+}
+
+#[bench]
+fn fused_backward_8096_to_512_batch100(b: &mut Bencher) {
+    bench_fused_backward(b, 8_096, 512, 100);
+}
+
+#[bench]
+fn fused_backward_4096_to_256_batch1(b: &mut Bencher) {
+    bench_fused_backward(b, 4_096, 256, 1);
+}
+
+#[bench]
+fn fused_backward_4096_to_256_batch8(b: &mut Bencher) {
+    bench_fused_backward(b, 4_096, 256, 8);
+}
+
+#[bench]
+fn fused_backward_4096_to_256_batch10(b: &mut Bencher) {
+    bench_fused_backward(b, 4_096, 256, 10);
+}
+
+#[bench]
+fn fused_backward_4096_to_256_batch16(b: &mut Bencher) {
+    bench_fused_backward(b, 4_096, 256, 16);
+}
+
+#[bench]
+fn fused_backward_4096_to_256_batch32(b: &mut Bencher) {
+    bench_fused_backward(b, 4_096, 256, 32);
+}
+
+#[bench]
+fn fused_backward_4096_to_256_batch64(b: &mut Bencher) {
+    bench_fused_backward(b, 4_096, 256, 64);
+}
+
+#[bench]
+fn fused_backward_4096_to_256_batch100(b: &mut Bencher) {
+    bench_fused_backward(b, 4_096, 256, 100);
+}
+
+#[bench]
+fn fused_backward_1024_to_128_batch1(b: &mut Bencher) {
+    bench_fused_backward(b, 1_024, 128, 1);
+}
+
+#[bench]
+fn fused_backward_1024_to_128_batch8(b: &mut Bencher) {
+    bench_fused_backward(b, 1_024, 128, 8);
+}
+
+#[bench]
+fn fused_backward_1024_to_128_batch10(b: &mut Bencher) {
+    bench_fused_backward(b, 1_024, 128, 10);
+}
+
+#[bench]
+fn fused_backward_1024_to_128_batch16(b: &mut Bencher) {
+    bench_fused_backward(b, 1_024, 128, 16);
+}
+
+#[bench]
+fn fused_backward_1024_to_128_batch32(b: &mut Bencher) {
+    bench_fused_backward(b, 1_024, 128, 32);
+}
+
+#[bench]
+fn fused_backward_1024_to_128_batch64(b: &mut Bencher) {
+    bench_fused_backward(b, 1_024, 128, 64);
+}
+
+#[bench]
+fn fused_backward_1024_to_128_batch100(b: &mut Bencher) {
+    bench_fused_backward(b, 1_024, 128, 100);
+}
+
+#[bench]
+fn fused_backward_256_to_64_batch1(b: &mut Bencher) {
+    bench_fused_backward(b, 256, 64, 1);
+}
+
+#[bench]
+fn fused_backward_256_to_64_batch8(b: &mut Bencher) {
+    bench_fused_backward(b, 256, 64, 8);
+}
+
+#[bench]
+fn fused_backward_256_to_64_batch10(b: &mut Bencher) {
+    bench_fused_backward(b, 256, 64, 10);
+}
+
+#[bench]
+fn fused_backward_256_to_64_batch16(b: &mut Bencher) {
+    bench_fused_backward(b, 256, 64, 16);
+}
+
+#[bench]
+fn fused_backward_256_to_64_batch32(b: &mut Bencher) {
+    bench_fused_backward(b, 256, 64, 32);
+}
+
+#[bench]
+fn fused_backward_256_to_64_batch64(b: &mut Bencher) {
+    bench_fused_backward(b, 256, 64, 64);
+}
+
+#[bench]
+fn fused_backward_256_to_64_batch100(b: &mut Bencher) {
+    bench_fused_backward(b, 256, 64, 100);
+}
+
+#[bench]
+fn fused_backward_10_to_100_batch1(b: &mut Bencher) {
+    bench_fused_backward(b, 10, 100, 1);
+}
+
+#[bench]
+fn fused_backward_10_to_100_batch8(b: &mut Bencher) {
+    bench_fused_backward(b, 10, 100, 8);
+}
+
+#[bench]
+fn fused_backward_10_to_100_batch10(b: &mut Bencher) {
+    bench_fused_backward(b, 10, 100, 10);
+}
+
+#[bench]
+fn fused_backward_10_to_100_batch16(b: &mut Bencher) {
+    bench_fused_backward(b, 10, 100, 16);
+}
+
+#[bench]
+fn fused_backward_10_to_100_batch32(b: &mut Bencher) {
+    bench_fused_backward(b, 10, 100, 32);
+}
+
+#[bench]
+fn fused_backward_10_to_100_batch64(b: &mut Bencher) {
+    bench_fused_backward(b, 10, 100, 64);
+}
+
+#[bench]
+fn fused_backward_10_to_100_batch100(b: &mut Bencher) {
+    bench_fused_backward(b, 10, 100, 100);
+}
+
+#[bench]
+fn fused_backward_100_to_10_batch1(b: &mut Bencher) {
+    bench_fused_backward(b, 100, 10, 1);
+}
+
+#[bench]
+fn fused_backward_100_to_10_batch8(b: &mut Bencher) {
+    bench_fused_backward(b, 100, 10, 8);
+}
+
+#[bench]
+fn fused_backward_100_to_10_batch10(b: &mut Bencher) {
+    bench_fused_backward(b, 100, 10, 10);
+}
+
+#[bench]
+fn fused_backward_100_to_10_batch16(b: &mut Bencher) {
+    bench_fused_backward(b, 100, 10, 16);
+}
+
+#[bench]
+fn fused_backward_100_to_10_batch32(b: &mut Bencher) {
+    bench_fused_backward(b, 100, 10, 32);
+}
+
+#[bench]
+fn fused_backward_100_to_10_batch64(b: &mut Bencher) {
+    bench_fused_backward(b, 100, 10, 64);
+}
+
+#[bench]
+fn fused_backward_100_to_10_batch100(b: &mut Bencher) {
+    bench_fused_backward(b, 100, 10, 100);
+}
+
+#[bench]
+fn fused_backward_1000_to_10000_batch1(b: &mut Bencher) {
+    bench_fused_backward(b, 1_000, 10_000, 1);
+}
+
+#[bench]
+fn fused_backward_1000_to_10000_batch8(b: &mut Bencher) {
+    bench_fused_backward(b, 1_000, 10_000, 8);
+}
+
+#[bench]
+fn fused_backward_1000_to_10000_batch10(b: &mut Bencher) {
+    bench_fused_backward(b, 1_000, 10_000, 10);
+}
+
+#[bench]
+fn fused_backward_1000_to_10000_batch16(b: &mut Bencher) {
+    bench_fused_backward(b, 1_000, 10_000, 16);
+}
+
+#[bench]
+fn fused_backward_1000_to_10000_batch32(b: &mut Bencher) {
+    bench_fused_backward(b, 1_000, 10_000, 32);
+}
+
+#[bench]
+fn fused_backward_1000_to_10000_batch64(b: &mut Bencher) {
+    bench_fused_backward(b, 1_000, 10_000, 64);
+}
+
+#[bench]
+fn fused_backward_1000_to_10000_batch100(b: &mut Bencher) {
+    bench_fused_backward(b, 1_000, 10_000, 100);
+}
+
+#[bench]
+fn fused_backward_10000_to_1000_batch1(b: &mut Bencher) {
+    bench_fused_backward(b, 10_000, 1_000, 1);
+}
+
+#[bench]
+fn fused_backward_10000_to_1000_batch8(b: &mut Bencher) {
+    bench_fused_backward(b, 10_000, 1_000, 8);
+}
+
+#[bench]
+fn fused_backward_10000_to_1000_batch10(b: &mut Bencher) {
+    bench_fused_backward(b, 10_000, 1_000, 10);
+}
+
+#[bench]
+fn fused_backward_10000_to_1000_batch16(b: &mut Bencher) {
+    bench_fused_backward(b, 10_000, 1_000, 16);
+}
+
+#[bench]
+fn fused_backward_10000_to_1000_batch32(b: &mut Bencher) {
+    bench_fused_backward(b, 10_000, 1_000, 32);
+}
+
+#[bench]
+fn fused_backward_10000_to_1000_batch64(b: &mut Bencher) {
+    bench_fused_backward(b, 10_000, 1_000, 64);
+}
+
+#[bench]
+fn fused_backward_10000_to_1000_batch100(b: &mut Bencher) {
+    bench_fused_backward(b, 10_000, 1_000, 100);
 }
