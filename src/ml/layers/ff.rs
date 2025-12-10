@@ -5,6 +5,7 @@ use crate::{
     tensor::cpu2::{self, CPUTensor, Fill, FillUninit, Generate},
 };
 use rand_distr::{Distribution, Normal};
+use rayon::{iter::{IndexedParallelIterator, ParallelIterator}, slice::ParallelSliceMut};
 
 const LANES: usize = 8; // number of SIMD lanes
 
@@ -60,10 +61,6 @@ impl FeedForward<CPUTensor<'_>> {
             .transpose(&[1, 0])
             .unwrap()
             .materialize();
-        let mut lhs_idx = 0;
-        let mut rhs_idx = 0;
-        let mut bias_idx = 0;
-        let mut out_idx = 0;
         // explicit slice definitions to signal to the compiler about aliasing
         let out_data = flat_activations_out.data.to_mut().as_mut_slice();
         let flat_activations_out_stride0 = flat_activations_out.stride[0];
@@ -73,47 +70,57 @@ impl FeedForward<CPUTensor<'_>> {
         let weights_stride0 = self.weights.stride[0];
         let weights_stride1 = self.weights.stride[1];
         let biases_stride0 = self.biases.stride[0];
-        for _ in 0..self.neurons {
-            let bias = unsafe { *self.biases.data.get_unchecked(bias_idx) };
-            for _ in 0..trailer {
-                let chunks = self.flattened_input_shape / LANES;
-                let remainder = self.flattened_input_shape % LANES;
-                let mut lhs_ptr = unsafe { self.weights.data.as_ptr().add(lhs_idx) };
-                let mut rhs_ptr = unsafe { flat_activations_in_t.data.as_ptr().add(rhs_idx) };
-                let mut sum_simd: Simd<f64, LANES> = Simd::splat(0.0);
-                for _ in 0..chunks {
-                    let lhs_simd =
-                        unsafe { std::ptr::read_unaligned(lhs_ptr as *const Simd<f64, LANES>) };
-                    let rhs_simd =
-                        unsafe { std::ptr::read_unaligned(rhs_ptr as *const Simd<f64, LANES>) };
-                    sum_simd += lhs_simd * rhs_simd;
-                    lhs_ptr = unsafe { lhs_ptr.add(LANES) };
-                    rhs_ptr = unsafe { rhs_ptr.add(LANES) };
+        let neurons_per_chunk = (self.neurons as f64 / rayon::current_num_threads() as f64).ceil() as usize;
+        let grain = neurons_per_chunk * trailer;
+        out_data.par_chunks_mut(grain).enumerate().for_each(|(i, out)| {
+            let start_neuron = neurons_per_chunk * i;
+            let neuron_count = out.len() / trailer;
+            let mut lhs_idx = weights_stride0 * start_neuron;
+            let mut rhs_idx = 0;
+            let mut bias_idx = start_neuron * biases_stride0;
+            let mut out_idx = 0;
+            for _ in 0..neuron_count {
+                let bias = unsafe { *self.biases.data.get_unchecked(bias_idx) };
+                for _ in 0..trailer {
+                    let chunks = self.flattened_input_shape / LANES;
+                    let remainder = self.flattened_input_shape % LANES;
+                    let mut lhs_ptr = unsafe { self.weights.data.as_ptr().add(lhs_idx) };
+                    let mut rhs_ptr = unsafe { flat_activations_in_t.data.as_ptr().add(rhs_idx) };
+                    let mut sum_simd: Simd<f64, LANES> = Simd::splat(0.0);
+                    for _ in 0..chunks {
+                        let lhs_simd =
+                            unsafe { std::ptr::read_unaligned(lhs_ptr as *const Simd<f64, LANES>) };
+                        let rhs_simd =
+                            unsafe { std::ptr::read_unaligned(rhs_ptr as *const Simd<f64, LANES>) };
+                        sum_simd += lhs_simd * rhs_simd;
+                        lhs_ptr = unsafe { lhs_ptr.add(LANES) };
+                        rhs_ptr = unsafe { rhs_ptr.add(LANES) };
+                    }
+                    let mut sum: f64 = sum_simd.reduce_sum();
+                    lhs_idx += weights_stride1 * LANES * chunks;
+                    rhs_idx += flat_activations_in_t_stride1 * LANES * chunks;
+                    for _ in (self.flattened_input_shape - remainder)..self.flattened_input_shape {
+                        let lhs = unsafe { *self.weights.data.get_unchecked(lhs_idx) };
+                        let rhs = unsafe { *flat_activations_in_t.data.get_unchecked(rhs_idx) };
+                        sum += lhs * rhs;
+                        lhs_idx += weights_stride1;
+                        rhs_idx += flat_activations_in_t_stride1;
+                    }
+                    unsafe {
+                        *out.get_unchecked_mut(out_idx) = sum + bias;
+                    }
+                    lhs_idx -= weights_stride1 * self.flattened_input_shape;
+                    rhs_idx -= flat_activations_in_t_stride1 * self.flattened_input_shape;
+                    rhs_idx += flat_activations_in_t_stride0;
+                    out_idx += flat_activations_out_stride1;
                 }
-                let mut sum: f64 = sum_simd.reduce_sum();
-                lhs_idx += weights_stride1 * LANES * chunks;
-                rhs_idx += flat_activations_in_t_stride1 * LANES * chunks;
-                for _ in (self.flattened_input_shape - remainder)..self.flattened_input_shape {
-                    let lhs = unsafe { *self.weights.data.get_unchecked(lhs_idx) };
-                    let rhs = unsafe { *flat_activations_in_t.data.get_unchecked(rhs_idx) };
-                    sum += lhs * rhs;
-                    lhs_idx += weights_stride1;
-                    rhs_idx += flat_activations_in_t_stride1;
-                }
-                unsafe {
-                    *out_data.get_unchecked_mut(out_idx) = sum + bias;
-                }
-                lhs_idx -= weights_stride1 * self.flattened_input_shape;
-                rhs_idx -= flat_activations_in_t_stride1 * self.flattened_input_shape;
-                rhs_idx += flat_activations_in_t_stride0;
-                out_idx += flat_activations_out_stride1;
+                lhs_idx += weights_stride0;
+                rhs_idx = 0;
+                bias_idx += biases_stride0;
+                out_idx -= flat_activations_out_stride1 * trailer;
+                out_idx += flat_activations_out_stride0;
             }
-            lhs_idx += weights_stride0;
-            rhs_idx = 0;
-            bias_idx += biases_stride0;
-            out_idx -= flat_activations_out_stride1 * trailer;
-            out_idx += flat_activations_out_stride0;
-        }
+        });
 
         self.activation
             .forward_all(flat_activations_out.into_reshape(&out_shape).unwrap())
