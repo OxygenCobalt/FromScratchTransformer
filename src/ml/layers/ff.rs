@@ -1,12 +1,14 @@
-use std::simd::{Simd, num::SimdFloat};
+use std::{f32::MIN, simd::{Simd, num::SimdFloat}};
 
 use crate::{
     ml::activation::Activation,
     tensor::cpu2::{self, CPUTensor, Fill, FillUninit, Generate},
 };
 use rand_distr::{Distribution, Normal};
+use rayon::{iter::{IndexedParallelIterator, ParallelIterator}, slice::ParallelSliceMut};
 
 const LANES: usize = 8; // number of SIMD lanes
+const FORWARD_MIN_FLOPS_PER_CORE: usize = 512_000 / 24; // measured on bench suite. adjusted to apply to any core count
 
 pub struct FeedForward<T> {
     weights: T,
@@ -42,44 +44,51 @@ impl FeedForward<CPUTensor<'_>> {
         }
     }
 
-    pub fn forward<'i, 'o>(&self, activations_in: CPUTensor<'i>) -> CPUTensor<'o> {
-        // flatten all trailing dims (batch etc)
-        let mut out_shape = vec![self.neurons];
-        out_shape.extend_from_slice(&activations_in.shape[self.flattened_input_ndim..]);
-        let trailer = activations_in.shape[self.flattened_input_ndim..]
-            .iter()
-            .product();
-        let flat_activations_in = activations_in
-            .reshape(&[self.flattened_input_shape, trailer])
-            .unwrap();
-        let mut flat_activations_out =
-            CPUTensor::init(unsafe { FillUninit::new(vec![self.neurons, trailer]) }).unwrap();
-
+    pub fn forward<'i, 'o>(&self, a_in: CPUTensor<'i>) -> CPUTensor<'o> {
+        // flatten all trailing dims into a "batch"
+        // todo: enforce single-dim batch rather than arbitrary trailing dims?
+        let batch = *a_in.shape.last().unwrap();
         // forward pass: Wx + b -> [neurons, flattened] x [flattened, trailer] -> [neurons, trailer] + [neurons]
-        let flat_activations_in_t = flat_activations_in
+        let a_in_flat_t = a_in
+            .reshape(&[self.flattened_input_shape, batch])
+            .unwrap()
             .transpose(&[1, 0])
             .unwrap()
             .materialize();
-        let mut lhs_idx = 0;
-        let mut rhs_idx = 0;
-        let mut bias_idx = 0;
-        let mut out_idx = 0;
+        let mut a_out_flat =
+            CPUTensor::init(unsafe { FillUninit::new(vec![self.neurons, batch]) }).unwrap();
         // explicit slice definitions to signal to the compiler about aliasing
-        let out_data = flat_activations_out.data.to_mut().as_mut_slice();
-        let flat_activations_out_stride0 = flat_activations_out.stride[0];
-        let flat_activations_out_stride1 = flat_activations_out.stride[1];
-        let flat_activations_in_t_stride0 = flat_activations_in_t.stride[0];
-        let flat_activations_in_t_stride1 = flat_activations_in_t.stride[1];
-        let weights_stride0 = self.weights.stride[0];
-        let weights_stride1 = self.weights.stride[1];
-        let biases_stride0 = self.biases.stride[0];
-        for _ in 0..self.neurons {
+        let mut out_data = a_out_flat.data.to_mut().as_mut_slice();
+        let parallelism = rayon::current_num_threads();
+        let flops_per_core = (self.neurons * self.flattened_input_shape * batch) / parallelism;
+        if flops_per_core >= FORWARD_MIN_FLOPS_PER_CORE {
+            let neurons_per_chunk = (self.neurons as f64 / parallelism as f64).ceil() as usize;
+            let grain = neurons_per_chunk * batch;
+            out_data.par_chunks_mut(grain).enumerate().for_each(|(i, out)| {
+                let start_neuron = neurons_per_chunk * i;
+                let neuron_count = out.len() / batch;
+                self.forward_mm(start_neuron, neuron_count, batch, &a_in_flat_t, out);
+            });
+        } else {
+            self.forward_mm(0, self.neurons, batch,&a_in_flat_t, &mut out_data);
+        }
+
+        self.activation.forward_all(a_out_flat)
+    }
+
+    #[inline(always)]
+    fn forward_mm(&self, start_neuron: usize, neuron_count: usize, batch: usize, a_in_flat_t: &CPUTensor<'_>, out: &mut [f64]) {
+        let mut lhs_idx = self.flattened_input_shape * start_neuron;
+        let mut rhs_idx = 0;
+        let mut bias_idx = start_neuron;
+        let mut out_idx = 0;
+        for _ in 0..neuron_count {
             let bias = unsafe { *self.biases.data.get_unchecked(bias_idx) };
-            for _ in 0..trailer {
+            for _ in 0..batch {
                 let chunks = self.flattened_input_shape / LANES;
                 let remainder = self.flattened_input_shape % LANES;
                 let mut lhs_ptr = unsafe { self.weights.data.as_ptr().add(lhs_idx) };
-                let mut rhs_ptr = unsafe { flat_activations_in_t.data.as_ptr().add(rhs_idx) };
+                let mut rhs_ptr = unsafe { a_in_flat_t.data.as_ptr().add(rhs_idx) };
                 let mut sum_simd: Simd<f64, LANES> = Simd::splat(0.0);
                 for _ in 0..chunks {
                     let lhs_simd =
@@ -91,32 +100,25 @@ impl FeedForward<CPUTensor<'_>> {
                     rhs_ptr = unsafe { rhs_ptr.add(LANES) };
                 }
                 let mut sum: f64 = sum_simd.reduce_sum();
-                lhs_idx += weights_stride1 * LANES * chunks;
-                rhs_idx += flat_activations_in_t_stride1 * LANES * chunks;
+                lhs_idx += LANES * chunks;
+                rhs_idx += LANES * chunks;
                 for _ in (self.flattened_input_shape - remainder)..self.flattened_input_shape {
                     let lhs = unsafe { *self.weights.data.get_unchecked(lhs_idx) };
-                    let rhs = unsafe { *flat_activations_in_t.data.get_unchecked(rhs_idx) };
+                    let rhs = unsafe { *a_in_flat_t.data.get_unchecked(rhs_idx) };
                     sum += lhs * rhs;
-                    lhs_idx += weights_stride1;
-                    rhs_idx += flat_activations_in_t_stride1;
+                    lhs_idx += 1;
+                    rhs_idx += 1; 
                 }
                 unsafe {
-                    *out_data.get_unchecked_mut(out_idx) = sum + bias;
+                    *out.get_unchecked_mut(out_idx) = sum + bias;
                 }
-                lhs_idx -= weights_stride1 * self.flattened_input_shape;
-                rhs_idx -= flat_activations_in_t_stride1 * self.flattened_input_shape;
-                rhs_idx += flat_activations_in_t_stride0;
-                out_idx += flat_activations_out_stride1;
+                lhs_idx -= self.flattened_input_shape;
+                out_idx += 1;
             }
-            lhs_idx += weights_stride0;
+            lhs_idx += self.flattened_input_shape;
             rhs_idx = 0;
-            bias_idx += biases_stride0;
-            out_idx -= flat_activations_out_stride1 * trailer;
-            out_idx += flat_activations_out_stride0;
+            bias_idx += 1;
         }
-
-        self.activation
-            .forward_all(flat_activations_out.into_reshape(&out_shape).unwrap())
     }
 
     pub fn backward<'i, 'o>(
@@ -376,11 +378,11 @@ mod tests {
     fn forward_matches_matmul_bias_then_activation() {
         let activation = Activation::Sigmoid;
         let ff = ff_with_params(&[0.5, -1.0, 1.5, 0.3], &[0.2, -0.1], vec![2], activation);
-        let input = tensor_with_data(vec![2], &[0.4, 0.8]);
+        let input = tensor_with_data(vec![2, 1], &[0.4, 0.8]);
 
         let out = ff.forward(input);
 
-        assert_eq!(out.shape, vec![2]);
+        assert_eq!(out.shape, vec![2, 1]);
         let expected = vec![
             activation.forward(0.5 * 0.4 + -1.0 * 0.8 + 0.2),
             activation.forward(1.5 * 0.4 + 0.3 * 0.8 - 0.1),
@@ -389,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn forward_flattens_trailing_batch_dims() {
+    fn forward_handles_explicit_batch_dim() {
         let activation = Activation::ReLU;
         let ff = ff_with_params(&[1.0, 2.0], &[0.0], vec![2], activation);
         // Shape [feature, batch]
@@ -411,14 +413,14 @@ mod tests {
             vec![3],
             activation,
         );
-        let input = tensor_with_data(vec![3], &[2.0, 3.0, 4.0]);
-        let grad = tensor_with_data(vec![2], &[0.2, -0.4]);
+        let input = tensor_with_data(vec![3, 1], &[2.0, 3.0, 4.0]);
+        let grad = tensor_with_data(vec![2, 1], &[0.2, -0.4]);
 
         let lr = 0.1;
         let activations_out = ff.forward(input.cloned_view());
         let input_grad = ff.backward(lr, input, activations_out, grad);
 
-        assert_eq!(input_grad.shape, vec![3]);
+        assert_eq!(input_grad.shape, vec![3, 1]);
         let expected_input_grad = vec![0.0, -0.6, 0.3];
         assert_close(input_grad.data.as_ref(), &expected_input_grad, 1e-12);
 
@@ -789,6 +791,438 @@ mod tests {
 
         assert_close(input_grad.data.as_ref(), &expected_input_grad, 1e-12);
         assert_close(ff.biases.data.as_ref(), &expected_biases, 1e-12);
+        assert_close(ff.weights.data.as_ref(), &expected_weights, 1e-12);
+    }
+
+    #[test]
+    fn forward_with_tanh_activation() {
+        let activation = Activation::Tanh;
+        let ff = ff_with_params(&[1.0, 0.5, -0.5, 1.0], &[0.1, -0.1], vec![2], activation);
+        let input = tensor_with_data(vec![2, 1], &[0.5, 0.8]);
+
+        let out = ff.forward(input);
+
+        assert_eq!(out.shape, vec![2, 1]);
+        let expected = vec![
+            activation.forward(1.0 * 0.5 + 0.5 * 0.8 + 0.1),
+            activation.forward(-0.5 * 0.5 + 1.0 * 0.8 - 0.1),
+        ];
+        assert_close(out.data.as_ref(), &expected, 1e-12);
+    }
+
+    #[test]
+    fn forward_with_silu_activation() {
+        let activation = Activation::SiLU;
+        let ff = ff_with_params(&[2.0, -1.0, 0.5, 1.5], &[0.3, -0.2], vec![2], activation);
+        let input = tensor_with_data(vec![2, 1], &[1.0, 2.0]);
+
+        let out = ff.forward(input);
+
+        assert_eq!(out.shape, vec![2, 1]);
+        // SiLU(x) = x * sigmoid(x)
+        let pre0 = 2.0 * 1.0 + -1.0 * 2.0 + 0.3;  // 0.3
+        let pre1 = 0.5 * 1.0 + 1.5 * 2.0 - 0.2;   // 3.3
+        let expected = vec![
+            activation.forward(pre0),
+            activation.forward(pre1),
+        ];
+        assert_close(out.data.as_ref(), &expected, 1e-12);
+    }
+
+    #[test]
+    fn forward_dims_smaller_than_lanes() {
+        // All dimensions smaller than SIMD lane width (8)
+        let activation = Activation::ReLU;
+        let features = 3;
+        let neurons = 5;
+        let batch = 2;
+
+        let weights: Vec<f64> = (0..neurons * features)
+            .map(|i| 0.1 * (i as f64 + 1.0))
+            .collect();
+        let biases: Vec<f64> = (0..neurons).map(|n| n as f64 * 0.05).collect();
+        let ff = ff_with_params(&weights, &biases, vec![features], activation);
+
+        let input = tensor_with_data(
+            vec![features, batch],
+            &[1.0, 2.0, 0.5, 1.5, -0.5, 0.5],
+        );
+
+        let out = ff.forward(input);
+
+        assert_eq!(out.shape, vec![neurons, batch]);
+        // Compute expected values manually
+        let mut expected = vec![0.0; neurons * batch];
+        for n in 0..neurons {
+            for b in 0..batch {
+                let mut acc = biases[n];
+                for f in 0..features {
+                    acc += weights[n * features + f] * [1.0, 2.0, 0.5, 1.5, -0.5, 0.5][f * batch + b];
+                }
+                expected[n * batch + b] = activation.forward(acc);
+            }
+        }
+        assert_close(out.data.as_ref(), &expected, 1e-12);
+    }
+
+    #[test]
+    fn forward_single_neuron() {
+        let activation = Activation::Sigmoid;
+        let ff = ff_with_params(&[1.0, 2.0, 3.0], &[0.5], vec![3], activation);
+        let input = tensor_with_data(vec![3, 1], &[0.1, 0.2, 0.3]);
+
+        let out = ff.forward(input);
+
+        assert_eq!(out.shape, vec![1, 1]);
+        let expected = vec![activation.forward(1.0 * 0.1 + 2.0 * 0.2 + 3.0 * 0.3 + 0.5)];
+        assert_close(out.data.as_ref(), &expected, 1e-12);
+    }
+
+    #[test]
+    fn forward_single_feature() {
+        let activation = Activation::ReLU;
+        let ff = ff_with_params(&[2.0, -1.0, 0.5], &[0.1, -0.5, 0.0], vec![1], activation);
+        let input = tensor_with_data(vec![1, 1], &[3.0]);
+
+        let out = ff.forward(input);
+
+        assert_eq!(out.shape, vec![3, 1]);
+        let expected = vec![
+            activation.forward(2.0 * 3.0 + 0.1),   // 6.1
+            activation.forward(-1.0 * 3.0 - 0.5), // 0.0 (ReLU gates negative)
+            activation.forward(0.5 * 3.0 + 0.0),  // 1.5
+        ];
+        assert_close(out.data.as_ref(), &expected, 1e-12);
+    }
+
+    #[test]
+    fn forward_single_batch() {
+        let activation = Activation::ReLU;
+        let ff = ff_with_params(&[1.0, 2.0, 3.0, 4.0], &[0.0, 0.0], vec![2], activation);
+        let input = tensor_with_data(vec![2, 1], &[1.0, 1.0]);
+
+        let out = ff.forward(input);
+
+        assert_eq!(out.shape, vec![2, 1]);
+        let expected = vec![3.0, 7.0];
+        assert_close(out.data.as_ref(), &expected, 1e-12);
+    }
+
+    #[test]
+    fn forward_large_batch() {
+        // Test with larger batch size to exercise parallel code paths
+        let activation = Activation::ReLU;
+        let features = 4;
+        let batch = 32;
+        let neurons = 2;
+
+        let weights: Vec<f64> = (0..neurons * features)
+            .map(|i| 0.1 * (i as f64 + 1.0))
+            .collect();
+        let biases = vec![0.0; neurons];
+        let ff = ff_with_params(&weights, &biases, vec![features], activation);
+
+        let mut input = CPUTensor::init(Fill {
+            shape: vec![features, batch],
+            with: 0.0,
+        })
+        .unwrap();
+        {
+            let data = input.data.to_mut();
+            for i in 0..data.len() {
+                data[i] = 0.1 * (i as f64 + 1.0);
+            }
+        }
+
+        let out = ff.forward(input.cloned_view());
+
+        assert_eq!(out.shape, vec![neurons, batch]);
+
+        // Verify values
+        let input_data = input.data.as_ref();
+        for n in 0..neurons {
+            for b in 0..batch {
+                let mut acc = biases[n];
+                for f in 0..features {
+                    acc += weights[n * features + f] * input_data[f * batch + b];
+                }
+                let expected = activation.forward(acc);
+                let actual = out.data[n * batch + b];
+                assert!(
+                    (actual - expected).abs() <= 1e-12,
+                    "mismatch at neuron {} batch {}: expected {}, got {}",
+                    n, b, expected, actual
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn backward_with_zero_gradients() {
+        let activation = Activation::ReLU;
+        let mut ff = ff_with_params(&[1.0, 2.0, 3.0, 4.0], &[0.1, 0.2], vec![2], activation);
+        let original_weights = ff.weights.data.clone().into_owned();
+        let original_biases = ff.biases.data.clone().into_owned();
+
+        let input = tensor_with_data(vec![2, 1], &[1.0, 1.0]);
+        let grad = tensor_with_data(vec![2, 1], &[0.0, 0.0]);
+
+        let lr = 0.1;
+        let activations_out = ff.forward(input.cloned_view());
+        let input_grad = ff.backward(lr, input, activations_out, grad);
+
+        // With zero gradients, weights and biases should remain unchanged
+        assert_close(ff.weights.data.as_ref(), &original_weights, 1e-12);
+        assert_close(ff.biases.data.as_ref(), &original_biases, 1e-12);
+        // Input gradient should also be zero
+        assert_close(input_grad.data.as_ref(), &[0.0, 0.0], 1e-12);
+    }
+
+    #[test]
+    fn backward_with_zero_input() {
+        // Use ReLU with positive biases so pre-activations are positive (derivative = 1)
+        let activation = Activation::ReLU;
+        let mut ff = ff_with_params(&[1.0, 2.0, 3.0, 4.0], &[0.1, 0.2], vec![2], activation);
+        let original_weights = ff.weights.data.clone().into_owned();
+
+        let input = tensor_with_data(vec![2, 1], &[0.0, 0.0]);
+        let grad = tensor_with_data(vec![2, 1], &[1.0, 1.0]);
+
+        let lr = 0.1;
+        let activations_out = ff.forward(input.cloned_view());
+        let input_grad = ff.backward(lr, input, activations_out, grad);
+
+        // With zero input, weights should remain unchanged (gradient * input = gradient * 0 = 0)
+        assert_close(ff.weights.data.as_ref(), &original_weights, 1e-12);
+
+        // Biases: b -= lr * grad (ReLU derivative = 1 for positive pre-activations)
+        let expected_biases = vec![0.1 - 0.1 * 1.0, 0.2 - 0.1 * 1.0];
+        assert_close(ff.biases.data.as_ref(), &expected_biases, 1e-12);
+
+        // Input gradient = W^T * grad
+        let expected_input_grad = vec![1.0 + 3.0, 2.0 + 4.0]; // [4.0, 6.0]
+        assert_close(input_grad.data.as_ref(), &expected_input_grad, 1e-12);
+    }
+
+    #[test]
+    fn backward_dims_smaller_than_lanes() {
+        // Use ReLU with positive weights/inputs/biases so all pre-activations are positive
+        // This makes ReLU act like identity (derivative = 1)
+        let activation = Activation::ReLU;
+        let features = 3;
+        let neurons = 5;
+        let batch = 2;
+
+        // All positive weights
+        let weights: Vec<f64> = (0..neurons * features)
+            .map(|i| 0.1 * (i as f64 + 1.0))
+            .collect();
+        // All positive biases
+        let biases: Vec<f64> = (0..neurons).map(|n| 1.0 + n as f64 * 0.05).collect();
+        let mut ff = ff_with_params(&weights, &biases, vec![features], activation);
+
+        // All positive inputs ensure positive pre-activations with positive weights/biases
+        let input = tensor_with_data(
+            vec![features, batch],
+            &[1.0, 2.0, 0.5, 1.5, 0.5, 0.5],
+        );
+        let grad = tensor_with_data(
+            vec![neurons, batch],
+            &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+        );
+
+        let lr = 0.01;
+        let input_data = input.data.clone().into_owned();
+        let grad_data = grad.data.clone().into_owned();
+        let activations_out = ff.forward(input.cloned_view());
+        let input_grad = ff.backward(lr, input, activations_out, grad);
+
+        // With all positive pre-activations, ReLU derivative = 1, so grad passes through unchanged
+        let mut expected_input_grad = vec![0.0; features * batch];
+        for f in 0..features {
+            for b in 0..batch {
+                for n in 0..neurons {
+                    expected_input_grad[f * batch + b] +=
+                        weights[n * features + f] * grad_data[n * batch + b];
+                }
+            }
+        }
+
+        let mut expected_biases = biases.clone();
+        for n in 0..neurons {
+            for b in 0..batch {
+                expected_biases[n] -= lr * grad_data[n * batch + b];
+            }
+        }
+
+        let mut expected_weights = weights.clone();
+        for n in 0..neurons {
+            for f in 0..features {
+                for b in 0..batch {
+                    expected_weights[n * features + f] -=
+                        lr * grad_data[n * batch + b] * input_data[f * batch + b];
+                }
+            }
+        }
+
+        assert_close(input_grad.data.as_ref(), &expected_input_grad, 1e-12);
+        assert_close(ff.biases.data.as_ref(), &expected_biases, 1e-12);
+        assert_close(ff.weights.data.as_ref(), &expected_weights, 1e-12);
+    }
+
+    #[test]
+    fn backward_single_neuron_single_feature() {
+        // ReLU with positive pre-activation (2.0*3.0 + 0.5 = 6.5 > 0) acts like identity
+        let activation = Activation::ReLU;
+        let mut ff = ff_with_params(&[2.0], &[0.5], vec![1], activation);
+
+        let input = tensor_with_data(vec![1, 1], &[3.0]);
+        let grad = tensor_with_data(vec![1, 1], &[0.5]);
+
+        let lr = 0.1;
+        let activations_out = ff.forward(input.cloned_view());
+        let input_grad = ff.backward(lr, input, activations_out, grad);
+
+        // input_grad = W^T * grad = 2.0 * 0.5 = 1.0
+        assert_close(input_grad.data.as_ref(), &[1.0], 1e-12);
+        // bias -= lr * grad = 0.5 - 0.1 * 0.5 = 0.45
+        assert_close(ff.biases.data.as_ref(), &[0.45], 1e-12);
+        // weight -= lr * grad * input = 2.0 - 0.1 * 0.5 * 3.0 = 1.85
+        assert_close(ff.weights.data.as_ref(), &[1.85], 1e-12);
+    }
+
+    #[test]
+    fn backward_large_batch() {
+        // Test backward with larger batch size to exercise different code paths
+        let activation = Activation::ReLU;
+        let features = 4;
+        let batch = 32;
+        let neurons = 2;
+
+        // Positive weights
+        let weights: Vec<f64> = (0..neurons * features)
+            .map(|i| 0.1 * (i as f64 + 1.0))
+            .collect();
+        // Positive biases ensure positive pre-activations
+        let biases = vec![1.0, 1.0];
+        let mut ff = ff_with_params(&weights, &biases, vec![features], activation);
+
+        let mut input = CPUTensor::init(Fill {
+            shape: vec![features, batch],
+            with: 0.0,
+        })
+        .unwrap();
+        {
+            let data = input.data.to_mut();
+            // Positive inputs
+            for i in 0..data.len() {
+                data[i] = 0.05 * (i as f64 + 1.0);
+            }
+        }
+
+        let mut grad = CPUTensor::init(Fill {
+            shape: vec![neurons, batch],
+            with: 0.0,
+        })
+        .unwrap();
+        {
+            let data = grad.data.to_mut();
+            for i in 0..data.len() {
+                data[i] = 0.1 * (i as f64 + 1.0);
+            }
+        }
+
+        let lr = 0.01;
+        let input_data = input.data.clone().into_owned();
+        let grad_data = grad.data.clone().into_owned();
+        let activations_out = ff.forward(input.cloned_view());
+        let input_grad = ff.backward(lr, input, activations_out, grad);
+
+        // Output shape should match input shape
+        assert_eq!(input_grad.shape, vec![features, batch]);
+
+        // With positive pre-activations, ReLU derivative = 1
+        let mut expected_input_grad = vec![0.0; features * batch];
+        for f in 0..features {
+            for b in 0..batch {
+                for n in 0..neurons {
+                    expected_input_grad[f * batch + b] +=
+                        weights[n * features + f] * grad_data[n * batch + b];
+                }
+            }
+        }
+        assert_close(input_grad.data.as_ref(), &expected_input_grad, 1e-12);
+
+        // Compute expected biases
+        let mut expected_biases = biases.clone();
+        for n in 0..neurons {
+            for b in 0..batch {
+                expected_biases[n] -= lr * grad_data[n * batch + b];
+            }
+        }
+        assert_close(ff.biases.data.as_ref(), &expected_biases, 1e-12);
+
+        // Compute expected weights
+        let mut expected_weights = weights.clone();
+        for n in 0..neurons {
+            for f in 0..features {
+                for b in 0..batch {
+                    expected_weights[n * features + f] -=
+                        lr * grad_data[n * batch + b] * input_data[f * batch + b];
+                }
+            }
+        }
+        assert_close(ff.weights.data.as_ref(), &expected_weights, 1e-12);
+    }
+
+    #[test]
+    fn forward_negative_pre_activations_with_relu() {
+        // Specifically test ReLU gating behavior
+        let activation = Activation::ReLU;
+        let ff = ff_with_params(
+            &[-1.0, -1.0, 1.0, 1.0], // First neuron will be negative, second positive
+            &[-5.0, 0.0],
+            vec![2],
+            activation,
+        );
+        let input = tensor_with_data(vec![2, 1], &[1.0, 1.0]);
+
+        let out = ff.forward(input);
+
+        assert_eq!(out.shape, vec![2, 1]);
+        // Neuron 0: -1*1 + -1*1 - 5 = -7 -> ReLU -> 0
+        // Neuron 1: 1*1 + 1*1 + 0 = 2 -> ReLU -> 2
+        assert_close(out.data.as_ref(), &[0.0, 2.0], 1e-12);
+    }
+
+    #[test]
+    fn backward_relu_gates_gradient_for_negative_preactivations() {
+        let activation = Activation::ReLU;
+        let mut ff = ff_with_params(
+            &[-1.0, -1.0, 1.0, 1.0],
+            &[-5.0, 0.0],
+            vec![2],
+            activation,
+        );
+
+        let input = tensor_with_data(vec![2, 1], &[1.0, 1.0]);
+        let grad = tensor_with_data(vec![2, 1], &[1.0, 1.0]);
+
+        let lr = 0.1;
+        let activations_out = ff.forward(input.cloned_view());
+        let input_grad = ff.backward(lr, input, activations_out, grad);
+
+        // Neuron 0 has negative pre-activation, so its gradient is gated to 0
+        // Neuron 1 passes gradient through
+        // Input grad = W^T * gated_grad
+        // Only neuron 1 contributes: [1.0, 1.0]
+        assert_close(input_grad.data.as_ref(), &[1.0, 1.0], 1e-12);
+
+        // Bias 0 unchanged (gated), bias 1 updated
+        assert_close(ff.biases.data.as_ref(), &[-5.0, -0.1], 1e-12);
+
+        // Weights for neuron 0 unchanged, neuron 1 updated
+        let expected_weights = vec![-1.0, -1.0, 0.9, 0.9];
         assert_close(ff.weights.data.as_ref(), &expected_weights, 1e-12);
     }
 }
