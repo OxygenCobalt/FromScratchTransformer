@@ -14,21 +14,20 @@ pub struct FeedForward<T> {
     weights: T,
     biases: T,
     activation: Activation,
+    // avoid recomputing these every forward/backward pass
+    fan_in: usize,
     // might be better to keep on stack rather than reading weights.shape[0] over and over
     // todo: evaluate if this is better and maybe try to move other things on-stack
     neurons: usize,
-    // avoid recomputing these every forward/backward pass
-    flattened_input_shape: usize,
-    flattened_input_ndim: usize,
 }
 
 impl FeedForward<CPUTensor<'_>> {
     pub fn new(input_shape: Vec<usize>, neurons: usize, activation: Activation) -> Self {
-        let flattened = cpu2::length_of(&input_shape);
-        let xavier = Normal::new(0.0, 2.0 / (flattened + neurons) as f64).unwrap();
+        let fan_in = cpu2::length_of(&input_shape);
+        let xavier = Normal::new(0.0, 2.0 / (fan_in + neurons) as f64).unwrap();
         Self {
             weights: CPUTensor::init(Generate {
-                shape: vec![neurons, flattened],
+                shape: vec![neurons, fan_in],
                 with: || xavier.sample(&mut rand::rng()),
             })
             .unwrap(),
@@ -38,9 +37,8 @@ impl FeedForward<CPUTensor<'_>> {
             })
             .unwrap(),
             activation,
+            fan_in,
             neurons,
-            flattened_input_shape: flattened,
-            flattened_input_ndim: input_shape.len(),
         }
     }
 
@@ -48,9 +46,9 @@ impl FeedForward<CPUTensor<'_>> {
         // flatten all trailing dims into a "batch"
         // todo: enforce single-dim batch rather than arbitrary trailing dims?
         let batch = *a_in.shape.last().unwrap();
-        // forward pass: Wx + b -> [neurons, flattened] x [flattened, trailer] -> [neurons, trailer] + [neurons]
+        // forward pass: Wx + b -> [neurons, fan_in] x [fan_in, batch] -> [neurons, batch] + [neurons]
         let a_in_flat_t = a_in
-            .reshape(&[self.flattened_input_shape, batch])
+            .reshape(&[self.fan_in, batch])
             .unwrap()
             .transpose(&[1, 0])
             .unwrap()
@@ -60,7 +58,7 @@ impl FeedForward<CPUTensor<'_>> {
         // explicit slice definitions to signal to the compiler about aliasing
         let mut out_data = a_out_flat.data.to_mut().as_mut_slice();
         let parallelism = rayon::current_num_threads();
-        let flops_per_core = (self.neurons * self.flattened_input_shape * batch) / parallelism;
+        let flops_per_core = (self.neurons * self.fan_in * batch) / parallelism;
         if flops_per_core >= FORWARD_MIN_FLOPS_PER_CORE {
             let neurons_per_chunk = (self.neurons as f64 / parallelism as f64).ceil() as usize;
             let grain = neurons_per_chunk * batch;
@@ -70,7 +68,7 @@ impl FeedForward<CPUTensor<'_>> {
                 self.forward_mm(start_neuron, neuron_count, batch, &a_in_flat_t, out);
             });
         } else {
-            self.forward_mm(0, self.neurons, batch,&a_in_flat_t, &mut out_data);
+            self.forward_mm(0, self.neurons, batch, &a_in_flat_t, &mut out_data);
         }
 
         self.activation.forward_all(a_out_flat)
@@ -78,15 +76,15 @@ impl FeedForward<CPUTensor<'_>> {
 
     #[inline(always)]
     fn forward_mm(&self, start_neuron: usize, neuron_count: usize, batch: usize, a_in_flat_t: &CPUTensor<'_>, out: &mut [f64]) {
-        let mut lhs_idx = self.flattened_input_shape * start_neuron;
+        let mut lhs_idx = self.fan_in * start_neuron;
         let mut rhs_idx = 0;
         let mut bias_idx = start_neuron;
         let mut out_idx = 0;
+        let chunks = self.fan_in / LANES;
+        let remainder = self.fan_in % LANES;
         for _ in 0..neuron_count {
             let bias = unsafe { *self.biases.data.get_unchecked(bias_idx) };
             for _ in 0..batch {
-                let chunks = self.flattened_input_shape / LANES;
-                let remainder = self.flattened_input_shape % LANES;
                 let mut lhs_ptr = unsafe { self.weights.data.as_ptr().add(lhs_idx) };
                 let mut rhs_ptr = unsafe { a_in_flat_t.data.as_ptr().add(rhs_idx) };
                 let mut sum_simd: Simd<f64, LANES> = Simd::splat(0.0);
@@ -102,7 +100,7 @@ impl FeedForward<CPUTensor<'_>> {
                 let mut sum: f64 = sum_simd.reduce_sum();
                 lhs_idx += LANES * chunks;
                 rhs_idx += LANES * chunks;
-                for _ in (self.flattened_input_shape - remainder)..self.flattened_input_shape {
+                for _ in (self.fan_in - remainder)..self.fan_in {
                     let lhs = unsafe { *self.weights.data.get_unchecked(lhs_idx) };
                     let rhs = unsafe { *a_in_flat_t.data.get_unchecked(rhs_idx) };
                     sum += lhs * rhs;
@@ -112,10 +110,10 @@ impl FeedForward<CPUTensor<'_>> {
                 unsafe {
                     *out.get_unchecked_mut(out_idx) = sum + bias;
                 }
-                lhs_idx -= self.flattened_input_shape;
+                lhs_idx -= self.fan_in;
                 out_idx += 1;
             }
-            lhs_idx += self.flattened_input_shape;
+            lhs_idx += self.fan_in;
             rhs_idx = 0;
             bias_idx += 1;
         }
@@ -132,14 +130,9 @@ impl FeedForward<CPUTensor<'_>> {
         // todo: fuse activations when feasible
         grad = self.activation.backward_all(&activations_out, grad);
 
-        // flatten out extra dims (batch etc)
-        let original_shape = activations_in.shape.clone();
-        let trailer: usize = activations_in.shape[self.flattened_input_ndim..]
-            .iter()
-            .product();
-        let flat_grad = grad.reshape(&[self.neurons, trailer]).unwrap();
+        let batch = *activations_in.shape.last().unwrap();
         let flat_activations_in = activations_in
-            .reshape(&[self.flattened_input_shape, trailer])
+            .reshape(&[self.fan_in, batch])
             .unwrap();
 
         // pass 2: backwards biases
@@ -147,26 +140,26 @@ impl FeedForward<CPUTensor<'_>> {
         let mut grad_idx = 0;
         let bias_data = self.biases.data.to_mut().as_mut_slice();
         let bias_stride0 = self.biases.stride[0];
-        let flat_grad_stride0 = flat_grad.stride[0];
-        let flat_grad_stride1 = flat_grad.stride[1];
+        let grad_stride0 = grad.stride[0];
+        let grad_stride1 = grad.stride[1];
         for _ in 0..self.neurons {
-            for _ in 0..trailer {
+            for _ in 0..batch {
                 let bias = unsafe { bias_data.get_unchecked_mut(bias_idx) };
-                let grad = unsafe { flat_grad.data.get_unchecked(grad_idx) };
+                let grad = unsafe { grad.data.get_unchecked(grad_idx) };
                 *bias -= c * *grad;
-                grad_idx += flat_grad_stride1;
+                grad_idx += grad_stride1;
             }
             bias_idx += bias_stride0;
-            grad_idx -= flat_grad_stride1 * trailer;
-            grad_idx += flat_grad_stride0;
+            grad_idx -= grad_stride1 * batch;
+            grad_idx += grad_stride0;
         }
 
-        // pass 3: activations backwards (W^T dot grad) [flattened, neurons] x [neurons, trailer] -> [flattened, trailer]
+        // pass 3: activations backwards (W^T dot grad) [fan_in, neurons] x [neurons, batch] -> [fan_in, batch]
         // todo: fuse with pass 4 since their bounds are the same just in a different order
         // todo: evaluate if fusing with bias backwards with a branch is better than two distinct passes
         let mut a_grad = flat_activations_in.cloned_view();
         let weights_t = self.weights.transpose(&[1, 0]).unwrap().materialize();
-        let grad_t = flat_grad.transpose(&[1, 0]).unwrap().materialize();
+        let grad_t = grad.transpose(&[1, 0]).unwrap().materialize();
         let mut lhs_idx = 0;
         let mut rhs_idx = 0;
         let mut out_idx = 0;
@@ -180,8 +173,8 @@ impl FeedForward<CPUTensor<'_>> {
         let grad_t_stride1 = grad_t.stride[1];
         let a_grad_stride0 = a_grad.stride[0];
         let a_grad_stride1 = a_grad.stride[1];
-        for _ in 0..self.flattened_input_shape {
-            for _ in 0..trailer {
+        for _ in 0..self.fan_in {
+            for _ in 0..batch {
                 let mut sum_simd: Simd<f64, LANES> = Simd::splat(0.0);
                 let mut lhs_ptr = unsafe { weights_t.data.as_ptr().add(lhs_idx) };
                 let mut rhs_ptr = unsafe { grad_t.data.as_ptr().add(rhs_idx) };
@@ -214,11 +207,11 @@ impl FeedForward<CPUTensor<'_>> {
             }
             lhs_idx += weights_t_stride0;
             rhs_idx = 0;
-            out_idx -= a_grad_stride1 * trailer;
+            out_idx -= a_grad_stride1 * batch;
             out_idx += a_grad_stride0;
         }
 
-        // pass 4: weights backwards (grad dot a_in^T) [neurons, trailer] dot [trailer, flattened] -> [neurons, flattened] -> lhs_grad
+        // pass 4: weights backwards (grad dot a_in^T) [neurons, batch] dot [batch, fan_in] -> [neurons, fan_in] -> lhs_grad
         let flat_activations_in_t = flat_activations_in
             .transpose(&[1, 0])
             .unwrap()
@@ -228,17 +221,15 @@ impl FeedForward<CPUTensor<'_>> {
         let mut out_idx = 0;
         let out_data = self.weights.data.to_mut().as_mut_slice();
 
-        let chunks = self.flattened_input_shape / LANES;
-        let remainder = self.flattened_input_shape % LANES;
+        let chunks = self.fan_in / LANES;
+        let remainder = self.fan_in % LANES;
         let weights_stride0 = self.weights.stride[0];
         let weights_stride1 = self.weights.stride[1];
-        let flat_grad_stride0 = flat_grad.stride[0];
-        let flat_grad_stride1 = flat_grad.stride[1];
         let flat_activations_in_t_stride0 = flat_activations_in_t.stride[0];
         let flat_activations_in_t_stride1 = flat_activations_in_t.stride[1];
         for _ in 0..self.neurons {
-            for _ in 0..trailer {
-                let g = unsafe { *flat_grad.data.get_unchecked(lhs_idx) };
+            for _ in 0..batch {
+                let g = unsafe { *grad.data.get_unchecked(lhs_idx) };
                 let g_simd = Simd::splat(g);
                 let c_simd = Simd::splat(c);
                 let mut rhs_ptr = unsafe { flat_activations_in_t.data.as_ptr().add(rhs_idx) };
@@ -257,7 +248,7 @@ impl FeedForward<CPUTensor<'_>> {
                 }
                 rhs_idx += flat_activations_in_t_stride1 * LANES * chunks;
                 out_idx += weights_stride1 * LANES * chunks;
-                for _ in (self.flattened_input_shape - remainder)..self.flattened_input_shape {
+                for _ in (self.fan_in - remainder)..self.fan_in {
                     let rhs = unsafe { *flat_activations_in_t.data.get_unchecked(rhs_idx) };
                     let out = unsafe { out_data.get_unchecked_mut(out_idx) };
                     *out -= c * g * rhs;
@@ -265,18 +256,18 @@ impl FeedForward<CPUTensor<'_>> {
                     out_idx += weights_stride1;
                 }
 
-                lhs_idx += flat_grad_stride1;
-                rhs_idx -= flat_activations_in_t_stride1 * self.flattened_input_shape;
+                lhs_idx += grad_stride1;
+                rhs_idx -= flat_activations_in_t_stride1 * self.fan_in;
                 rhs_idx += flat_activations_in_t_stride0;
-                out_idx -= weights_stride1 * self.flattened_input_shape;
+                out_idx -= weights_stride1 * self.fan_in;
             }
-            lhs_idx -= flat_grad_stride1 * trailer;
-            lhs_idx += flat_grad_stride0;
-            rhs_idx -= flat_activations_in_t_stride0 * trailer;
+            lhs_idx -= grad_stride1 * batch;
+            lhs_idx += grad_stride0;
+            rhs_idx -= flat_activations_in_t_stride0 * batch;
             out_idx += weights_stride0;
         }
 
-        a_grad.into_reshape(&original_shape).unwrap()
+        a_grad
     }
 }
 
@@ -299,15 +290,15 @@ mod tests {
         activation: Activation,
     ) -> FeedForward<CPUTensor<'static>> {
         let neurons = biases.len();
-        let flattened = cpu2::length_of(&input_shape);
+        let fan_in = cpu2::length_of(&input_shape);
         assert_eq!(
             weights.len(),
-            neurons * flattened,
-            "weights must be neurons x flattened_input_shape"
+            neurons * fan_in,
+            "weights must be neurons x fan_in_input_shape"
         );
 
         let mut w = CPUTensor::init(Fill {
-            shape: vec![neurons, flattened],
+            shape: vec![neurons, fan_in],
             with: 0.0,
         })
         .unwrap();
@@ -325,8 +316,7 @@ mod tests {
             biases: b,
             activation,
             neurons,
-            flattened_input_shape: flattened,
-            flattened_input_ndim: input_shape.len(),
+            fan_in: fan_in,
         }
     }
 
@@ -335,10 +325,10 @@ mod tests {
         neurons: usize,
         activation: Activation,
     ) -> FeedForward<CPUTensor<'static>> {
-        let flattened = cpu2::length_of(&input_shape);
+        let fan_in = cpu2::length_of(&input_shape);
         FeedForward {
             weights: CPUTensor::init(Fill {
-                shape: vec![neurons, flattened],
+                shape: vec![neurons, fan_in],
                 with: 0.0,
             })
             .unwrap(),
@@ -349,8 +339,7 @@ mod tests {
             .unwrap(),
             activation,
             neurons,
-            flattened_input_shape: flattened,
-            flattened_input_ndim: input_shape.len(),
+            fan_in: fan_in
         }
     }
 
@@ -442,6 +431,7 @@ mod tests {
         let activations_out = ff.forward(input.cloned_view());
         let input_grad = ff.backward(lr, input, activations_out, grad);
 
+        assert_eq!(input_grad.shape, vec![2, 1]);
         let expected_weights = vec![0.95, 1.9, -1.0, 1.0];
         assert_close(ff.weights.data.as_ref(), &expected_weights, 1e-12);
         let expected_biases = vec![-0.05, -3.0];
@@ -486,6 +476,7 @@ mod tests {
         let activations_out = ff.forward(input.cloned_view());
         let a_grad = ff.backward(lr, input, activations_out, grad);
 
+        assert_eq!(a_grad.shape, vec![2, batch]);
         let expected_weights = vec![0.808, 1.616, 0.948, 2.396];
         assert_close(ff.weights.data.as_ref(), &expected_weights, 1e-12);
         let expected_biases = vec![-0.092, 0.248];
@@ -713,7 +704,7 @@ mod tests {
     #[test]
     fn backward_non_multiple_of_lanes_dimensions_matches_reference() {
         let activation = Activation::ReLU;
-        let features = 10; // exercises remainder path on flattened input dimension
+        let features = 10; // exercises remainder path on fan_in input dimension
         let neurons = 9; // exercises remainder path on neuron dimension
         let batch = 2;
 
@@ -971,6 +962,7 @@ mod tests {
         let activations_out = ff.forward(input.cloned_view());
         let input_grad = ff.backward(lr, input, activations_out, grad);
 
+        assert_eq!(input_grad.shape, vec![2, 1]);
         // With zero gradients, weights and biases should remain unchanged
         assert_close(ff.weights.data.as_ref(), &original_weights, 1e-12);
         assert_close(ff.biases.data.as_ref(), &original_biases, 1e-12);
@@ -992,6 +984,7 @@ mod tests {
         let activations_out = ff.forward(input.cloned_view());
         let input_grad = ff.backward(lr, input, activations_out, grad);
 
+        assert_eq!(input_grad.shape, vec![2, 1]);
         // With zero input, weights should remain unchanged (gradient * input = gradient * 0 = 0)
         assert_close(ff.weights.data.as_ref(), &original_weights, 1e-12);
 
@@ -1037,6 +1030,7 @@ mod tests {
         let activations_out = ff.forward(input.cloned_view());
         let input_grad = ff.backward(lr, input, activations_out, grad);
 
+        assert_eq!(input_grad.shape, vec![features, batch]);
         // With all positive pre-activations, ReLU derivative = 1, so grad passes through unchanged
         let mut expected_input_grad = vec![0.0; features * batch];
         for f in 0..features {
@@ -1083,6 +1077,7 @@ mod tests {
         let activations_out = ff.forward(input.cloned_view());
         let input_grad = ff.backward(lr, input, activations_out, grad);
 
+        assert_eq!(input_grad.shape, vec![1, 1]);
         // input_grad = W^T * grad = 2.0 * 0.5 = 1.0
         assert_close(input_grad.data.as_ref(), &[1.0], 1e-12);
         // bias -= lr * grad = 0.5 - 0.1 * 0.5 = 0.45
@@ -1212,6 +1207,7 @@ mod tests {
         let activations_out = ff.forward(input.cloned_view());
         let input_grad = ff.backward(lr, input, activations_out, grad);
 
+        assert_eq!(input_grad.shape, vec![2, 1]);
         // Neuron 0 has negative pre-activation, so its gradient is gated to 0
         // Neuron 1 passes gradient through
         // Input grad = W^T * gated_grad
