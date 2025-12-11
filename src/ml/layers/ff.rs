@@ -100,7 +100,7 @@ impl FeedForward<CPUTensor<'_>> {
                 let mut sum: f64 = sum_simd.reduce_sum();
                 lhs_idx += LANES * chunks;
                 rhs_idx += LANES * chunks;
-                for _ in (self.fan_in - remainder)..self.fan_in {
+                for _ in 0..remainder {
                     let lhs = unsafe { *self.weights.data.get_unchecked(lhs_idx) };
                     let rhs = unsafe { *a_in_flat_t.data.get_unchecked(rhs_idx) };
                     sum += lhs * rhs;
@@ -136,22 +136,15 @@ impl FeedForward<CPUTensor<'_>> {
             .unwrap();
 
         // pass 2: backwards biases
-        let mut bias_idx = 0;
         let mut grad_idx = 0;
         let bias_data = self.biases.data.to_mut().as_mut_slice();
-        let bias_stride0 = self.biases.stride[0];
-        let grad_stride0 = grad.stride[0];
-        let grad_stride1 = grad.stride[1];
-        for _ in 0..self.neurons {
+        for bias_idx in 0..self.neurons {
+            let bias = unsafe { bias_data.get_unchecked_mut(bias_idx) };
             for _ in 0..batch {
-                let bias = unsafe { bias_data.get_unchecked_mut(bias_idx) };
                 let grad = unsafe { grad.data.get_unchecked(grad_idx) };
                 *bias -= c * *grad;
-                grad_idx += grad_stride1;
+                grad_idx += 1;
             }
-            bias_idx += bias_stride0;
-            grad_idx -= grad_stride1 * batch;
-            grad_idx += grad_stride0;
         }
 
         // pass 3: activations backwards (W^T dot grad) [fan_in, neurons] x [neurons, batch] -> [fan_in, batch]
@@ -167,12 +160,6 @@ impl FeedForward<CPUTensor<'_>> {
 
         let chunks = self.neurons / LANES;
         let remainder = self.neurons % LANES;
-        let weights_t_stride0 = weights_t.stride[0];
-        let weights_t_stride1 = weights_t.stride[1];
-        let grad_t_stride0 = grad_t.stride[0];
-        let grad_t_stride1 = grad_t.stride[1];
-        let a_grad_stride0 = a_grad.stride[0];
-        let a_grad_stride1 = a_grad.stride[1];
         for _ in 0..self.fan_in {
             for _ in 0..batch {
                 let mut sum_simd: Simd<f64, LANES> = Simd::splat(0.0);
@@ -188,27 +175,23 @@ impl FeedForward<CPUTensor<'_>> {
                     rhs_ptr = unsafe { rhs_ptr.add(LANES) };
                 }
                 let mut sum = sum_simd.reduce_sum();
-                lhs_idx += weights_t_stride1 * LANES * chunks;
-                rhs_idx += grad_t_stride1 * LANES * chunks;
-                for _ in (self.neurons - remainder)..self.neurons {
+                lhs_idx += LANES * chunks;
+                rhs_idx += LANES * chunks;
+                for _ in 0..remainder {
                     let lhs = unsafe { *weights_t.data.get_unchecked(lhs_idx) };
                     let rhs = unsafe { *grad_t.data.get_unchecked(rhs_idx) };
                     sum += lhs * rhs;
-                    lhs_idx += weights_t_stride1;
-                    rhs_idx += grad_t_stride1;
+                    lhs_idx += 1;
+                    rhs_idx += 1;
                 }
                 unsafe {
                     *out_data.get_unchecked_mut(out_idx) = sum;
                 }
-                lhs_idx -= weights_t_stride1 * self.neurons;
-                rhs_idx -= grad_t_stride1 * self.neurons;
-                rhs_idx += grad_t_stride0;
-                out_idx += a_grad_stride1;
+                lhs_idx -= self.neurons;
+                out_idx += 1;
             }
-            lhs_idx += weights_t_stride0;
+            lhs_idx += self.neurons;
             rhs_idx = 0;
-            out_idx -= a_grad_stride1 * batch;
-            out_idx += a_grad_stride0;
         }
 
         // pass 4: weights backwards (grad dot a_in^T) [neurons, batch] dot [batch, fan_in] -> [neurons, fan_in] -> lhs_grad
@@ -223,15 +206,11 @@ impl FeedForward<CPUTensor<'_>> {
 
         let chunks = self.fan_in / LANES;
         let remainder = self.fan_in % LANES;
-        let weights_stride0 = self.weights.stride[0];
-        let weights_stride1 = self.weights.stride[1];
-        let flat_activations_in_t_stride0 = flat_activations_in_t.stride[0];
-        let flat_activations_in_t_stride1 = flat_activations_in_t.stride[1];
+        let c_simd = Simd::splat(c);
         for _ in 0..self.neurons {
             for _ in 0..batch {
                 let g = unsafe { *grad.data.get_unchecked(lhs_idx) };
                 let g_simd = Simd::splat(g);
-                let c_simd = Simd::splat(c);
                 let mut rhs_ptr = unsafe { flat_activations_in_t.data.as_ptr().add(rhs_idx) };
                 let mut out_ptr = unsafe { out_data.as_mut_ptr().add(out_idx) };
                 for _ in 0..chunks {
@@ -246,25 +225,20 @@ impl FeedForward<CPUTensor<'_>> {
                     rhs_ptr = unsafe { rhs_ptr.add(LANES) };
                     out_ptr = unsafe { out_ptr.add(LANES) };
                 }
-                rhs_idx += flat_activations_in_t_stride1 * LANES * chunks;
-                out_idx += weights_stride1 * LANES * chunks;
-                for _ in (self.fan_in - remainder)..self.fan_in {
+                rhs_idx += LANES * chunks;
+                out_idx += LANES * chunks;
+                for _ in 0..remainder {
                     let rhs = unsafe { *flat_activations_in_t.data.get_unchecked(rhs_idx) };
                     let out = unsafe { out_data.get_unchecked_mut(out_idx) };
                     *out -= c * g * rhs;
-                    rhs_idx += flat_activations_in_t_stride1;
-                    out_idx += weights_stride1;
+                    rhs_idx += 1;
+                    out_idx += 1;
                 }
-
-                lhs_idx += grad_stride1;
-                rhs_idx -= flat_activations_in_t_stride1 * self.fan_in;
-                rhs_idx += flat_activations_in_t_stride0;
-                out_idx -= weights_stride1 * self.fan_in;
+                lhs_idx += 1;
+                out_idx -= self.fan_in;
             }
-            lhs_idx -= grad_stride1 * batch;
-            lhs_idx += grad_stride0;
-            rhs_idx -= flat_activations_in_t_stride0 * batch;
-            out_idx += weights_stride0;
+            rhs_idx = 0;
+            out_idx += self.fan_in;
         }
 
         a_grad
