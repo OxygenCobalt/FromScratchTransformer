@@ -1,4 +1,4 @@
-use std::{f32::MIN, simd::{Simd, num::SimdFloat}};
+use std::simd::{Simd, num::SimdFloat};
 
 use crate::{
     ml::activation::Activation,
@@ -43,10 +43,8 @@ impl FeedForward<CPUTensor<'_>> {
     }
 
     pub fn forward<'i, 'o>(&self, a_in: CPUTensor<'i>) -> CPUTensor<'o> {
-        // flatten all trailing dims into a "batch"
-        // todo: enforce single-dim batch rather than arbitrary trailing dims?
-        let batch = *a_in.shape.last().unwrap();
         // forward pass: Wx + b -> [neurons, fan_in] x [fan_in, batch] -> [neurons, batch] + [neurons]
+        let batch = *a_in.shape.last().unwrap();
         let a_in_flat_t = a_in
             .reshape(&[self.fan_in, batch])
             .unwrap()
@@ -122,49 +120,74 @@ impl FeedForward<CPUTensor<'_>> {
     pub fn backward<'i, 'o>(
         &mut self,
         c: f64,
-        activations_in: CPUTensor<'i>,
-        activations_out: CPUTensor<'i>,
+        a_in: CPUTensor<'i>,
+        a_out: CPUTensor<'i>,
         mut grad: CPUTensor<'i>,
     ) -> CPUTensor<'o> {
-        // pass 1: backwards gradient
-        // todo: fuse activations when feasible
-        grad = self.activation.backward_all(&activations_out, grad);
+        // backwards activations
+        grad = self.activation.backward_all(&a_out, grad);
 
-        let batch = *activations_in.shape.last().unwrap();
-        let flat_activations_in = activations_in
+        let batch = *a_in.shape.last().unwrap();
+        let a_in_flat = a_in
             .reshape(&[self.fan_in, batch])
             .unwrap();
 
-        // pass 2: backwards biases
-        let mut grad_idx = 0;
-        let bias_data = self.biases.data.to_mut().as_mut_slice();
-        for bias_idx in 0..self.neurons {
-            let bias = unsafe { bias_data.get_unchecked_mut(bias_idx) };
-            for _ in 0..batch {
-                let grad = unsafe { grad.data.get_unchecked(grad_idx) };
-                *bias -= c * *grad;
-                grad_idx += 1;
-            }
-        }
-
-        // pass 3: activations backwards (W^T dot grad) [fan_in, neurons] x [neurons, batch] -> [fan_in, batch]
-        // todo: fuse with pass 4 since their bounds are the same just in a different order
-        // todo: evaluate if fusing with bias backwards with a branch is better than two distinct passes
-        let mut a_grad = flat_activations_in.cloned_view();
+        // pass 1: activations backwards (W^T dot grad) [fan_in, neurons] x [neurons, batch] -> [fan_in, batch]
+        let mut a_grad = a_in_flat.cloned_view().materialize();
+        // todo: fuse transpose + materialize of owned tensors since bounds will be fixed
         let weights_t = self.weights.transpose(&[1, 0]).unwrap().materialize();
         let grad_t = grad.transpose(&[1, 0]).unwrap().materialize();
-        let mut lhs_idx = 0;
-        let mut rhs_idx = 0;
-        let mut out_idx = 0;
         let out_data: &mut [f64] = a_grad.data.to_mut().as_mut_slice();
 
-        let chunks = self.neurons / LANES;
-        let remainder = self.neurons % LANES;
-        for _ in 0..self.fan_in {
+        let parallelism = rayon::current_num_threads();
+        let fan_in_per_chunk = self.fan_in / parallelism;
+        if fan_in_per_chunk > 0 {
+            let grain =  fan_in_per_chunk * batch;
+            out_data.par_chunks_mut(grain).enumerate().for_each(|(i, out)| {
+                let fan_in_count = out.len() / batch;
+                let start_fan_in = i * fan_in_per_chunk;
+                Self::backwards_pass1_mm(start_fan_in, fan_in_count, batch, self.neurons, &weights_t.data, &grad_t.data, out);
+            });
+        } else {
+            Self::backwards_pass1_mm(0, self.fan_in, batch, self.neurons, &weights_t.data, &grad_t.data, out_data);
+        }
+
+        // pass 2: weights backwards (grad dot a_in^T) [neurons, batch] dot [batch, fan_in] -> [neurons, fan_in] -> lhs_grad
+        //         bias backwards (sum over batch of grad) -> bias_grad
+        let a_in_flat_t = a_in_flat
+            .transpose(&[1, 0])
+            .unwrap()
+            .materialize();
+        let out_data = self.weights.data.to_mut().as_mut_slice();
+        let bias_data = self.biases.data.to_mut().as_mut_slice();
+        let neurons_per_chunk = self.neurons / parallelism;
+        if neurons_per_chunk > 0 {
+            let neuron_grain = neurons_per_chunk * self.fan_in;
+            let bias_grain = neurons_per_chunk;
+            out_data.par_chunks_mut(neuron_grain).zip(bias_data.par_chunks_mut(bias_grain)).enumerate().for_each(|(i, (out, bias))| {
+                let start_neuron = i * neurons_per_chunk;
+                let neuron_count = out.len() / self.fan_in;
+                Self::backwards_pass2_mm(start_neuron, neuron_count, batch, self.fan_in, c, &a_in_flat_t.data, &grad.data, bias, out);
+            });
+        } else {
+            Self::backwards_pass2_mm(0, self.neurons, batch, self.fan_in, c, &a_in_flat_t.data, &grad.data, bias_data, out_data);
+        }
+
+        a_grad
+    }
+
+    fn backwards_pass1_mm(start_fan_in: usize, fan_in_count: usize, batch: usize, neurons: usize, weights_t: &[f64], grad_t: &[f64], out: &mut [f64]) {
+        let mut lhs_idx = start_fan_in * neurons;
+        let mut rhs_idx = 0;
+        let mut out_idx = 0;
+        let chunks = neurons / LANES;
+        let remainder = neurons % LANES;
+        for _ in 0..fan_in_count {
             for _ in 0..batch {
                 let mut sum_simd: Simd<f64, LANES> = Simd::splat(0.0);
-                let mut lhs_ptr = unsafe { weights_t.data.as_ptr().add(lhs_idx) };
-                let mut rhs_ptr = unsafe { grad_t.data.as_ptr().add(rhs_idx) };
+                // todo: cast ptrs once
+                let mut lhs_ptr = unsafe { weights_t.as_ptr().add(lhs_idx) };
+                let mut rhs_ptr = unsafe { grad_t.as_ptr().add(rhs_idx) };
                 for _ in 0..chunks {
                     let lhs_simd =
                         unsafe { std::ptr::read_unaligned(lhs_ptr as *const Simd<f64, LANES>) };
@@ -178,41 +201,42 @@ impl FeedForward<CPUTensor<'_>> {
                 lhs_idx += LANES * chunks;
                 rhs_idx += LANES * chunks;
                 for _ in 0..remainder {
-                    let lhs = unsafe { *weights_t.data.get_unchecked(lhs_idx) };
-                    let rhs = unsafe { *grad_t.data.get_unchecked(rhs_idx) };
+                    let lhs = unsafe { *weights_t.get_unchecked(lhs_idx) };
+                    let rhs = unsafe { *grad_t.get_unchecked(rhs_idx) };
                     sum += lhs * rhs;
                     lhs_idx += 1;
                     rhs_idx += 1;
                 }
                 unsafe {
-                    *out_data.get_unchecked_mut(out_idx) = sum;
+                    *out.get_unchecked_mut(out_idx) = sum;
                 }
-                lhs_idx -= self.neurons;
-                out_idx += 1;
+                lhs_idx -= neurons;
+                out_idx += 1;                    
             }
-            lhs_idx += self.neurons;
+            lhs_idx += neurons;
             rhs_idx = 0;
         }
+    }
 
-        // pass 4: weights backwards (grad dot a_in^T) [neurons, batch] dot [batch, fan_in] -> [neurons, fan_in] -> lhs_grad
-        let flat_activations_in_t = flat_activations_in
-            .transpose(&[1, 0])
-            .unwrap()
-            .materialize();
-        let mut lhs_idx: usize = 0;
+    #[inline(always)]
+    fn backwards_pass2_mm(start_neuron: usize, neuron_count: usize, batch: usize, fan_in: usize, c: f64, a_in_flat_t: &[f64], grad: &[f64], bias: &mut [f64], out: &mut [f64]) {
+        let c_simd = Simd::splat(c);
+        let chunks = fan_in / LANES;
+        let remainder = fan_in % LANES;
+        let mut lhs_idx = start_neuron * batch;
         let mut rhs_idx = 0;
         let mut out_idx = 0;
-        let out_data = self.weights.data.to_mut().as_mut_slice();
-
-        let chunks = self.fan_in / LANES;
-        let remainder = self.fan_in % LANES;
-        let c_simd = Simd::splat(c);
-        for _ in 0..self.neurons {
+        for n in 0..neuron_count {
+            let bias = unsafe { bias.get_unchecked_mut(n) };
+            let mut sum_g = 0.0;
             for _ in 0..batch {
-                let g = unsafe { *grad.data.get_unchecked(lhs_idx) };
+                // access gradient (also accumulate for bias update)
+                let g = unsafe { *grad.get_unchecked(lhs_idx) };
+                sum_g += g;
+
                 let g_simd = Simd::splat(g);
-                let mut rhs_ptr = unsafe { flat_activations_in_t.data.as_ptr().add(rhs_idx) };
-                let mut out_ptr = unsafe { out_data.as_mut_ptr().add(out_idx) };
+                let mut rhs_ptr = unsafe { a_in_flat_t.as_ptr().add(rhs_idx) };
+                let mut out_ptr = unsafe { out.as_mut_ptr().add(out_idx) };
                 for _ in 0..chunks {
                     let rhs_simd =
                         unsafe { std::ptr::read_unaligned(rhs_ptr as *const Simd<f64, LANES>) };
@@ -228,20 +252,22 @@ impl FeedForward<CPUTensor<'_>> {
                 rhs_idx += LANES * chunks;
                 out_idx += LANES * chunks;
                 for _ in 0..remainder {
-                    let rhs = unsafe { *flat_activations_in_t.data.get_unchecked(rhs_idx) };
-                    let out = unsafe { out_data.get_unchecked_mut(out_idx) };
+                    let rhs = unsafe { *a_in_flat_t.get_unchecked(rhs_idx) };
+                    let out = unsafe { out.get_unchecked_mut(out_idx) };
                     *out -= c * g * rhs;
                     rhs_idx += 1;
                     out_idx += 1;
                 }
                 lhs_idx += 1;
-                out_idx -= self.fan_in;
+                out_idx -= fan_in;
             }
+            // backwards to bias too since we actually are already traversing over the correct axes while backpropagating weights 
+            // (accumulated sum over batch to avoid unneeded writes / muls)
+            *bias -= c * sum_g;
+            
             rhs_idx = 0;
-            out_idx += self.fan_in;
+            out_idx += fan_in;
         }
-
-        a_grad
     }
 }
 
