@@ -1,4 +1,4 @@
-use std::{borrow::Cow, marker::PhantomData};
+use std::borrow::Cow;
 
 use crate::{
     dataset::{Example, Test},

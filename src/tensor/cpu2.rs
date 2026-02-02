@@ -1,6 +1,5 @@
 use std::{borrow::Cow, collections::HashSet};
-
-use arrow::compute::kernels::length::length;
+use std::io::{self, Read, Write};
 
 #[derive(Clone)]
 pub struct Tensor<'a> {
@@ -88,6 +87,59 @@ impl<'a> Tensor<'a> {
             stride: self.stride.clone(),
             data: Cow::Owned(self.data.clone().into_owned()),
         }
+    }
+
+    pub fn read(read: &mut impl Read) -> io::Result<Self> {
+        let mut signature = [0u8; 8];
+        read.read_exact(&mut signature)?;
+        if &signature != b"CPUTensr" {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "invalid tensor signature",
+            ));
+        }
+        let mut ndimb = [0u8; 8];
+        read.read_exact(&mut ndimb)?;
+        let ndim = usize::from_le_bytes(ndimb);
+        let mut shape = vec![0; ndim];
+        for s in &mut shape {
+            let mut dim = [0u8; 8];
+            read.read_exact(&mut dim)?;
+            *s = usize::from_le_bytes(dim);
+        }
+        let mut stride = vec![0; ndim];
+        for s in &mut stride {
+            let mut dim = [0u8; 8];
+            read.read_exact(&mut dim)?;
+            *s = usize::from_le_bytes(dim);
+        }
+        let size = length_of(shape.as_slice());
+        let mut data = vec![0.0; size];
+        for d in &mut data {
+            let mut x = [0u8; 8];
+            read.read_exact(&mut x)?;
+            *d = f64::from_le_bytes(x);
+        }
+        Ok(Self {
+            shape,
+            stride,
+            data: Cow::Owned(data),
+        })
+    }
+
+    pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
+        write.write_all(b"CPUTensr")?;
+        write.write_all(&self.shape.len().to_le_bytes())?;
+        for s in &self.shape {
+            write.write_all(&s.to_le_bytes())?;
+        }
+        for s in &self.stride {
+            write.write_all(&s.to_le_bytes())?;
+        }
+        for x in self.data.as_slice() {
+            write.write_all(&x.to_le_bytes())?;
+        }
+        Ok(())
     }
 }
 

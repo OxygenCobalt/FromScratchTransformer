@@ -1,10 +1,8 @@
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
-use rand_distr::Distribution;
-use rayon::iter::{
-    IndexedParallelIterator, ParallelIterator,
-};
-use std::io;
+use std::fs::File;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 
 use crate::dataset::{EagerExample, Example, Train};
 use crate::tensor::cpu2::{Tensor, Tt};
@@ -104,6 +102,34 @@ impl <'a> NeuralNetwork<'a> {
         }
         Ok(init.nn)
     }
+    
+    pub fn read(read: &mut impl Read) -> io::Result<Self> {
+        let mut signature = [0u8; 8];
+        read.read_exact(&mut signature)?;
+        if &signature != b"NeuralNt" {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "invalid neuralnet signature",
+            ));
+        }
+        let mut nb = [0u8; 8];
+        read.read_exact(&mut nb)?;
+        let axon_count = usize::from_le_bytes(nb);
+        let mut axons = Vec::with_capacity(axon_count);
+        for _ in 0..axon_count {
+            axons.push(Axon::read(read)?)
+        }
+        Ok(Self { axons })
+    }
+
+    pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
+        write.write_all(b"NeuralNt")?;
+        write.write_all(&self.axons.len().to_le_bytes())?;
+        for axon in &self.axons {
+            axon.write(write)?;
+        }
+        Ok(())
+    }
 }
 
 pub trait Setup {
@@ -178,5 +204,88 @@ impl Layer {
         match self {
             Self::Dense { neurons, .. } => vec![*neurons]
         }
+    }
+}
+
+
+pub struct Checkpoint<'a, S: Setup, R: Reporting> {
+    setup: &'a S,
+    reporting: &'a R,
+    path: &'a Path
+}
+
+impl<'a, S: Setup, R: Reporting> Checkpoint<'a, S, R> {
+    pub fn new(setup: &'a S, reporting: &'a R, path: &'a Path) -> Self {
+        Self {
+            setup,
+            reporting,
+            path
+        }
+    }
+
+    fn checkpoint_path(&self, epoch: Option<u64>) -> PathBuf {
+        self.path.join(Path::new(&format![
+            "{}.nn",
+            epoch
+                .map(|e| (e + 1).to_string())
+                .unwrap_or_else(|| "init".to_string())
+        ]))
+    }
+}
+
+impl<'a, S: Setup, R: Reporting> Setup for Checkpoint<'a, S, R> {
+    fn setup<'b>(&self) -> io::Result<Init<'b>> {
+        fn open<'c>(path: &Path) -> io::Result<NeuralNetwork<'c>> {
+            let mut file = File::open(path)?;
+            let nn = NeuralNetwork::<'c>::read(&mut file)?;
+            Ok(nn)
+        }
+        let amount = self.path.read_dir()?.count();
+        for epoch in (0..amount)
+            .map(|i| Some(i as u64))
+            .rev()
+            .chain(std::iter::once(None))
+        {
+            let path = self.checkpoint_path(epoch);
+            match open(&path) {
+                Ok(nn) => {
+                    println!(
+                        "{}: located checkpointed nn at epoch {}",
+                        "checkpoint".red(),
+                        epoch
+                            .map(|e| (e + 1).to_string())
+                            .unwrap_or_else(|| "init".to_string())
+                    );
+                    return Ok(Init {
+                        nn,
+                        at_epoch: epoch,
+                    });
+                }
+                Err(e) => {
+                    println!(
+                        "{}: no checkpointed nn located at {}: {}",
+                        "checkpoint".red(),
+                        path.display(),
+                        e
+                    );
+                }
+            }
+        }
+        self.setup.setup()
+    }
+}
+
+impl<'a, S: Setup, R: Reporting> Reporting for Checkpoint<'a, S, R> {
+    fn report(&self, nn: &NeuralNetwork, epoch: Option<u64>) -> io::Result<()> {
+        self.reporting.report(nn, epoch)?;
+        let path = self.checkpoint_path(epoch);
+        println!(
+            "{}: writing nn to {}",
+            "checkpoint".red(),
+            path.display().to_string()
+        );
+        let mut file = File::create(path)?;
+        nn.write(&mut file)?;
+        Ok(())
     }
 }

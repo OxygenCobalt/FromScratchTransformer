@@ -6,6 +6,7 @@ use crate::{
 };
 use rand_distr::{Distribution, Normal};
 use rayon::{iter::{IndexedParallelIterator, ParallelIterator}, slice::ParallelSliceMut};
+use std::io::{self, Read, Write};
 
 const LANES: usize = 8; // number of SIMD lanes
 const FORWARD_MIN_FLOPS_PER_CORE: usize = 512_000 / 24; // measured on bench suite. adjusted to apply to any core count
@@ -275,6 +276,50 @@ impl <'a> FeedForward<'a> {
             rhs_idx = 0;
             out_idx += fan_in;
         }
+    }
+
+    pub fn read(read: &mut impl Read) -> io::Result<Self> {
+        let mut signature = [0u8; 8];
+        read.read_exact(&mut signature)?;
+        if &signature != b"FeedFrwd" {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "invalid feedforward signature",
+            ));
+        }
+        let mut activation_id = [0u8; 8];
+        read.read_exact(&mut activation_id)?;
+        let activation = Activation::from_id(&activation_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "invalid feedforward signature"))?;
+        let mut finb = [0u8; 8];
+        read.read_exact(&mut finb)?;
+        let fan_in = usize::from_le_bytes(finb);
+        let mut fisb = [0u8; 8];
+        read.read_exact(&mut fisb)?;
+        let neurons = usize::from_le_bytes(fisb);
+        let mut bib = [0u8; 8];
+        read.read_exact(&mut bib)?;
+        let batch_idx = usize::from_le_bytes(bib);
+        let weights: Tensor<'_> = Tensor::read(read)?;
+        let biases = Tensor::read(read)?;
+        Ok(Self {
+            weights,
+            biases,
+            activation,
+            fan_in,
+            neurons,
+            batch_idx
+        })
+    }
+
+    pub fn write(&self, write: &mut impl Write) -> io::Result<()> {
+        write.write_all(b"FeedFrwd")?;
+        write.write_all(self.activation.id())?;
+        write.write_all(&self.fan_in.to_le_bytes())?;
+        write.write_all(&self.neurons.to_le_bytes())?;
+        write.write_all(&self.batch_idx.to_le_bytes())?;
+        self.weights.write(write)?;
+        self.biases.write(write)
     }
 }
 

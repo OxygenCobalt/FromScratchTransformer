@@ -81,19 +81,19 @@ fn shallow_mnist() {
     .unwrap();
     let test = mnist.test().unwrap();
     let reporting = loss2::LossesOn::new(&test, &[loss2::Loss::MSE, loss2::Loss::Accuracy(loss2::AccuracyOf::Argmax)]);
-    // let checkpointing = nn2::Checkpoint::new(
-    //     &layers,
-    //     &reporting,
-    //     Path::new("data/checkpoints/mnist/shallow"),
-    // );
+    let checkpointing = nn2::Checkpoint::new(
+        &layers,
+        &reporting,
+        Path::new("data/checkpoints/mnist/shallow"),
+    );
     let hyperparams = nn2::Hyperparams {
         epochs: 30,
         batch_size: 10,
         learning_rate: 3.0,
     };
     nn2::NeuralNetwork::train(
-        &layers,
-        &reporting,
+        &checkpointing,
+        &checkpointing,
         &mnist.train().unwrap(),
         &hyperparams,
         loss2::Loss::MSE,
