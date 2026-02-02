@@ -11,7 +11,7 @@ use parquet::arrow::arrow_reader::ArrowReaderBuilder;
 
 use crate::{
     dataset::{Example, Test, TestSet, Train, TrainSet},
-    tensor::Tensor,
+    tensor::{cpu2, Tensor},
 };
 
 pub struct Mnist(pub PathBuf);

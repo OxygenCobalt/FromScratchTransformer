@@ -5,8 +5,8 @@ use rand::Rng;
 use test::{black_box, Bencher};
 
 use nn::{
-    ml::{activation::Activation, layers::ff::FeedForward as FusedFeedForward},
-    tensor::cpu2::{CPUTensor as Cpu2Tensor, Fill as Cpu2Fill},
+    ml::{activation::Activation, axons::ff::FeedForward as FusedFeedForward},
+    tensor::cpu2::{Tensor as Cpu2Tensor, Fill as Cpu2Fill},
 };
 
 fn random_cpu2_tensor(shape: Vec<usize>) -> Cpu2Tensor<'static> {

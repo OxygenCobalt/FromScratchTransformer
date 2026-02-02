@@ -2,15 +2,14 @@ use std::{borrow::Cow, collections::HashSet};
 
 use arrow::compute::kernels::length::length;
 
-use crate::tensor::Tensor;
-
-pub struct CPUTensor<'a> {
+#[derive(Clone)]
+pub struct Tensor<'a> {
     pub shape: Vec<usize>,
     pub stride: Vec<usize>,
     pub data: Cow<'a, Vec<f64>>,
 }
 
-impl<'a> CPUTensor<'a> {
+impl<'a> Tensor<'a> {
     pub fn init(init: impl TensorInit) -> Option<Self> {
         let (shape, data) = init.make()?;
         let stride = stride_of(&shape);
@@ -21,7 +20,7 @@ impl<'a> CPUTensor<'a> {
         })
     }
 
-    pub fn reshape(&'a self, shape: &[usize]) -> Option<CPUTensor<'a>> {
+    pub fn reshape(&'a self, shape: &[usize]) -> Option<Tensor<'a>> {
         reshape_impl(
             Cow::Borrowed(&self.shape),
             Cow::Borrowed(&self.stride),
@@ -30,7 +29,7 @@ impl<'a> CPUTensor<'a> {
         )
     }
 
-    pub fn into_reshape(self, shape: &[usize]) -> Option<CPUTensor<'a>> {
+    pub fn into_reshape(self, shape: &[usize]) -> Option<Tensor<'a>> {
         reshape_impl(
             Cow::Owned(self.shape),
             Cow::Owned(self.stride),
@@ -39,20 +38,20 @@ impl<'a> CPUTensor<'a> {
         )
     }
 
-    pub fn transpose(&'a self, axes: &[usize]) -> Option<CPUTensor<'a>> {
+    pub fn transpose(&'a self, axes: &[usize]) -> Option<Tensor<'a>> {
         transpose_impl(&self.shape, &self.stride, Cow::Borrowed(&self.data), axes)
     }
 
-    pub fn into_transpose(self, axes: &[usize]) -> Option<CPUTensor<'a>> {
+    pub fn into_transpose(self, axes: &[usize]) -> Option<Tensor<'a>> {
         transpose_impl(&self.shape, &self.stride, self.data, axes)
     }
 
-    pub fn materialize<'o>(&self) -> CPUTensor<'o> {
+    pub fn materialize<'o>(&self) -> Tensor<'o> {
         let mut new_data = Vec::with_capacity(length_of(&self.shape));
         unsafe {
             new_data.set_len(length_of(&self.shape));
         }
-        let mut new = CPUTensor {
+        let mut new = Tensor {
             shape: self.shape.clone(),
             stride: stride_of(&self.shape),
             data: Cow::Owned(new_data),
@@ -63,6 +62,7 @@ impl<'a> CPUTensor<'a> {
         let mut new_idx = 0;
         'iterate: loop {
             unsafe {
+                // todo: simd'd materialization
                 *new_slice.get_unchecked_mut(new_idx) = *self.data.get_unchecked(old_idx);
             }
             for i in 0..self.shape.len() {
@@ -82,8 +82,8 @@ impl<'a> CPUTensor<'a> {
         new
     }
 
-    pub fn cloned_view<'o>(&self) -> CPUTensor<'o> {
-        CPUTensor {
+    pub fn cloned_view<'o>(&self) -> Tensor<'o> {
+        Tensor {
             shape: self.shape.clone(),
             stride: self.stride.clone(),
             data: Cow::Owned(self.data.clone().into_owned()),
@@ -92,6 +92,9 @@ impl<'a> CPUTensor<'a> {
 }
 
 pub fn stride_of(shape: &[usize]) -> Vec<usize> {
+    if shape.is_empty() {
+        return vec![];
+    }
     let mut stride = vec![1; shape.len()];
     for i in (0..shape.len() - 1).rev() {
         stride[i] = stride[i + 1] * shape[i + 1];
@@ -108,7 +111,7 @@ fn reshape_impl<'a>(
     stride: Cow<'a, Vec<usize>>,
     with_data: Cow<'a, Vec<f64>>,
     to_shape: &[usize],
-) -> Option<CPUTensor<'a>> {
+) -> Option<Tensor<'a>> {
     if length_of(&shape) != length_of(&to_shape) {
         return None;
     }
@@ -117,101 +120,50 @@ fn reshape_impl<'a>(
         // with it in general reshaping code
         // we can just return the same scalar since shape must be []
         // and stride is already []
-        return Some(CPUTensor {
+        return Some(Tensor {
             shape: shape.into_owned(),
             stride: stride.into_owned(),
             data: with_data,
         });
     }
-    // see if stride is monotonically increasing. if so we can just recompute the strides
-    // since we havent done any views
-    let mut last = 0;
-    let mut monotonic = true;
-    for s in stride.iter() {
-        if *s < last {
-            monotonic = false;
-            break;
-        }
-        last = *s;
-    }
-    if monotonic {
-        let mut new_stride = Vec::with_capacity(to_shape.len());
-        let mut mult = 1;
-        for s in to_shape.iter() {
-            new_stride.push(mult);
-            mult *= *s;
-        }
-        return Some(CPUTensor {
+
+    let shape = shape.into_owned();
+    let stride = stride.into_owned();
+    if is_row_major_contiguous(&shape, &stride) {
+        return Some(Tensor {
             shape: to_shape.to_vec(),
-            stride: new_stride,
+            stride: stride_of(to_shape),
             data: with_data,
         });
     }
 
-    // so our stride isnt monotonically increasing, we transposed at some point
-    // therefore we have to recompute the stride such that it still aligns with
-    // the view we created.
-    struct Block {
-        len: usize,
-        stride: usize,
-    }
-
-    let mut blocks = vec![];
-    let mut block_len = 1;
-    let mut block_stride = 1;
-    for i in 0..shape.len() {
-        if i > 0 && stride[i] == stride[i - 1] * shape[i - 1] {
-            block_len *= shape[i];
-        } else {
-            if i > 0 {
-                blocks.push(Block {
-                    len: block_len,
-                    stride: block_stride,
-                });
-            }
-            block_len = shape[i];
-            block_stride = stride[i];
-        }
-    }
-    blocks.push(Block {
-        len: block_len,
-        stride: block_stride,
-    });
-
-    let mut block_iter = blocks.into_iter();
-    let mut cur_blk = block_iter.next().unwrap();
-    let mut cur_len = 1;
-    let mut accd_stride = cur_blk.stride;
-    let mut new_stride = Vec::with_capacity(to_shape.len());
-    for (i, s) in to_shape.iter().enumerate() {
-        cur_len *= *s;
-        new_stride.push(accd_stride);
-        accd_stride = accd_stride.saturating_mul(*s);
-        if cur_len == cur_blk.len {
-            cur_len = 1;
-            if let Some(blk) = block_iter.next() {
-                cur_blk = blk;
-                accd_stride = cur_blk.stride;
-            } else if i + 1 < to_shape.len() {
-                // no more blocks. in this case the remaining axes
-                // must be size 1. if not we will reject it later on
-                accd_stride = 0;
-            }
-        } else if cur_len > cur_blk.len {
-            return None;
-        }
-    }
-    // we didnt use all of the blocks OR we couldnt fit the last dimensions
-    // into a block, reject.
-    // todo: if this causes issues later on add a materialization path
-    if cur_len != 1 || block_iter.next().is_some() {
-        return None;
-    }
-    Some(CPUTensor {
-        shape: to_shape.to_vec(),
-        stride: new_stride,
+    // Fall back to a row-major materialized view when stride isn't contiguous.
+    let view = Tensor {
+        shape,
+        stride,
         data: with_data,
-    })
+    };
+    let mut materialized = view.materialize();
+    materialized.shape = to_shape.to_vec();
+    materialized.stride = stride_of(to_shape);
+    Some(materialized)
+}
+
+fn is_row_major_contiguous(shape: &[usize], stride: &[usize]) -> bool {
+    if shape.is_empty() {
+        return true;
+    }
+    if shape.len() != stride.len() {
+        return false;
+    }
+    let mut expected = 1;
+    for i in (0..shape.len()).rev() {
+        if shape[i] != 1 && stride[i] != expected {
+            return false;
+        }
+        expected = expected.saturating_mul(shape[i]);
+    }
+    true
 }
 
 fn transpose_impl<'a>(
@@ -219,7 +171,7 @@ fn transpose_impl<'a>(
     stride: &[usize],
     with_data: Cow<'a, Vec<f64>>,
     axes: &[usize],
-) -> Option<CPUTensor<'a>> {
+) -> Option<Tensor<'a>> {
     if shape.len() != axes.len() || axes.iter().any(|i| *i >= shape.len()) {
         return None;
     }
@@ -241,7 +193,7 @@ fn transpose_impl<'a>(
         new_shape[i] = old_shape[*j];
         new_stride[i] = old_stride[*j];
     }
-    Some(CPUTensor {
+    Some(Tensor {
         shape: new_shape,
         stride: new_stride,
         data: with_data,
@@ -252,19 +204,48 @@ pub trait TensorInit {
     fn make(self) -> Option<(Vec<usize>, Vec<f64>)>;
 }
 
-pub struct Tt<T: Tensor>(pub Vec<T>);
+pub struct Tt<'a>(pub Vec<Tensor<'a>>);
 
-impl<T: Tensor> TensorInit for Tt<T> {
+impl TensorInit for Tt<'_> {
     fn make(self) -> Option<(Vec<usize>, Vec<f64>)> {
         if self.0.is_empty() {
             return None;
         }
-        let mut shape = self.0.first().unwrap().shape().to_vec();
-        if self.0.iter().any(|t| t.shape() != shape) {
+        let base_shape = self.0.first().unwrap().shape.to_vec();
+        if self.0.iter().any(|t| t.shape != base_shape) {
             return None;
         }
-        shape.push(self.0.len());
-        let data = self.0.iter().map(|t| t.iter()).flatten().cloned().collect();
+        let batch = self.0.len();
+        let mut shape = base_shape.clone();
+        shape.push(batch);
+
+        if base_shape.is_empty() {
+            let data = self.0.iter().map(|t| *t.data.get(0).unwrap_or(&0.0)).collect();
+            return Some((shape, data));
+        }
+
+        let sample_len = length_of(&base_shape);
+        let mut data = Vec::with_capacity(sample_len * batch);
+        let mut idx = vec![0usize; base_shape.len()];
+        for step in 0..sample_len {
+            for t in &self.0 {
+                let mut lin = 0usize;
+                for (axis, stride) in t.stride.iter().enumerate() {
+                    lin += idx[axis] * stride;
+                }
+                data.push(*t.data.get(lin)?);
+            }
+            if step + 1 == sample_len {
+                break;
+            }
+            for axis in (0..base_shape.len()).rev() {
+                idx[axis] += 1;
+                if idx[axis] < base_shape[axis] {
+                    break;
+                }
+                idx[axis] = 0;
+            }
+        }
         Some((shape, data))
     }
 }
@@ -311,6 +292,22 @@ impl TensorInit for Th {
         }
         shape.reverse();
         Some((shape, data))
+    }
+}
+
+pub struct Scalar(pub f64);
+
+impl TensorInit for Scalar {
+    fn make(self) -> Option<(Vec<usize>, Vec<f64>)> {
+        return Some((vec![], vec![self.0]));
+    }
+}
+
+pub struct Vector(pub Vec<f64>);
+
+impl TensorInit for Vector {
+    fn make(self) -> Option<(Vec<usize>, Vec<f64>)> {
+        return Some((vec![self.0.len()], self.0));
     }
 }
 

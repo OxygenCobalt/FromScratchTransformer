@@ -9,7 +9,7 @@ use std::{
 
 use crate::tensor::{
     Autograd, DifferentiableTensor, Field, Fill, FillUninit, Tensor, TensorIO, TensorInit,
-    TensorMut,
+    TensorMut, cpu2,
 };
 
 #[derive(Clone, PartialEq)]
@@ -167,6 +167,14 @@ macro_rules! impl_arithmetic {
 }
 
 impl CPUTensor {
+    pub fn to_cpu2<'o>(self) -> cpu2::Tensor<'o> {
+        cpu2::Tensor {
+            stride: self.stride,
+            shape: self.shape,
+            data: Cow::Owned(self.data)
+        }
+    }
+
     pub fn len(shape: &[usize]) -> usize {
         if shape.is_empty() {
             return 1;

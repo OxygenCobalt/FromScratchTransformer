@@ -57,7 +57,7 @@ impl Activation {
         }
     }
 
-    pub fn forward_all<'i>(&self, mut x: cpu2::CPUTensor<'i>) -> cpu2::CPUTensor<'i> {
+    pub fn forward_all<'i>(&self, mut x: cpu2::Tensor<'i>) -> cpu2::Tensor<'i> {
         match self {
             Self::Sigmoid => x
                 .data
@@ -117,9 +117,9 @@ impl Activation {
 
     pub fn backward_all<'i>(
         &self,
-        x: &cpu2::CPUTensor<'i>,
-        mut grad: cpu2::CPUTensor<'i>,
-    ) -> cpu2::CPUTensor<'i> {
+        x: &cpu2::Tensor<'i>,
+        mut grad: cpu2::Tensor<'i>,
+    ) -> cpu2::Tensor<'i> {
         match self {
             Self::Sigmoid => x
                 .data

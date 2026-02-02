@@ -6,14 +6,14 @@ use rayon::ThreadPoolBuilder;
 
 use crate::{
     dataset::{
-        TestSet, TrainSet, distill::Distill, mnist::Mnist, shakespeare::Shakespeare,
-        wikitext::WikiText2,
+        TestSet, TrainSet, distill::Distill, mnist::Mnist, shakespeare::Shakespeare
     },
     ml::{
         activation::Activation,
         language::{FixedSequencer, TokenizedExample, Tokenizer, WordTokenizer},
         loss::{AccuracyOf, Loss, LossesOn},
         nn::{Checkpoint, Hyperparams, Layer, Layers, NeuralNetwork},
+        nn2, loss2
     },
     tensor::{Field, cpu::CPUTensor},
 };
@@ -66,13 +66,13 @@ fn main() {
 
 fn shallow_mnist() {
     let mnist = Mnist(PathBuf::from("data/mnist"));
-    let layers = Layers::new(vec![
-        Layer::Dense {
+    let layers = nn2::Layers::new(vec![
+        nn2::Layer::Dense {
             input_shape: Some(vec![28, 28]),
             neurons: 100,
             activation: Activation::Sigmoid,
         },
-        Layer::Dense {
+        nn2::Layer::Dense {
             input_shape: None,
             neurons: 10,
             activation: Activation::Sigmoid,
@@ -80,23 +80,23 @@ fn shallow_mnist() {
     ])
     .unwrap();
     let test = mnist.test().unwrap();
-    let reporting = LossesOn::new(&test, &[Loss::MSE, Loss::Accuracy(AccuracyOf::Argmax)]);
-    let checkpointing = Checkpoint::new(
-        &layers,
-        &reporting,
-        Path::new("data/checkpoints/mnist/shallow"),
-    );
-    let hyperparams = Hyperparams {
+    let reporting = loss2::LossesOn::new(&test, &[loss2::Loss::MSE, loss2::Loss::Accuracy(loss2::AccuracyOf::Argmax)]);
+    // let checkpointing = nn2::Checkpoint::new(
+    //     &layers,
+    //     &reporting,
+    //     Path::new("data/checkpoints/mnist/shallow"),
+    // );
+    let hyperparams = nn2::Hyperparams {
         epochs: 30,
         batch_size: 10,
         learning_rate: 3.0,
     };
-    NeuralNetwork::<CPUTensor>::train(
-        &checkpointing,
-        &checkpointing,
+    nn2::NeuralNetwork::train(
+        &layers,
+        &reporting,
         &mnist.train().unwrap(),
         &hyperparams,
-        Loss::MSE,
+        loss2::Loss::MSE,
     )
     .unwrap();
 }

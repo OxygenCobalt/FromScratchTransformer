@@ -24,3 +24,11 @@ opt-level = 3
 [profile.bench]
 inherits = 'release'
 debug = true
+
+[[bench]]
+name = "ff_fused"
+harness = true
+
+[[bench]]
+name = "ff_legacy"
+harness = true

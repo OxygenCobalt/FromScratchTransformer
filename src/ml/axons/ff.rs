@@ -2,7 +2,7 @@ use std::simd::{Simd, num::SimdFloat};
 
 use crate::{
     ml::activation::Activation,
-    tensor::cpu2::{self, CPUTensor, Fill, FillUninit, Generate},
+    tensor::cpu2::{self, Tensor, Fill, FillUninit, Generate},
 };
 use rand_distr::{Distribution, Normal};
 use rayon::{iter::{IndexedParallelIterator, ParallelIterator}, slice::ParallelSliceMut};
@@ -10,28 +10,29 @@ use rayon::{iter::{IndexedParallelIterator, ParallelIterator}, slice::ParallelSl
 const LANES: usize = 8; // number of SIMD lanes
 const FORWARD_MIN_FLOPS_PER_CORE: usize = 512_000 / 24; // measured on bench suite. adjusted to apply to any core count
 
-pub struct FeedForward<T> {
-    weights: T,
-    biases: T,
+pub struct FeedForward<'a> {
+    weights: Tensor<'a>,
+    biases: Tensor<'a>,
     activation: Activation,
     // avoid recomputing these every forward/backward pass
     fan_in: usize,
     // might be better to keep on stack rather than reading weights.shape[0] over and over
     // todo: evaluate if this is better and maybe try to move other things on-stack
     neurons: usize,
+    batch_idx: usize
 }
 
-impl FeedForward<CPUTensor<'_>> {
+impl <'a> FeedForward<'a> {
     pub fn new(input_shape: Vec<usize>, neurons: usize, activation: Activation) -> Self {
         let fan_in = cpu2::length_of(&input_shape);
         let xavier = Normal::new(0.0, 2.0 / (fan_in + neurons) as f64).unwrap();
         Self {
-            weights: CPUTensor::init(Generate {
+            weights: Tensor::init(Generate {
                 shape: vec![neurons, fan_in],
                 with: || xavier.sample(&mut rand::rng()),
             })
             .unwrap(),
-            biases: CPUTensor::init(Fill {
+            biases: Tensor::init(Fill {
                 shape: vec![neurons],
                 with: 0.0,
             })
@@ -39,12 +40,14 @@ impl FeedForward<CPUTensor<'_>> {
             activation,
             fan_in,
             neurons,
+            batch_idx: input_shape.len()
         }
     }
 
-    pub fn forward<'i, 'o>(&self, a_in: CPUTensor<'i>) -> CPUTensor<'o> {
+    pub fn forward<'i, 'o>(&self, a_in: Tensor<'i>) -> Tensor<'o> {
         // forward pass: Wx + b -> [neurons, fan_in] x [fan_in, batch] -> [neurons, batch] + [neurons]
-        let batch = *a_in.shape.last().unwrap();
+        let batch = *a_in.shape.get(self.batch_idx).unwrap_or(&1);
+        // dbg!(self.fan_in);
         let a_in_flat_t = a_in
             .reshape(&[self.fan_in, batch])
             .unwrap()
@@ -52,7 +55,7 @@ impl FeedForward<CPUTensor<'_>> {
             .unwrap()
             .materialize();
         let mut a_out_flat =
-            CPUTensor::init(unsafe { FillUninit::new(vec![self.neurons, batch]) }).unwrap();
+            Tensor::init(unsafe { FillUninit::new(vec![self.neurons, batch]) }).unwrap();
         // explicit slice definitions to signal to the compiler about aliasing
         let mut out_data = a_out_flat.data.to_mut().as_mut_slice();
         let parallelism = rayon::current_num_threads();
@@ -73,7 +76,7 @@ impl FeedForward<CPUTensor<'_>> {
     }
 
     #[inline(always)]
-    fn forward_mm(&self, start_neuron: usize, neuron_count: usize, batch: usize, a_in_flat_t: &CPUTensor<'_>, out: &mut [f64]) {
+    fn forward_mm(&self, start_neuron: usize, neuron_count: usize, batch: usize, a_in_flat_t: &Tensor<'_>, out: &mut [f64]) {
         let mut lhs_idx = self.fan_in * start_neuron;
         let mut rhs_idx = 0;
         let mut bias_idx = start_neuron;
@@ -120,14 +123,14 @@ impl FeedForward<CPUTensor<'_>> {
     pub fn backward<'i, 'o>(
         &mut self,
         c: f64,
-        a_in: CPUTensor<'i>,
-        a_out: CPUTensor<'i>,
-        mut grad: CPUTensor<'i>,
-    ) -> CPUTensor<'o> {
+        a_in: &Tensor<'i>,
+        a_out: &Tensor<'i>,
+        mut grad: Tensor<'i>,
+    ) -> Tensor<'o> {
         // backwards activations
         grad = self.activation.backward_all(&a_out, grad);
 
-        let batch = *a_in.shape.last().unwrap();
+       let batch = *a_in.shape.get(self.batch_idx).unwrap_or(&1);
         let a_in_flat = a_in
             .reshape(&[self.fan_in, batch])
             .unwrap();
@@ -138,6 +141,7 @@ impl FeedForward<CPUTensor<'_>> {
         let weights_t = self.weights.transpose(&[1, 0]).unwrap().materialize();
         let grad_t = grad.transpose(&[1, 0]).unwrap().materialize();
         let out_data: &mut [f64] = a_grad.data.to_mut().as_mut_slice();
+
 
         let parallelism = rayon::current_num_threads();
         let fan_in_per_chunk = self.fan_in / parallelism;
@@ -151,7 +155,6 @@ impl FeedForward<CPUTensor<'_>> {
         } else {
             Self::backwards_pass1_mm(0, self.fan_in, batch, self.neurons, &weights_t.data, &grad_t.data, out_data);
         }
-
         // pass 2: weights backwards (grad dot a_in^T) [neurons, batch] dot [batch, fan_in] -> [neurons, fan_in] -> lhs_grad
         //         bias backwards (sum over batch of grad) -> bias_grad
         let a_in_flat_t = a_in_flat
@@ -276,8 +279,8 @@ mod tests {
     use super::*;
     use crate::tensor::cpu2;
 
-    fn tensor_with_data(shape: Vec<usize>, values: &[f64]) -> CPUTensor<'static> {
-        let mut tensor = CPUTensor::init(Fill { shape, with: 0.0 }).expect("tensor init");
+    fn tensor_with_data(shape: Vec<usize>, values: &[f64]) -> Tensor<'static> {
+        let mut tensor = Tensor::init(Fill { shape, with: 0.0 }).expect("tensor init");
         assert_eq!(tensor.data.len(), values.len());
         tensor.data.to_mut().clone_from_slice(values);
         tensor
@@ -288,7 +291,7 @@ mod tests {
         biases: &[f64],
         input_shape: Vec<usize>,
         activation: Activation,
-    ) -> FeedForward<CPUTensor<'static>> {
+    ) -> FeedForward<'static> {
         let neurons = biases.len();
         let fan_in = cpu2::length_of(&input_shape);
         assert_eq!(
@@ -297,14 +300,14 @@ mod tests {
             "weights must be neurons x fan_in_input_shape"
         );
 
-        let mut w = CPUTensor::init(Fill {
+        let mut w = Tensor::init(Fill {
             shape: vec![neurons, fan_in],
             with: 0.0,
         })
         .unwrap();
         w.data.to_mut().clone_from_slice(weights);
 
-        let mut b = CPUTensor::init(Fill {
+        let mut b = Tensor::init(Fill {
             shape: vec![neurons],
             with: 0.0,
         })
@@ -317,6 +320,7 @@ mod tests {
             activation,
             neurons,
             fan_in: fan_in,
+            batch_idx: input_shape.len()
         }
     }
 
@@ -324,22 +328,23 @@ mod tests {
         input_shape: Vec<usize>,
         neurons: usize,
         activation: Activation,
-    ) -> FeedForward<CPUTensor<'static>> {
+    ) -> FeedForward<'static> {
         let fan_in = cpu2::length_of(&input_shape);
         FeedForward {
-            weights: CPUTensor::init(Fill {
+            weights: Tensor::init(Fill {
                 shape: vec![neurons, fan_in],
                 with: 0.0,
             })
             .unwrap(),
-            biases: CPUTensor::init(Fill {
+            biases: Tensor::init(Fill {
                 shape: vec![neurons],
                 with: 0.0,
             })
             .unwrap(),
             activation,
             neurons,
-            fan_in: fan_in
+            fan_in: fan_in,
+            batch_idx: input_shape.len()
         }
     }
 
@@ -407,7 +412,7 @@ mod tests {
 
         let lr = 0.1;
         let activations_out = ff.forward(input.cloned_view());
-        let input_grad = ff.backward(lr, input, activations_out, grad);
+        let input_grad = ff.backward(lr, &input, &activations_out, grad);
 
         assert_eq!(input_grad.shape, vec![3, 1]);
         let expected_input_grad = vec![0.0, -0.6, 0.3];
@@ -429,7 +434,7 @@ mod tests {
 
         let lr = 0.1;
         let activations_out = ff.forward(input.cloned_view());
-        let input_grad = ff.backward(lr, input, activations_out, grad);
+        let input_grad = ff.backward(lr, &input, &activations_out, grad);
 
         assert_eq!(input_grad.shape, vec![2, 1]);
         let expected_weights = vec![0.95, 1.9, -1.0, 1.0];
@@ -446,7 +451,7 @@ mod tests {
         let batch = 64;
         let mut ff = ff_with_params(&[1.0, 2.0, 0.5, 1.5], &[0.1, -0.2], vec![2], activation);
 
-        let mut input = CPUTensor::init(Fill {
+        let mut input = Tensor::init(Fill {
             shape: vec![2, batch],
             with: 0.0,
         })
@@ -459,7 +464,7 @@ mod tests {
             }
         }
 
-        let mut grad = CPUTensor::init(Fill {
+        let mut grad = Tensor::init(Fill {
             shape: vec![2, batch],
             with: 0.0,
         })
@@ -474,7 +479,7 @@ mod tests {
 
         let lr = 0.01;
         let activations_out = ff.forward(input.cloned_view());
-        let a_grad = ff.backward(lr, input, activations_out, grad);
+        let a_grad = ff.backward(lr, &input, &activations_out, grad);
 
         assert_eq!(a_grad.shape, vec![2, batch]);
         let expected_weights = vec![0.808, 1.616, 0.948, 2.396];
@@ -519,7 +524,7 @@ mod tests {
             b[1] = -0.5;
         }
 
-        let mut input = CPUTensor::init(Fill {
+        let mut input = Tensor::init(Fill {
             shape: vec![features, batch],
             with: 0.0,
         })
@@ -576,7 +581,7 @@ mod tests {
         }
 
         // Input: feature 0 is 1.0, feature 511 is 2.0 for every batch.
-        let mut input = CPUTensor::init(Fill {
+        let mut input = Tensor::init(Fill {
             shape: vec![features, batch],
             with: 0.0,
         })
@@ -590,7 +595,7 @@ mod tests {
         }
 
         // Gradients: neuron 0 -> +1.0, neuron 1 -> -1.0, last neuron -> +0.5 for every batch.
-        let mut grad = CPUTensor::init(Fill {
+        let mut grad = Tensor::init(Fill {
             shape: vec![neurons, batch],
             with: 0.0,
         })
@@ -606,7 +611,7 @@ mod tests {
 
         let lr = 0.1;
         let activations_out = ff.forward(input.cloned_view());
-        let a_grad = ff.backward(lr, input, activations_out, grad);
+        let a_grad = ff.backward(lr, &input, &activations_out, grad);
 
         // Input gradient: only neurons with positive pre-activation (0 and last) contribute.
         assert_eq!(a_grad.shape, vec![features, batch]);
@@ -671,7 +676,7 @@ mod tests {
         let biases: Vec<f64> = (0..neurons).map(|n| n as f64 * 0.05).collect();
         let ff = ff_with_params(&weights, &biases, vec![features], activation);
 
-        let mut input = CPUTensor::init(Fill {
+        let mut input = Tensor::init(Fill {
             shape: vec![features, batch],
             with: 0.0,
         })
@@ -714,7 +719,7 @@ mod tests {
         let biases: Vec<f64> = (0..neurons).map(|n| 0.1 + n as f64 * 0.02).collect();
         let mut ff = ff_with_params(&weights, &biases, vec![features], activation);
 
-        let mut input = CPUTensor::init(Fill {
+        let mut input = Tensor::init(Fill {
             shape: vec![features, batch],
             with: 0.0,
         })
@@ -727,7 +732,7 @@ mod tests {
                 }
             }
         }
-        let mut grad = CPUTensor::init(Fill {
+        let mut grad = Tensor::init(Fill {
             shape: vec![neurons, batch],
             with: 0.0,
         })
@@ -745,7 +750,7 @@ mod tests {
         let input_data = input.data.clone().into_owned();
         let grad_data = grad.data.clone().into_owned();
         let activations_out = ff.forward(input.cloned_view());
-        let input_grad = ff.backward(lr, input, activations_out, grad);
+        let input_grad = ff.backward(lr, &input, &activations_out, grad);
 
         assert_eq!(input_grad.shape, vec![features, batch]);
 
@@ -913,7 +918,7 @@ mod tests {
         let biases = vec![0.0; neurons];
         let ff = ff_with_params(&weights, &biases, vec![features], activation);
 
-        let mut input = CPUTensor::init(Fill {
+        let mut input = Tensor::init(Fill {
             shape: vec![features, batch],
             with: 0.0,
         })
@@ -960,7 +965,7 @@ mod tests {
 
         let lr = 0.1;
         let activations_out = ff.forward(input.cloned_view());
-        let input_grad = ff.backward(lr, input, activations_out, grad);
+        let input_grad = ff.backward(lr, &input, &activations_out, grad);
 
         assert_eq!(input_grad.shape, vec![2, 1]);
         // With zero gradients, weights and biases should remain unchanged
@@ -982,7 +987,7 @@ mod tests {
 
         let lr = 0.1;
         let activations_out = ff.forward(input.cloned_view());
-        let input_grad = ff.backward(lr, input, activations_out, grad);
+        let input_grad = ff.backward(lr, &input, &activations_out, grad);
 
         assert_eq!(input_grad.shape, vec![2, 1]);
         // With zero input, weights should remain unchanged (gradient * input = gradient * 0 = 0)
@@ -1028,7 +1033,7 @@ mod tests {
         let input_data = input.data.clone().into_owned();
         let grad_data = grad.data.clone().into_owned();
         let activations_out = ff.forward(input.cloned_view());
-        let input_grad = ff.backward(lr, input, activations_out, grad);
+        let input_grad = ff.backward(lr, &input, &activations_out, grad);
 
         assert_eq!(input_grad.shape, vec![features, batch]);
         // With all positive pre-activations, ReLU derivative = 1, so grad passes through unchanged
@@ -1075,7 +1080,7 @@ mod tests {
 
         let lr = 0.1;
         let activations_out = ff.forward(input.cloned_view());
-        let input_grad = ff.backward(lr, input, activations_out, grad);
+        let input_grad = ff.backward(lr, &input, &activations_out, grad);
 
         assert_eq!(input_grad.shape, vec![1, 1]);
         // input_grad = W^T * grad = 2.0 * 0.5 = 1.0
@@ -1102,7 +1107,7 @@ mod tests {
         let biases = vec![1.0, 1.0];
         let mut ff = ff_with_params(&weights, &biases, vec![features], activation);
 
-        let mut input = CPUTensor::init(Fill {
+        let mut input = Tensor::init(Fill {
             shape: vec![features, batch],
             with: 0.0,
         })
@@ -1115,7 +1120,7 @@ mod tests {
             }
         }
 
-        let mut grad = CPUTensor::init(Fill {
+        let mut grad = Tensor::init(Fill {
             shape: vec![neurons, batch],
             with: 0.0,
         })
@@ -1131,7 +1136,7 @@ mod tests {
         let input_data = input.data.clone().into_owned();
         let grad_data = grad.data.clone().into_owned();
         let activations_out = ff.forward(input.cloned_view());
-        let input_grad = ff.backward(lr, input, activations_out, grad);
+        let input_grad = ff.backward(lr, &input, &activations_out, grad);
 
         // Output shape should match input shape
         assert_eq!(input_grad.shape, vec![features, batch]);
@@ -1205,7 +1210,7 @@ mod tests {
 
         let lr = 0.1;
         let activations_out = ff.forward(input.cloned_view());
-        let input_grad = ff.backward(lr, input, activations_out, grad);
+        let input_grad = ff.backward(lr, &input, &activations_out, grad);
 
         assert_eq!(input_grad.shape, vec![2, 1]);
         // Neuron 0 has negative pre-activation, so its gradient is gated to 0
