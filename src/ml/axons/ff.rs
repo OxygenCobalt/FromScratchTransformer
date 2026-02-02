@@ -9,6 +9,10 @@ use rayon::{iter::{IndexedParallelIterator, ParallelIterator}, slice::ParallelSl
 
 const LANES: usize = 8; // number of SIMD lanes
 const FORWARD_MIN_FLOPS_PER_CORE: usize = 512_000 / 24; // measured on bench suite. adjusted to apply to any core count
+// Backward pass thresholds derived from benching/benchmarks.csv (multithread vs initial).
+// Backward total crossover ~1.18e7 FLOPs; split across two passes ~= 5.9e6 FLOPs.
+const BACKWARD_PASS1_MIN_FLOPS_PER_CORE: usize = 6_000_000 / 24;
+const BACKWARD_PASS2_MIN_FLOPS_PER_CORE: usize = 6_000_000 / 24;
 
 pub struct FeedForward<'a> {
     weights: Tensor<'a>,
@@ -130,10 +134,12 @@ impl <'a> FeedForward<'a> {
         // backwards activations
         grad = self.activation.backward_all(&a_out, grad);
 
-       let batch = *a_in.shape.get(self.batch_idx).unwrap_or(&1);
+        let batch = *a_in.shape.get(self.batch_idx).unwrap_or(&1);
         let a_in_flat = a_in
             .reshape(&[self.fan_in, batch])
             .unwrap();
+        let parallelism = rayon::current_num_threads();
+        let flops_per_core = (self.neurons * self.fan_in * batch) / parallelism;
 
         // pass 1: activations backwards (W^T dot grad) [fan_in, neurons] x [neurons, batch] -> [fan_in, batch]
         let mut a_grad = a_in_flat.cloned_view().materialize();
@@ -142,11 +148,9 @@ impl <'a> FeedForward<'a> {
         let grad_t = grad.transpose(&[1, 0]).unwrap().materialize();
         let out_data: &mut [f64] = a_grad.data.to_mut().as_mut_slice();
 
-
-        let parallelism = rayon::current_num_threads();
-        let fan_in_per_chunk = self.fan_in / parallelism;
-        if fan_in_per_chunk > 0 {
-            let grain =  fan_in_per_chunk * batch;
+        if flops_per_core >= BACKWARD_PASS1_MIN_FLOPS_PER_CORE {
+            let fan_in_per_chunk = (self.fan_in as f64 / parallelism as f64).ceil() as usize;
+            let grain = fan_in_per_chunk * batch;
             out_data.par_chunks_mut(grain).enumerate().for_each(|(i, out)| {
                 let fan_in_count = out.len() / batch;
                 let start_fan_in = i * fan_in_per_chunk;
@@ -163,8 +167,8 @@ impl <'a> FeedForward<'a> {
             .materialize();
         let out_data = self.weights.data.to_mut().as_mut_slice();
         let bias_data = self.biases.data.to_mut().as_mut_slice();
-        let neurons_per_chunk = self.neurons / parallelism;
-        if neurons_per_chunk > 0 {
+        if flops_per_core >= BACKWARD_PASS2_MIN_FLOPS_PER_CORE {
+            let neurons_per_chunk = (self.neurons as f64 / parallelism as f64).ceil() as usize;
             let neuron_grain = neurons_per_chunk * self.fan_in;
             let bias_grain = neurons_per_chunk;
             out_data.par_chunks_mut(neuron_grain).zip(bias_data.par_chunks_mut(bias_grain)).enumerate().for_each(|(i, (out, bias))| {
