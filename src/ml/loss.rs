@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use crate::{
     dataset::{Example, Test},
     ml::nn::{NeuralNetwork, Reporting},
-    tensor::Tensor,
+    tensor::cpu2::Tensor,
 };
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -16,7 +16,7 @@ pub enum Loss {
 }
 
 impl Loss {
-    pub fn loss<T: Tensor>(&self, batch_activations: &T, output: &T) -> T {
+    pub fn loss(&self, batch_activations: &Tensor, output: &Tensor) -> Tensor {
         match self {
             Loss::MSE => batch_activations.sub(output).unwrap().pow(2).sum(),
             Loss::LogLikelihood => batch_activations.at_argmax(&output).unwrap().ln().neg(),

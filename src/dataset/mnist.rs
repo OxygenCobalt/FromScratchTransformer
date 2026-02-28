@@ -11,7 +11,7 @@ use parquet::arrow::arrow_reader::ArrowReaderBuilder;
 
 use crate::{
     dataset::{Example, Test, TestSet, Train, TrainSet},
-    tensor::{cpu2, Tensor},
+    tensor::cpu2::{Tensor, Vector},
 };
 
 pub struct Mnist(pub PathBuf);
@@ -92,22 +92,23 @@ pub struct MnistDigit {
     label: i64,
 }
 
-impl<T: Tensor> Example<T> for MnistDigit {
-    fn input(&self) -> T {
-        T::vector(
+impl Example<Tensor> for MnistDigit {
+    fn input(&self) -> Tensor {
+        Tensor::init(Vector(
             self.pixels
                 .iter()
                 .map(|&b| b as f64 / 255.0)
                 .collect::<Vec<f64>>(),
-        )
+        ))
         .unwrap()
-        .reshape(&[self.width as usize, self.height as usize])
+        .r(&[self.width as usize, self.height as usize])
         .unwrap()
+        .materialize()
     }
 
-    fn output(&self) -> T {
+    fn output(&self) -> Tensor {
         let mut output = vec![0.0; 10];
         output[self.label as usize] = 1.0;
-        T::vector(output).unwrap()
+        Tensor::init(Vector(output)).unwrap()
     }
 }

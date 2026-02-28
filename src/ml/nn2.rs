@@ -32,7 +32,7 @@ impl NeuralNetwork {
     pub fn train<'t>(
         setup: &impl Setup,
         reporting: &impl Reporting,
-        train: &Train<impl Example<crate::tensor::cpu::CPUTensor>>,
+        train: &Train<impl Example<Tensor>>,
         hyperparams: &Hyperparams,
         loss: Loss,
     ) -> io::Result<Self> {
@@ -75,8 +75,8 @@ impl NeuralNetwork {
                     output: vec![],
                 };
                 for example in batch {
-                    concat_example.input.push(example.input().to_cpu2());
-                    concat_example.output.push(example.output().to_cpu2());
+                    concat_example.input.push(example.input());
+                    concat_example.output.push(example.output());
                 }
                 let example = EagerExample {
                     input: Tensor::init(Tt(concat_example.input)).unwrap(),

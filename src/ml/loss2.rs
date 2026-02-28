@@ -97,13 +97,13 @@ pub struct LossesOn<'a, E> {
     losses: &'a [Loss],
 }
 
-impl<'a, E: Example<crate::tensor::cpu::CPUTensor>> LossesOn<'a, E> {
+impl<'a, E: Example<Tensor>> LossesOn<'a, E> {
     pub fn new(test: &'a Test<E>, losses: &'a [Loss]) -> Self {
         Self { test, losses }
     }
 }
 
-impl<'a, E: Example<crate::tensor::cpu::CPUTensor>> Reporting for LossesOn<'a, E> {
+impl<'a, E: Example<Tensor>> Reporting for LossesOn<'a, E> {
     fn report(&self, nn: &NeuralNetwork, epoch: Option<u64>) -> std::io::Result<()> {
         let eval_bar = ProgressBar::new(self.test.len() as u64)
             .with_style(
@@ -123,9 +123,9 @@ impl<'a, E: Example<crate::tensor::cpu::CPUTensor>> Reporting for LossesOn<'a, E
             );
         let mut avg_losses = vec![0.0; self.losses.len()];
         for example in self.test.iter() {
-            let activations = nn.test(&example.input().to_cpu2());
+            let activations = nn.test(&example.input());
             for (i, loss) in self.losses.iter().enumerate() {
-                let loss_value = loss.run(&activations, &example.output().to_cpu2()).loss;
+                let loss_value = loss.run(&activations, &example.output()).loss;
                 avg_losses[i] += loss_value.data[0];
             }
             eval_bar.inc(1);

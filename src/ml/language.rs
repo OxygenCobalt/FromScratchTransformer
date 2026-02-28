@@ -5,7 +5,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::{
     dataset::{Example, Test, Train, Validation},
-    tensor::Tensor,
+    tensor::cpu2::{Tensor, Vector},
 };
 
 pub trait Tokenizer {
@@ -107,15 +107,18 @@ impl TokenizedExample {
     }
 }
 
-impl<T: Tensor> Example<T> for TokenizedExample {
-    fn input(&self) -> T {
-        T::vector(self.input.iter().map(|i| *i as f64).collect::<Vec<f64>>()).unwrap()
+impl Example<Tensor> for TokenizedExample {
+    fn input(&self) -> Tensor {
+        Tensor::init(Vector(
+            self.input.iter().map(|i| *i as f64).collect::<Vec<f64>>(),
+        ))
+        .unwrap()
     }
 
-    fn output(&self) -> T {
+    fn output(&self) -> Tensor {
         let mut output = vec![0.0; self.vocab];
         output[self.output] = 1.0;
-        T::vector(output).unwrap()
+        Tensor::init(Vector(output)).unwrap()
     }
 }
 

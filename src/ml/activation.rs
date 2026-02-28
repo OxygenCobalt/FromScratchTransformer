@@ -1,4 +1,4 @@
-use crate::tensor::Tensor;
+use crate::tensor::cpu2::Tensor;
 
 #[derive(Clone, Copy)]
 pub enum Activation {

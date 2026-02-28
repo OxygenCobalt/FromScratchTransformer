@@ -4,15 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use arrow::array::{Array, BinaryArray, Int64Array, StructArray};
-use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
-use parquet::arrow::arrow_reader::ArrowReaderBuilder;
-
-use crate::{
-    dataset::{Example, Test, TestSet, Train, TrainSet, Validation, ValidationSet},
-    tensor::Tensor,
-};
+use crate::dataset::{Test, TestSet, Train, TrainSet, Validation, ValidationSet};
 
 pub struct Shakespeare(pub PathBuf);
 
