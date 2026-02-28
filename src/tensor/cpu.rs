@@ -167,12 +167,28 @@ macro_rules! impl_arithmetic {
 }
 
 impl CPUTensor {
-    pub fn to_cpu2<'o>(self) -> cpu2::Tensor<'o> {
-        cpu2::Tensor {
-            stride: self.stride,
-            shape: self.shape,
-            data: Cow::Owned(self.data)
+    pub fn to_cpu2(self) -> cpu2::Tensor {
+        let CPUTensor {
+            shape,
+            stride,
+            data,
+        } = self;
+        let expected_stride = cpu2::stride_of(&shape);
+        if stride == expected_stride {
+            return cpu2::Tensor {
+                stride,
+                shape,
+                data,
+            };
         }
+        // `cpu` tensors may be contiguous in a different stride convention.
+        // Materialize to guarantee a row-major contiguous `cpu2` tensor.
+        cpu2::Tensor {
+            stride,
+            shape,
+            data,
+        }
+        .materialize()
     }
 
     pub fn len(shape: &[usize]) -> usize {
@@ -2240,6 +2256,34 @@ mod tests {
             indices_for_grad.into_grad().is_none(),
             "indices tensor should not accumulate gradient"
         );
+    }
+
+    #[test]
+    fn to_cpu2_materializes_as_row_major_contiguous() {
+        let tensor = CPUTensor::vector(vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+            .unwrap()
+            .reshape(&[2, 3])
+            .unwrap();
+        let converted = tensor.clone().to_cpu2();
+
+        assert_eq!(converted.shape, vec![2, 3]);
+        assert_eq!(converted.stride, cpu2::stride_of(&[2, 3]));
+
+        for i in 0..2 {
+            for j in 0..3 {
+                let idx = i * converted.stride[0] + j * converted.stride[1];
+                assert_eq!(
+                    converted.data[idx],
+                    *tensor.get(&[i, j]).unwrap(),
+                    "mismatch at [{}, {}]",
+                    i,
+                    j
+                );
+            }
+        }
+
+        let mut reshaped = converted.clone();
+        assert!(reshaped.r(&[6, 1]).is_ok());
     }
 
     #[test]

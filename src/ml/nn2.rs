@@ -5,16 +5,18 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::dataset::{EagerExample, Example, Train};
+use crate::ml::axons::act;
+pub use crate::ml::axons::act::ActivationFn;
 use crate::tensor::cpu2::{Tensor, Tt};
 
-use super::{activation::Activation, loss2::Loss, axons::{Axon, ff::FeedForward}};
+use super::{loss2::Loss, axons::{Axon, ff::FeedForward}};
 
-pub struct NeuralNetwork<'a> {
-    axons: Vec<Axon<'a>>
+pub struct NeuralNetwork {
+    axons: Vec<Axon>
 }
 
-impl <'a> NeuralNetwork<'a> {
-    pub fn test<'i>(&self, input: &Tensor<'i>) -> Tensor<'i> {
+impl NeuralNetwork {
+    pub fn test(&self, input: &Tensor) -> Tensor {
         let mut current = input.clone();
         for axon in &self.axons {
             current = axon.forward(current)
@@ -23,7 +25,7 @@ impl <'a> NeuralNetwork<'a> {
     }
 }
 
-impl <'a> NeuralNetwork<'a> {
+impl NeuralNetwork {
     pub fn train<'t>(
         setup: &impl Setup,
         reporting: &impl Reporting,
@@ -79,8 +81,9 @@ impl <'a> NeuralNetwork<'a> {
                 };
                 let mut current = example.input;
                 let mut activations = vec![];
-                for axon in &init.nn.axons {
+                for axon in &mut init.nn.axons {
                     activations.push(current.clone());
+                    axon.prepare(true, current.shape.as_slice().last().copied().unwrap_or(1));
                     current = axon.forward(current);
                 }
                 activations.push(current.clone());
@@ -89,16 +92,23 @@ impl <'a> NeuralNetwork<'a> {
                 total_loss += losses.loss.data.iter().sum::<f64>() / *losses.loss.shape.first().unwrap_or(&1) as f64;
                 let c = hyperparams.learning_rate / hyperparams.batch_size as f64;
                 let mut grad = losses.prime;
-                for (i, axon) in init.nn.axons.iter_mut().enumerate().rev() {
-                    let a_in = &activations[i];
-                    let a_out = &activations[i + 1];
-                    grad = axon.backward(c, &a_in, &a_out, grad);
+                for (axon, a_in) in init
+                    .nn
+                    .axons
+                    .iter_mut()
+                    .rev()
+                    .zip(activations.into_iter().rev().skip(1))
+                {
+                    grad = axon.backward(c, a_in, grad);
                 }
                 sgd_bar.inc(1);
                 sgd_bar.set_message(format!["{:.3}", total_loss / (i + 1) as f64]);
             }
             sgd_bar.finish();
             reporting.report(&init.nn, Some(epoch))?;
+        }
+        for axon in &mut init.nn.axons {
+            axon.prepare(false, 0);
         }
         Ok(init.nn)
     }
@@ -133,15 +143,15 @@ impl <'a> NeuralNetwork<'a> {
 }
 
 pub trait Setup {
-    fn setup<'a>(&self) -> io::Result<Init<'a>>;
+    fn setup(&self) -> io::Result<Init>;
 }
 
 pub trait Reporting {
     fn report(&self, nn: &NeuralNetwork, epoch: Option<u64>) -> io::Result<()>;
 }
 
-pub struct Init<'a> {
-    nn: NeuralNetwork<'a>,
+pub struct Init {
+    nn: NeuralNetwork,
     at_epoch: Option<u64>,
 }
 
@@ -157,10 +167,13 @@ impl Layers {
 }
 
 impl Setup for Layers {
-    fn setup<'a>(&self) -> io::Result<Init<'a>> {
+    fn setup(&self) -> io::Result<Init> {
         let mut axons = vec![];
+        let mut a_out_shape = None;
         for i in 0..self.0.len() {
-            axons.push(self.0[i].axon(if i > 0 { Some(&self.0[i - 1]) } else { None }));
+            let (axon, new_a_out_shape) = self.0[i].axon(a_out_shape.as_deref());
+            a_out_shape = Some(new_a_out_shape);
+            axons.push(axon);
         }
         Ok(Init {
             nn: NeuralNetwork { axons },
@@ -178,31 +191,34 @@ pub struct Hyperparams {
 pub enum Layer {
     Dense {
         input_shape: Option<Vec<usize>>,
-        neurons: usize,
-        activation: Activation,
+        neurons: usize
+    },
+    Activation {
+        function: ActivationFn,
+        dropout: f64
     }
 }
 
 impl Layer {
-    fn axon<'a>(&self, last: Option<&Layer>) -> Axon<'a> {
+    fn axon(&self, a_out_shape: Option<&[usize]>) -> (Axon, Vec<usize>) {
         match self {
             Self::Dense {
                 input_shape,
                 neurons,
-                activation,
-            } => Axon::Dense(FeedForward::new(
-                    last.map(|l| l.activation_shape())
+            } => (Axon::Dense(FeedForward::new(
+                    a_out_shape.map(|s| s.to_vec())
                         .or(input_shape.clone())
                         .unwrap(),
                     *neurons,
-                    *activation,
-                ))
-        }
-    }
-
-    fn activation_shape(&self) -> Vec<usize> {
-        match self {
-            Self::Dense { neurons, .. } => vec![*neurons]
+                )),
+                vec![*neurons]),
+            Self::Activation {
+                function,
+                dropout
+            } => {
+                let shape = a_out_shape.expect("invalid layer configuration: activation layer cannot be first");
+                (Axon::Activation(act::Activation::new(shape.to_vec(), *function, *dropout)), shape.to_vec())
+            }
         }
     }
 }
@@ -234,10 +250,10 @@ impl<'a, S: Setup, R: Reporting> Checkpoint<'a, S, R> {
 }
 
 impl<'a, S: Setup, R: Reporting> Setup for Checkpoint<'a, S, R> {
-    fn setup<'b>(&self) -> io::Result<Init<'b>> {
-        fn open<'c>(path: &Path) -> io::Result<NeuralNetwork<'c>> {
+    fn setup(&self) -> io::Result<Init> {
+        fn open(path: &Path) -> io::Result<NeuralNetwork> {
             let mut file = File::open(path)?;
-            let nn = NeuralNetwork::<'c>::read(&mut file)?;
+            let nn = NeuralNetwork::read(&mut file)?;
             Ok(nn)
         }
         let amount = self.path.read_dir()?.count();

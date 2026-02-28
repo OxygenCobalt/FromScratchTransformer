@@ -1,9 +1,7 @@
-use std::borrow::Cow;
-
 use crate::{
     dataset::{Example, Test},
     ml::nn2::{NeuralNetwork, Reporting},
-    tensor::cpu2::{Tensor, Scalar},
+    tensor::cpu2::{Scalar, Tensor},
 };
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -14,34 +12,51 @@ pub enum Loss {
     Accuracy(AccuracyOf),
 }
 
-pub struct Losses<'a> {
-    pub loss: Tensor<'a>,
-    pub prime: Tensor<'a>
+pub struct Losses {
+    pub loss: Tensor,
+    pub prime: Tensor,
 }
 
 impl Loss {
-    pub fn run<'o>(&self, batch_activations: &Tensor, output: &Tensor) -> Losses<'o> {
+    pub fn run(&self, batch_activations: &Tensor, output: &Tensor) -> Losses {
         match self {
             Loss::MSE => {
-                let loss_data: Vec<f64> = batch_activations.data.iter().zip(output.data.iter()).map(|(a, o)| (a - o).powi(2)).collect();
-                let prime_data: Vec<f64> = batch_activations.data.iter().zip(output.data.iter()).zip(&loss_data).map(|((a, o), l)| 2.0 * (a - o)).collect();
-                let loss = Tensor { shape: batch_activations.shape.clone(), stride: batch_activations.stride.clone(), data: Cow::Owned(loss_data) };
-                let prime: Tensor<'_> = Tensor { shape: batch_activations.shape.clone(), stride: batch_activations.stride.clone(), data: Cow::Owned(prime_data) };
-                Losses {
-                    loss,
-                    prime
-                }
-            },
+                let loss_data: Vec<f64> = batch_activations
+                    .data
+                    .iter()
+                    .zip(output.data.iter())
+                    .map(|(a, o)| (a - o).powi(2))
+                    .collect();
+                let prime_data: Vec<f64> = batch_activations
+                    .data
+                    .iter()
+                    .zip(output.data.iter())
+                    .zip(&loss_data)
+                    .map(|((a, o), l)| 2.0 * (a - o))
+                    .collect();
+                let loss = Tensor {
+                    shape: batch_activations.shape.clone(),
+                    stride: batch_activations.stride.clone(),
+                    data: loss_data,
+                };
+                let prime: Tensor = Tensor {
+                    shape: batch_activations.shape.clone(),
+                    stride: batch_activations.stride.clone(),
+                    data: prime_data,
+                };
+                Losses { loss, prime }
+            }
             Loss::Accuracy(of) => {
                 let loss = if of.accurate(batch_activations, output) {
                     Tensor::init(Scalar(1.0))
                 } else {
                     Tensor::init(Scalar(0.0))
-                }.unwrap();
+                }
+                .unwrap();
                 Losses {
                     loss,
                     // todo: hacky workaround fixfixfix
-                    prime: Tensor::init(Scalar(0.0)).unwrap()
+                    prime: Tensor::init(Scalar(0.0)).unwrap(),
                 }
             }
         }
@@ -59,7 +74,8 @@ impl AccuracyOf {
             AccuracyOf::Argmax => {
                 // todo: remove this bad argmax impl if you want to use this as an actual loss fn
                 fn flat_argmax(tensor: &Tensor) -> usize {
-                    tensor.data
+                    tensor
+                        .data
                         .iter()
                         .enumerate()
                         .max_by(|(_, x), (_, y)| {
@@ -83,10 +99,7 @@ pub struct LossesOn<'a, E> {
 
 impl<'a, E: Example<crate::tensor::cpu::CPUTensor>> LossesOn<'a, E> {
     pub fn new(test: &'a Test<E>, losses: &'a [Loss]) -> Self {
-        Self {
-            test,
-            losses,
-        }
+        Self { test, losses }
     }
 }
 

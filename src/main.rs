@@ -69,13 +69,19 @@ fn shallow_mnist() {
     let layers = nn2::Layers::new(vec![
         nn2::Layer::Dense {
             input_shape: Some(vec![28, 28]),
-            neurons: 100,
-            activation: Activation::Sigmoid,
+            neurons: 100
+        },
+        nn2::Layer::Activation {
+            function: nn2::ActivationFn::Sigmoid,
+            dropout: 0.01,
         },
         nn2::Layer::Dense {
             input_shape: None,
             neurons: 10,
-            activation: Activation::Sigmoid,
+        },
+        nn2::Layer::Activation {
+            function: nn2::ActivationFn::Sigmoid,
+            dropout: 0.0,
         },
     ])
     .unwrap();
