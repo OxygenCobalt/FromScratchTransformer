@@ -5,14 +5,17 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::dataset::{EagerExample, Example, Train};
-use crate::ml::axons::act;
 pub use crate::ml::axons::act::ActivationFn;
+use crate::ml::axons::{act, emb};
 use crate::tensor::cpu2::{Tensor, Tt};
 
-use super::{loss2::Loss, axons::{Axon, ff::FeedForward}};
+use super::{
+    axons::{Axon, ff::FeedForward},
+    loss2::Loss,
+};
 
 pub struct NeuralNetwork {
-    axons: Vec<Axon>
+    axons: Vec<Axon>,
 }
 
 impl NeuralNetwork {
@@ -89,7 +92,8 @@ impl NeuralNetwork {
                 activations.push(current.clone());
                 let losses = loss.run(&current, &example.output);
                 std::mem::drop(current);
-                total_loss += losses.loss.data.iter().sum::<f64>() / *losses.loss.shape.first().unwrap_or(&1) as f64;
+                total_loss += losses.loss.data.iter().sum::<f64>()
+                    / *losses.loss.shape.first().unwrap_or(&1) as f64;
                 let c = hyperparams.learning_rate / hyperparams.batch_size as f64;
                 let mut grad = losses.prime;
                 for (axon, a_in) in init
@@ -112,7 +116,7 @@ impl NeuralNetwork {
         }
         Ok(init.nn)
     }
-    
+
     pub fn read(read: &mut impl Read) -> io::Result<Self> {
         let mut signature = [0u8; 8];
         read.read_exact(&mut signature)?;
@@ -191,12 +195,17 @@ pub struct Hyperparams {
 pub enum Layer {
     Dense {
         input_shape: Option<Vec<usize>>,
-        neurons: usize
+        neurons: usize,
     },
     Activation {
         function: ActivationFn,
-        dropout: f64
-    }
+        dropout: f64,
+    },
+    Embeddings {
+        size: usize,
+        vocab: usize,
+        context: usize,
+    },
 }
 
 impl Layer {
@@ -205,29 +214,40 @@ impl Layer {
             Self::Dense {
                 input_shape,
                 neurons,
-            } => (Axon::Dense(FeedForward::new(
-                    a_out_shape.map(|s| s.to_vec())
+            } => (
+                Axon::Dense(FeedForward::new(
+                    a_out_shape
+                        .map(|s| s.to_vec())
                         .or(input_shape.clone())
                         .unwrap(),
                     *neurons,
                 )),
-                vec![*neurons]),
-            Self::Activation {
-                function,
-                dropout
-            } => {
-                let shape = a_out_shape.expect("invalid layer configuration: activation layer cannot be first");
-                (Axon::Activation(act::Activation::new(shape.to_vec(), *function, *dropout)), shape.to_vec())
+                vec![*neurons],
+            ),
+            Self::Activation { function, dropout } => {
+                let shape = a_out_shape
+                    .expect("invalid layer configuration: activation layer cannot be first");
+                (
+                    Axon::Activation(act::Activation::new(shape.to_vec(), *function, *dropout)),
+                    shape.to_vec(),
+                )
             }
+            Self::Embeddings {
+                size,
+                vocab,
+                context,
+            } => (
+                Axon::Embeddings(emb::Embeddings::new(*size, *vocab)),
+                vec![*size, *context],
+            ),
         }
     }
 }
 
-
 pub struct Checkpoint<'a, S: Setup, R: Reporting> {
     setup: &'a S,
     reporting: &'a R,
-    path: &'a Path
+    path: &'a Path,
 }
 
 impl<'a, S: Setup, R: Reporting> Checkpoint<'a, S, R> {
@@ -235,7 +255,7 @@ impl<'a, S: Setup, R: Reporting> Checkpoint<'a, S, R> {
         Self {
             setup,
             reporting,
-            path
+            path,
         }
     }
 
