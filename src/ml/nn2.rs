@@ -20,7 +20,9 @@ pub struct NeuralNetwork {
 
 impl NeuralNetwork {
     pub fn test(&self, input: &Tensor) -> Tensor {
-        let mut current = input.clone();
+        let mut new_shape = input.shape.clone();
+        new_shape.push(1);
+        let mut current = input.r(&new_shape).unwrap().materialize();
         for axon in &self.axons {
             current = axon.forward(current)
         }
@@ -91,7 +93,6 @@ impl NeuralNetwork {
                 }
                 activations.push(current.clone());
                 let losses = loss.run(&current, &example.output);
-                std::mem::drop(current);
                 total_loss += losses.loss.data.iter().sum::<f64>()
                     / *losses.loss.shape.first().unwrap_or(&1) as f64;
                 let c = hyperparams.learning_rate / hyperparams.batch_size as f64;

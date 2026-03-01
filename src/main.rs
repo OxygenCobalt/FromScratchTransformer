@@ -233,7 +233,7 @@ fn shallow_shakespeare() {
     let reporting = loss2::LossesOn::new(
         &test,
         &[
-            loss2::Loss::MSE,
+            loss2::Loss::LogLikelihood,
             loss2::Loss::Accuracy(loss2::AccuracyOf::Argmax),
         ],
     );
@@ -243,13 +243,17 @@ fn shallow_shakespeare() {
             vocab: tokenizer.vocab(),
             context: 5,
         },
+        nn2::Layer::Dense {
+            input_shape: None,
+            neurons: 128,
+        },
         nn2::Layer::Activation {
             function: ActivationFn::Tanh,
             dropout: 0.00,
         },
         nn2::Layer::Dense {
             input_shape: None,
-            neurons: 128,
+            neurons: tokenizer.vocab(),
         },
         nn2::Layer::Activation {
             function: ActivationFn::Softmax,
@@ -263,5 +267,12 @@ fn shallow_shakespeare() {
         batch_size: 10,
         learning_rate: 0.01,
     };
-    nn2::NeuralNetwork::train(&layers, &reporting, &train, &hyperparams, loss2::Loss::MSE).unwrap();
+    nn2::NeuralNetwork::train(
+        &layers,
+        &reporting,
+        &train,
+        &hyperparams,
+        loss2::Loss::LogLikelihood,
+    )
+    .unwrap();
 }
