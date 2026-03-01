@@ -1,3 +1,5 @@
+use std::io;
+
 use rand_distr::{Distribution, Normal};
 
 use crate::tensor::cpu2::{Fill, Generate, Tensor};
@@ -76,6 +78,16 @@ impl Embeddings {
             new_idx += grad.stride[2];
         }
         a_in
+    }
+
+    pub fn read(read: &mut impl io::Read) -> io::Result<Self> {
+        let c = Tensor::read(read)?;
+        Ok(Self { c })
+    }
+
+    pub fn write(&self, write: &mut impl io::Write) -> io::Result<()> {
+        self.c.write(write)?;
+        Ok(())
     }
 }
 

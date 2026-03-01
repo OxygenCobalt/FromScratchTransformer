@@ -44,6 +44,7 @@ impl Axon {
         match &id {
             b"AxonDnse" => Ok(Self::Dense(FeedForward::read(read)?)),
             b"AxonActv" => Ok(Self::Activation(act::Activation::read(read)?)),
+            b"AxonEmbd" => Ok(Self::Embeddings(emb::Embeddings::read(read)?)),
             _ => Err(io::Error::new(
                 io::ErrorKind::Other,
                 "invalid axon signature",
@@ -61,7 +62,10 @@ impl Axon {
                 write.write_all(b"AxonActv")?;
                 act.write(write)
             }
-            Self::Embeddings(emb) => Ok(()),
+            Self::Embeddings(emb) => {
+                write.write_all(b"AxonEmbd")?;
+                emb.write(write)
+            }
         }
     }
 }

@@ -1,6 +1,6 @@
 use std::simd::{Simd, num::SimdFloat};
 
-use crate::tensor::cpu2::{self, Cast, Fill, FillUninit, Generate, Tensor};
+use crate::tensor::cpu2::{self, Fill, FillUninit, Generate, Tensor};
 use rand_distr::{Distribution, Normal};
 use rayon::{
     iter::{IndexedParallelIterator, ParallelIterator},
@@ -49,7 +49,7 @@ impl FeedForward {
 
     pub fn forward(&self, a_in: Tensor) -> Tensor {
         // forward pass: Wx + b -> [neurons, fan_in] x [fan_in, batch] -> [neurons, batch] + [neurons]
-        let batch = *a_in.shape.get(self.batch_idx).unwrap_or(&1);
+        let batch = a_in.shape[self.batch_idx];
         let a_in_flat_t = a_in
             .r(&[self.fan_in, batch])
             .unwrap()
@@ -132,12 +132,13 @@ impl FeedForward {
     }
 
     pub fn backward(&mut self, c: f64, a_in: Tensor, grad: Tensor) -> Tensor {
-        let batch = *a_in.shape.get(self.batch_idx).unwrap_or(&1);
+        let batch = a_in.shape[self.batch_idx];
         let parallelism = rayon::current_num_threads();
         let flops_per_core = (self.neurons * self.fan_in * batch) / parallelism;
 
         // pass 1: activations backwards (W^T dot grad) [fan_in, neurons] x [neurons, batch] -> [fan_in, batch]
-        let mut a_grad = a_in.r(&[self.fan_in, batch]).unwrap().materialize();
+        let mut a_grad =
+            Tensor::init(unsafe { FillUninit::new(vec![self.fan_in, batch]) }).unwrap();
         let weights_t = self.weights.t(&[1, 0]).unwrap().materialize();
         let grad_t = grad.t(&[1, 0]).unwrap().materialize();
         let out_data: &mut [f64] = a_grad.data.as_mut_slice();

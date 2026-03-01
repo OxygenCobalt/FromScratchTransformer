@@ -11,7 +11,7 @@ use crate::tensor::cpu2::{Tensor, Tt};
 
 use super::{
     axons::{Axon, ff::FeedForward},
-    loss2::Loss,
+    loss::Loss,
 };
 
 pub struct NeuralNetwork {

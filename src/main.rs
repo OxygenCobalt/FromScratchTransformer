@@ -10,7 +10,7 @@ use crate::{
     },
     ml::{
         language::{FixedSequencer, TokenizedExample, Tokenizer, WordTokenizer},
-        loss2,
+        loss,
         nn2::{self, ActivationFn},
     },
 };
@@ -83,11 +83,11 @@ fn shallow_mnist() {
     ])
     .unwrap();
     let test = mnist.test().unwrap();
-    let reporting = loss2::LossesOn::new(
+    let reporting = loss::LossesOn::new(
         &test,
         &[
-            loss2::Loss::MSE,
-            loss2::Loss::Accuracy(loss2::AccuracyOf::Argmax),
+            loss::Loss::MSE,
+            loss::Loss::Accuracy(loss::AccuracyOf::Argmax),
         ],
     );
     let checkpointing = nn2::Checkpoint::new(
@@ -105,7 +105,7 @@ fn shallow_mnist() {
         &checkpointing,
         &mnist.train().unwrap(),
         &hyperparams,
-        loss2::Loss::MSE,
+        loss::Loss::MSE,
     )
     .unwrap();
 }
@@ -230,11 +230,11 @@ fn shallow_shakespeare() {
             .collect::<Vec<TokenizedExample>>()
             .into_iter()
     });
-    let reporting = loss2::LossesOn::new(
+    let reporting = loss::LossesOn::new(
         &test,
         &[
-            loss2::Loss::LogLikelihood,
-            loss2::Loss::Accuracy(loss2::AccuracyOf::Argmax),
+            loss::Loss::LogLikelihood,
+            loss::Loss::Accuracy(loss::AccuracyOf::Argmax),
         ],
     );
     let layers = nn2::Layers::new(vec![
@@ -272,7 +272,7 @@ fn shallow_shakespeare() {
         &reporting,
         &train,
         &hyperparams,
-        loss2::Loss::LogLikelihood,
+        loss::Loss::LogLikelihood,
     )
     .unwrap();
 }

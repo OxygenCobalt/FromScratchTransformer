@@ -8,19 +8,6 @@ pub struct Tensor {
     pub data: Vec<f64>,
 }
 
-pub enum Cast {
-    ReshapeThenTranspose {
-        reshape: Vec<usize>,
-        transpose: Vec<usize>,
-    },
-    Reshape {
-        reshape: Vec<usize>,
-    },
-    Transpose {
-        transpose: Vec<usize>,
-    },
-}
-
 impl Tensor {
     pub fn init(init: impl TensorInit) -> Option<Self> {
         let (shape, data) = init.make()?;

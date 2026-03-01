@@ -162,13 +162,12 @@ impl Activation {
         grad
     }
 
-    pub fn softmax_backwards(&self, a_in: Tensor, grad: Tensor) -> Tensor {
-        let orig = a_in.shape.to_vec();
+    pub fn softmax_backwards(&self, a_in: Tensor, mut grad: Tensor) -> Tensor {
         let classes = a_in.shape[0];
         let cols = a_in.data.len() / classes;
         let softmax = self.forward(a_in);
-        let flat_softmax = softmax.r(&[classes, cols]).unwrap().materialize();
-        let mut flat_grad = grad.r(&[classes, cols]).unwrap().materialize();
+        let flat_softmax = softmax.r(&[classes, cols]).unwrap();
+        let flat_grad = grad.r_mut(&[classes, cols]).unwrap();
         // step 1: calculate sum(s * g) across cols
         let mut sum_s_dot_g =
             Tensor::init(unsafe { FillUninit::new(vec![classes, cols]) }).unwrap();
@@ -176,7 +175,7 @@ impl Activation {
         for _ in 0..cols {
             let mut sum = 0.0;
             for _ in 0..classes {
-                sum += flat_grad.data[flat_idx] * flat_softmax.data[flat_idx];
+                sum += flat_grad.tensor.data[flat_idx] * flat_softmax.tensor.data[flat_idx];
                 flat_idx += flat_grad.stride[0];
             }
             flat_idx -= flat_grad.stride[0] * classes;
@@ -189,10 +188,11 @@ impl Activation {
         }
         // calculate (g - sum(s * g)) * s
         let base = flat_grad
+            .tensor
             .data
             .iter_mut()
             .zip(sum_s_dot_g.data.iter())
-            .zip(flat_softmax.data.iter());
+            .zip(flat_softmax.tensor.data.iter());
         match self.mask {
             Some(ref mask) => {
                 base.zip(mask.data.iter())
@@ -202,7 +202,7 @@ impl Activation {
                 base.for_each(|((g, ssdg), s)| *g = *g * *s - *s * ssdg);
             }
         }
-        return flat_grad.r(&orig).unwrap().materialize();
+        grad
     }
 
     pub fn read(read: &mut impl io::Read) -> io::Result<Self> {
