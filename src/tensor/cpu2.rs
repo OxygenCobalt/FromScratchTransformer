@@ -101,42 +101,6 @@ impl Tensor {
         Err(ReshapeError::NotContiguous)
     }
 
-    pub fn materialize(&self) -> Tensor {
-        let mut new_data = Vec::with_capacity(length_of(&self.shape));
-        unsafe {
-            new_data.set_len(length_of(&self.shape));
-        }
-        let mut new = Tensor {
-            shape: self.shape.clone(),
-            stride: stride_of(&self.shape),
-            data: new_data,
-        };
-        let new_slice = new.data.as_mut_slice();
-        let mut point = vec![0; self.shape.len()];
-        let mut old_idx = 0;
-        let mut new_idx = 0;
-        'iterate: loop {
-            unsafe {
-                // todo: simd'd materialization
-                *new_slice.get_unchecked_mut(new_idx) = *self.data.get_unchecked(old_idx);
-            }
-            for i in 0..self.shape.len() {
-                if point[i] == self.shape[i] - 1 {
-                    new_idx -= new.stride[i] * point[i];
-                    old_idx -= self.stride[i] * point[i];
-                    point[i] = 0;
-                } else {
-                    new_idx += new.stride[i];
-                    old_idx += self.stride[i];
-                    point[i] += 1;
-                    continue 'iterate;
-                }
-            }
-            break;
-        }
-        new
-    }
-
     pub fn read(read: &mut impl Read) -> io::Result<Self> {
         let mut signature = [0u8; 8];
         read.read_exact(&mut signature)?;
@@ -291,9 +255,6 @@ pub fn length_of(shape: &[usize]) -> usize {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct NotView;
-
-#[derive(Clone, Copy, Debug)]
 pub enum ReshapeError {
     InvalidShape,
     NotContiguous,
@@ -326,13 +287,15 @@ impl TensorInit for Tt {
         if self.0.is_empty() {
             return None;
         }
-        let base_shape = self.0.first().unwrap().shape.to_vec();
+        let mut base_shape = self.0.first().unwrap().shape.to_vec();
         if self.0.iter().any(|t| t.shape != base_shape) {
             return None;
         }
+        let mut base_stride = self.0.first().unwrap().stride.to_vec();
         let batch = self.0.len();
-        let mut shape = base_shape.clone();
-        shape.push(batch);
+        let mut shape = vec![self.0.len()];
+        shape.extend_from_slice(&mut base_shape);
+        let mut stride = stride_of(&shape);
 
         if base_shape.is_empty() {
             let data = self
@@ -343,27 +306,33 @@ impl TensorInit for Tt {
             return Some((shape, data));
         }
 
-        let sample_len = length_of(&base_shape);
-        let mut data = Vec::with_capacity(sample_len * batch);
-        let mut idx = vec![0usize; base_shape.len()];
-        for step in 0..sample_len {
-            for t in &self.0 {
-                let mut lin = 0usize;
-                for (axis, stride) in t.stride.iter().enumerate() {
-                    lin += idx[axis] * stride;
+        let mut len = length_of(&shape);
+        let mut data: Vec<f64> = Vec::with_capacity(len);
+        unsafe {
+            data.set_len(len);
+        }
+        let mut point = vec![0; base_shape.len() + 1];
+        let mut idx = 0;
+        let mut local_idx = 0;
+        'iterate: loop {
+            data[idx] = self.0[point[0]].data[local_idx];
+            for i in 0..point.len() {
+                if point[i] == shape[i] - 1 {
+                    idx -= stride[i] * point[i];
+                    if i > 0 {
+                        local_idx -= base_stride[i - 1] * point[i];
+                    }
+                    point[i] = 0;
+                } else {
+                    point[i] += 1;
+                    idx += stride[i];
+                    if i > 0 {
+                        local_idx += base_stride[i - 1];
+                    }
+                    continue 'iterate;
                 }
-                data.push(*t.data.get(lin)?);
             }
-            if step + 1 == sample_len {
-                break;
-            }
-            for axis in (0..base_shape.len()).rev() {
-                idx[axis] += 1;
-                if idx[axis] < base_shape[axis] {
-                    break;
-                }
-                idx[axis] = 0;
-            }
+            break;
         }
         Some((shape, data))
     }
@@ -479,5 +448,111 @@ impl TensorInit for FillUninit {
             data.set_len(len);
         }
         Some((self.shape, data))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tensor_1d(data: &[f64]) -> Tensor {
+        Tensor::init(Vector(data.to_vec())).unwrap()
+    }
+
+    fn tensor_with(shape: Vec<usize>, data: &[f64]) -> Tensor {
+        let mut t = Tensor::init(Fill { shape, with: 0.0 }).unwrap();
+        t.data.as_mut_slice().clone_from_slice(data);
+        t
+    }
+
+    #[test]
+    fn tt_scalars() {
+        let a = Tensor::init(Scalar(1.0)).unwrap();
+        let b = Tensor::init(Scalar(2.0)).unwrap();
+        let stacked = Tensor::init(Tt(vec![a, b])).unwrap();
+        assert_eq!(stacked.shape, vec![2]);
+        assert_eq!(stacked.data, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn tt_two_vectors() {
+        let a = tensor_1d(&[1.0, 2.0, 3.0]);
+        let b = tensor_1d(&[4.0, 5.0, 6.0]);
+        let stacked = Tensor::init(Tt(vec![a, b])).unwrap();
+        // batch-first: shape [batch, features]
+        assert_eq!(stacked.shape, vec![2, 3]);
+        // row-major: batch 0 then batch 1 contiguous
+        assert_eq!(stacked.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn tt_three_vectors() {
+        let a = tensor_1d(&[1.0, 2.0]);
+        let b = tensor_1d(&[3.0, 4.0]);
+        let c = tensor_1d(&[5.0, 6.0]);
+        let stacked = Tensor::init(Tt(vec![a, b, c])).unwrap();
+        assert_eq!(stacked.shape, vec![3, 2]);
+        assert_eq!(stacked.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn tt_two_matrices() {
+        // Two 2x3 matrices stacked → [2, 2, 3]
+        let a = tensor_with(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let b = tensor_with(vec![2, 3], &[7.0, 8.0, 9.0, 10.0, 11.0, 12.0]);
+        let stacked = Tensor::init(Tt(vec![a, b])).unwrap();
+        assert_eq!(stacked.shape, vec![2, 2, 3]);
+        // row-major batch-first: a's data then b's data contiguously
+        assert_eq!(
+            stacked.data,
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0
+            ]
+        );
+    }
+
+    #[test]
+    fn tt_single_tensor() {
+        let a = tensor_1d(&[10.0, 20.0]);
+        let stacked = Tensor::init(Tt(vec![a])).unwrap();
+        assert_eq!(stacked.shape, vec![1, 2]);
+        assert_eq!(stacked.data, vec![10.0, 20.0]);
+    }
+
+    #[test]
+    fn tt_empty_returns_none() {
+        assert!(Tensor::init(Tt(vec![])).is_none());
+    }
+
+    #[test]
+    fn tt_mismatched_shapes_returns_none() {
+        let a = tensor_1d(&[1.0, 2.0]);
+        let b = tensor_1d(&[3.0, 4.0, 5.0]);
+        assert!(Tensor::init(Tt(vec![a, b])).is_none());
+    }
+
+    #[test]
+    fn tt_stride_is_row_major() {
+        let a = tensor_1d(&[1.0, 2.0, 3.0]);
+        let b = tensor_1d(&[4.0, 5.0, 6.0]);
+        let stacked = Tensor::init(Tt(vec![a, b])).unwrap();
+        // [2, 3] row-major → stride [3, 1]
+        assert_eq!(stacked.stride, vec![3, 1]);
+    }
+
+    #[test]
+    fn tt_indexing_matches_batch_first() {
+        // Verify element-by-element that [batch][feature] indexing works
+        let a = tensor_1d(&[10.0, 20.0, 30.0]);
+        let b = tensor_1d(&[40.0, 50.0, 60.0]);
+        let stacked = Tensor::init(Tt(vec![a, b])).unwrap();
+        // batch=0, feat=0
+        assert_eq!(stacked.data[0 * 3 + 0], 10.0);
+        // batch=0, feat=2
+        assert_eq!(stacked.data[0 * 3 + 2], 30.0);
+        // batch=1, feat=0
+        assert_eq!(stacked.data[1 * 3 + 0], 40.0);
+        // batch=1, feat=2
+        assert_eq!(stacked.data[1 * 3 + 2], 60.0);
     }
 }

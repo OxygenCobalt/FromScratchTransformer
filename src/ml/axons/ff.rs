@@ -1,9 +1,13 @@
-use std::simd::{Simd, num::SimdFloat};
+use std::{
+    ops::Add,
+    simd::{Simd, num::SimdFloat},
+    slice,
+};
 
-use crate::tensor::cpu2::{self, Fill, FillUninit, Generate, Tensor};
+use crate::tensor::cpu2::{self, Fill, FillUninit, Generate, Tensor, TensorView};
 use rand_distr::{Distribution, Normal};
 use rayon::{
-    iter::{IndexedParallelIterator, ParallelIterator},
+    iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator},
     slice::ParallelSliceMut,
 };
 use std::io::{self, Read, Write};
@@ -49,32 +53,34 @@ impl FeedForward {
 
     pub fn forward(&self, a_in: Tensor) -> Tensor {
         // forward pass: Wx + b -> [neurons, fan_in] x [fan_in, batch] -> [neurons, batch] + [neurons]
-        let batch = a_in.shape[self.batch_idx];
-        let a_in_flat_t = a_in
-            .r(&[self.fan_in, batch])
-            .unwrap()
-            .t(&[1, 0])
-            .unwrap()
-            .materialize();
+        let batch = a_in.shape[0];
+        let a_in_flat = a_in.r(&[batch, self.fan_in]).unwrap();
         let mut a_out_flat =
-            Tensor::init(unsafe { FillUninit::new(vec![self.neurons, batch]) }).unwrap();
+            Tensor::init(unsafe { FillUninit::new(vec![batch, self.neurons]) }).unwrap();
         // explicit slice definitions to signal to the compiler about aliasing
-        let mut out_data = a_out_flat.data.as_mut_slice();
+        let a_out_flat_data = a_out_flat.data.as_mut_slice();
         let parallelism = rayon::current_num_threads();
         let flops_per_core = (self.neurons * self.fan_in * batch) / parallelism;
         if flops_per_core >= FORWARD_MIN_FLOPS_PER_CORE {
             let neurons_per_chunk = (self.neurons as f64 / parallelism as f64).ceil() as usize;
-            let grain = neurons_per_chunk * batch;
-            out_data
-                .par_chunks_mut(grain)
-                .enumerate()
-                .for_each(|(i, out)| {
-                    let start_neuron = neurons_per_chunk * i;
-                    let neuron_count = out.len() / batch;
-                    self.forward_mm(start_neuron, neuron_count, batch, &a_in_flat_t, out);
+            let a_out_flat_addy = a_out_flat_data.as_mut_ptr() as usize;
+            (0..self.neurons)
+                .step_by(neurons_per_chunk)
+                .collect::<Vec<usize>>()
+                .into_par_iter()
+                .for_each(|start_neuron| {
+                    let neuron_count = neurons_per_chunk.min(self.neurons - start_neuron);
+                    let out_ptr = a_out_flat_addy as *mut f64;
+                    self.forward_mm(start_neuron, neuron_count, batch, &a_in_flat, out_ptr);
                 });
         } else {
-            self.forward_mm(0, self.neurons, batch, &a_in_flat_t, &mut out_data);
+            self.forward_mm(
+                0,
+                self.neurons,
+                batch,
+                &a_in_flat,
+                a_out_flat_data.as_mut_ptr(),
+            );
         }
         a_out_flat
     }
@@ -85,81 +91,83 @@ impl FeedForward {
         start_neuron: usize,
         neuron_count: usize,
         batch: usize,
-        a_in_flat_t: &Tensor,
-        out: &mut [f64],
+        a_in: &TensorView<'_>,
+        a_out: *mut f64,
     ) {
-        let mut lhs_idx = self.fan_in * start_neuron;
-        let mut rhs_idx = 0;
-        let mut bias_idx = start_neuron;
-        let mut out_idx = 0;
+        let mut weights_idx = self.fan_in * start_neuron; // shape = [neurons, fan_in], stride = [fan_in, 1]
+        let mut a_in_idx = 0; // shape = [batch, fan_in], stride = [fan_in, 1]
+        let mut bias_idx = start_neuron; // shape = [neurons], stride = [1]
+        let mut a_out_idx = start_neuron; // shape = [batch, neuron], stride = [neurons, 1]
         let chunks = self.fan_in / LANES;
         let remainder = self.fan_in % LANES;
-        for _ in 0..neuron_count {
-            let bias = unsafe { *self.biases.data.get_unchecked(bias_idx) };
-            for _ in 0..batch {
-                let mut lhs_ptr = unsafe { self.weights.data.as_ptr().add(lhs_idx) };
-                let mut rhs_ptr = unsafe { a_in_flat_t.data.as_ptr().add(rhs_idx) };
+        for _ in 0..batch {
+            for _ in 0..neuron_count {
+                let bias = unsafe { *self.biases.data.get_unchecked(bias_idx) };
+                let mut weights_ptr = unsafe { self.weights.data.as_ptr().add(weights_idx) };
+                let mut a_in_ptr = unsafe { a_in.tensor.data.as_ptr().add(a_in_idx) };
                 let mut sum_simd: Simd<f64, LANES> = Simd::splat(0.0);
                 for _ in 0..chunks {
-                    let lhs_simd =
-                        unsafe { std::ptr::read_unaligned(lhs_ptr as *const Simd<f64, LANES>) };
-                    let rhs_simd =
-                        unsafe { std::ptr::read_unaligned(rhs_ptr as *const Simd<f64, LANES>) };
-                    sum_simd += lhs_simd * rhs_simd;
-                    lhs_ptr = unsafe { lhs_ptr.add(LANES) };
-                    rhs_ptr = unsafe { rhs_ptr.add(LANES) };
+                    let weights_simd =
+                        unsafe { std::ptr::read_unaligned(weights_ptr as *const Simd<f64, LANES>) };
+                    let a_in_simd =
+                        unsafe { std::ptr::read_unaligned(a_in_ptr as *const Simd<f64, LANES>) };
+                    sum_simd += weights_simd * a_in_simd;
+                    weights_ptr = unsafe { weights_ptr.add(LANES) };
+                    a_in_ptr = unsafe { a_in_ptr.add(LANES) };
                 }
                 let mut sum: f64 = sum_simd.reduce_sum();
-                lhs_idx += LANES * chunks;
-                rhs_idx += LANES * chunks;
+                weights_idx += LANES * chunks;
+                a_in_idx += LANES * chunks;
                 for _ in 0..remainder {
-                    let lhs = unsafe { *self.weights.data.get_unchecked(lhs_idx) };
-                    let rhs = unsafe { *a_in_flat_t.data.get_unchecked(rhs_idx) };
-                    sum += lhs * rhs;
-                    lhs_idx += 1;
-                    rhs_idx += 1;
+                    unsafe {
+                        sum += *self.weights.data.get_unchecked(weights_idx)
+                            * *a_in.tensor.data.get_unchecked(a_in_idx)
+                    };
+                    weights_idx += 1;
+                    a_in_idx += 1;
                 }
                 unsafe {
-                    *out.get_unchecked_mut(out_idx) = sum + bias;
+                    *a_out.add(a_out_idx) = sum + bias;
                 }
-                lhs_idx -= self.fan_in;
-                out_idx += 1;
+                a_in_idx -= self.fan_in;
+                a_out_idx += 1;
+                bias_idx += 1;
             }
-            lhs_idx += self.fan_in;
-            rhs_idx = 0;
-            bias_idx += 1;
+            a_in_idx += self.fan_in;
+            weights_idx = self.fan_in * start_neuron;
+            bias_idx = start_neuron;
+            a_out_idx -= neuron_count;
+            a_out_idx += self.neurons;
         }
     }
 
     pub fn backward(&mut self, c: f64, a_in: Tensor, grad: Tensor) -> Tensor {
-        let batch = a_in.shape[self.batch_idx];
+        let batch = a_in.shape[0];
         let parallelism = rayon::current_num_threads();
         let flops_per_core = (self.neurons * self.fan_in * batch) / parallelism;
 
         // pass 1: activations backwards (W^T dot grad) [fan_in, neurons] x [neurons, batch] -> [fan_in, batch]
-        let mut a_grad =
-            Tensor::init(unsafe { FillUninit::new(vec![self.fan_in, batch]) }).unwrap();
-        let weights_t = self.weights.t(&[1, 0]).unwrap().materialize();
-        let grad_t = grad.t(&[1, 0]).unwrap().materialize();
-        let out_data: &mut [f64] = a_grad.data.as_mut_slice();
-
+        let mut a_grad = Tensor::init(Fill::null(vec![batch, self.fan_in])).unwrap();
+        let a_grad_ptr = a_grad.data.as_mut_slice().as_mut_ptr();
         if flops_per_core >= BACKWARD_PASS1_MIN_FLOPS_PER_CORE {
             let fan_in_per_chunk = (self.fan_in as f64 / parallelism as f64).ceil() as usize;
-            let grain = fan_in_per_chunk * batch;
-            out_data
-                .par_chunks_mut(grain)
-                .enumerate()
-                .for_each(|(i, out)| {
-                    let fan_in_count = out.len() / batch;
-                    let start_fan_in = i * fan_in_per_chunk;
+            let a_grad_addy = a_grad_ptr as usize;
+            (0..self.fan_in)
+                .step_by(fan_in_per_chunk)
+                .collect::<Vec<usize>>()
+                .into_par_iter()
+                .for_each(|start_fan_in| {
+                    let fan_in_count = fan_in_per_chunk.min(self.fan_in - start_fan_in);
+                    let a_grad_ptr = a_grad_addy as *mut f64;
                     Self::backwards_pass1_mm(
                         start_fan_in,
                         fan_in_count,
                         batch,
                         self.neurons,
-                        &weights_t.data,
-                        &grad_t.data,
-                        out,
+                        self.fan_in,
+                        &self.weights.data,
+                        &grad.data,
+                        a_grad_ptr,
                     );
                 });
         } else {
@@ -168,26 +176,22 @@ impl FeedForward {
                 self.fan_in,
                 batch,
                 self.neurons,
-                &weights_t.data,
-                &grad_t.data,
-                out_data,
+                self.fan_in,
+                &self.weights.data,
+                &grad.data,
+                a_grad_ptr,
             );
         }
-        // pass 2: weights backwards (grad dot a_in^T) [neurons, batch] dot [batch, fan_in] -> [neurons, fan_in] -> lhs_grad
+        // pass 2: weights backwards (grad^T dot a_in) [neurons, batch] dot [batch, fan_in] -> [neurons, fan_in] -> weights
         //         bias backwards (sum over batch of grad) -> bias_grad
-        let a_in_flat_t = a_in
-            .r(&[self.fan_in, batch])
-            .unwrap()
-            .t(&[1, 0])
-            .unwrap()
-            .materialize();
-        let out_data = self.weights.data.as_mut_slice();
+        let weights_data = self.weights.data.as_mut_slice();
         let bias_data = self.biases.data.as_mut_slice();
         if flops_per_core >= BACKWARD_PASS2_MIN_FLOPS_PER_CORE {
+            // TODO: advanced backwards pass2 tiling now that we can be noncontiguous
             let neurons_per_chunk = (self.neurons as f64 / parallelism as f64).ceil() as usize;
             let neuron_grain = neurons_per_chunk * self.fan_in;
             let bias_grain = neurons_per_chunk;
-            out_data
+            weights_data
                 .par_chunks_mut(neuron_grain)
                 .zip(bias_data.par_chunks_mut(bias_grain))
                 .enumerate()
@@ -199,8 +203,9 @@ impl FeedForward {
                         neuron_count,
                         batch,
                         self.fan_in,
+                        self.neurons,
                         c,
-                        &a_in_flat_t.data,
+                        &a_in.data,
                         &grad.data,
                         bias,
                         out,
@@ -212,11 +217,12 @@ impl FeedForward {
                 self.neurons,
                 batch,
                 self.fan_in,
+                self.neurons,
                 c,
-                &a_in_flat_t.data,
+                &a_in.data,
                 &grad.data,
                 bias_data,
-                out_data,
+                weights_data,
             );
         }
 
@@ -229,48 +235,60 @@ impl FeedForward {
         fan_in_count: usize,
         batch: usize,
         neurons: usize,
-        weights_t: &[f64],
-        grad_t: &[f64],
-        out: &mut [f64],
+        fan_in: usize,
+        weights: &[f64],  // [neurons, fan_in]
+        grad: &[f64],     // [batch, neurons]
+        a_grad: *mut f64, // [batch, fan_in]
     ) {
-        let mut lhs_idx = start_fan_in * neurons;
-        let mut rhs_idx = 0;
-        let mut out_idx = 0;
-        let chunks = neurons / LANES;
-        let remainder = neurons % LANES;
-        for _ in 0..fan_in_count {
+        let mut weights_idx = start_fan_in;
+        let mut grad_idx = 0;
+        let mut a_grad_idx = start_fan_in;
+        let chunks = fan_in_count / LANES;
+        let remainder = fan_in_count % LANES;
+        for _ in 0..neurons {
             for _ in 0..batch {
-                let mut sum_simd: Simd<f64, LANES> = Simd::splat(0.0);
-                // todo: cast ptrs once
-                let mut lhs_ptr = unsafe { weights_t.as_ptr().add(lhs_idx) };
-                let mut rhs_ptr = unsafe { grad_t.as_ptr().add(rhs_idx) };
+                let g = unsafe { *grad.get_unchecked(grad_idx) };
+                let g_simd: Simd<f64, LANES> = Simd::splat(g);
+                let mut weights_ptr = unsafe { weights.as_ptr().add(weights_idx) };
+                let mut a_grad_ptr = unsafe { a_grad.add(a_grad_idx) };
                 for _ in 0..chunks {
-                    let lhs_simd =
-                        unsafe { std::ptr::read_unaligned(lhs_ptr as *const Simd<f64, LANES>) };
-                    let rhs_simd =
-                        unsafe { std::ptr::read_unaligned(rhs_ptr as *const Simd<f64, LANES>) };
-                    sum_simd += lhs_simd * rhs_simd;
-                    lhs_ptr = unsafe { lhs_ptr.add(LANES) };
-                    rhs_ptr = unsafe { rhs_ptr.add(LANES) };
+                    let weights_simd =
+                        unsafe { std::ptr::read_unaligned(weights_ptr as *const Simd<f64, LANES>) };
+                    let a_grad_simd =
+                        unsafe { std::ptr::read_unaligned(a_grad_ptr as *const Simd<f64, LANES>) };
+                    let dot = a_grad_simd + g_simd * weights_simd;
+                    unsafe { std::ptr::write_unaligned(a_grad_ptr as *mut Simd<f64, LANES>, dot) };
+                    weights_ptr = unsafe { weights_ptr.add(LANES) };
+                    a_grad_ptr = unsafe { a_grad_ptr.add(LANES) };
                 }
-                let mut sum = sum_simd.reduce_sum();
-                lhs_idx += LANES * chunks;
-                rhs_idx += LANES * chunks;
+                // advance weights across fan_in
+                weights_idx += LANES * chunks;
+                // advance a_grad across fan_in
+                a_grad_idx += LANES * chunks;
                 for _ in 0..remainder {
-                    let lhs = unsafe { *weights_t.get_unchecked(lhs_idx) };
-                    let rhs = unsafe { *grad_t.get_unchecked(rhs_idx) };
-                    sum += lhs * rhs;
-                    lhs_idx += 1;
-                    rhs_idx += 1;
+                    unsafe { *a_grad.add(a_grad_idx) += g * weights[weights_idx] }
+                    // advance weights across fan_in
+                    weights_idx += 1;
+                    // advance a_grad across fan_in
+                    a_grad_idx += 1;
                 }
-                unsafe {
-                    *out.get_unchecked_mut(out_idx) = sum;
-                }
-                lhs_idx -= neurons;
-                out_idx += 1;
+                // rewind weights across fan_in
+                weights_idx -= fan_in_count;
+                // rewind a_grad across fan_in
+                a_grad_idx -= fan_in_count;
+                // advance a_grad across batch
+                a_grad_idx += fan_in;
+                // advance grad across batch
+                grad_idx += neurons;
             }
-            lhs_idx += neurons;
-            rhs_idx = 0;
+            // adv. weights across neurons
+            weights_idx += fan_in;
+            // rewind grad across batch
+            grad_idx -= batch * neurons;
+            // adv. grad across neurons
+            grad_idx += 1;
+            // rewind a_grad across batch
+            a_grad_idx -= batch * fan_in;
         }
     }
 
@@ -280,59 +298,61 @@ impl FeedForward {
         neuron_count: usize,
         batch: usize,
         fan_in: usize,
+        neurons: usize,
         c: f64,
-        a_in_flat_t: &[f64],
-        grad: &[f64],
-        bias: &mut [f64],
-        out: &mut [f64],
+        a_in: &[f64],        // [batch, fan_in]
+        grad: &[f64],        // [batch, neurons]
+        bias: &mut [f64],    // [neurons]
+        weights: &mut [f64], // [neurons, fan_in]
     ) {
         let c_simd = Simd::splat(c);
         let chunks = fan_in / LANES;
         let remainder = fan_in % LANES;
-        let mut lhs_idx = start_neuron * batch;
-        let mut rhs_idx = 0;
-        let mut out_idx = 0;
+        let mut grad_idx = start_neuron;
+        let mut a_in_idx = 0;
+        let mut weights_idx = 0;
         for n in 0..neuron_count {
             let bias = unsafe { bias.get_unchecked_mut(n) };
             let mut sum_g = 0.0;
             for _ in 0..batch {
                 // access gradient (also accumulate for bias update)
-                let g = unsafe { *grad.get_unchecked(lhs_idx) };
+                let g = unsafe { *grad.get_unchecked(grad_idx) };
                 sum_g += g;
 
                 let g_simd = Simd::splat(g);
-                let mut rhs_ptr = unsafe { a_in_flat_t.as_ptr().add(rhs_idx) };
-                let mut out_ptr = unsafe { out.as_mut_ptr().add(out_idx) };
+                let mut a_in_ptr = unsafe { a_in.as_ptr().add(a_in_idx) };
+                let mut weights_ptr = unsafe { weights.as_mut_ptr().add(weights_idx) };
                 for _ in 0..chunks {
-                    let rhs_simd =
-                        unsafe { std::ptr::read_unaligned(rhs_ptr as *const Simd<f64, LANES>) };
-                    let out_simd =
-                        unsafe { std::ptr::read_unaligned(out_ptr as *const Simd<f64, LANES>) };
-                    let descended = out_simd - g_simd * rhs_simd * c_simd;
+                    let a_in_simd =
+                        unsafe { std::ptr::read_unaligned(a_in_ptr as *const Simd<f64, LANES>) };
+                    let weights_simd =
+                        unsafe { std::ptr::read_unaligned(weights_ptr as *const Simd<f64, LANES>) };
+                    let descended = weights_simd - g_simd * a_in_simd * c_simd;
                     unsafe {
-                        std::ptr::write_unaligned(out_ptr as *mut Simd<f64, LANES>, descended)
+                        std::ptr::write_unaligned(weights_ptr as *mut Simd<f64, LANES>, descended)
                     };
-                    rhs_ptr = unsafe { rhs_ptr.add(LANES) };
-                    out_ptr = unsafe { out_ptr.add(LANES) };
+                    a_in_ptr = unsafe { a_in_ptr.add(LANES) };
+                    weights_ptr = unsafe { weights_ptr.add(LANES) };
                 }
-                rhs_idx += LANES * chunks;
-                out_idx += LANES * chunks;
+                a_in_idx += LANES * chunks;
+                weights_idx += LANES * chunks;
                 for _ in 0..remainder {
-                    let rhs = unsafe { *a_in_flat_t.get_unchecked(rhs_idx) };
-                    let out = unsafe { out.get_unchecked_mut(out_idx) };
-                    *out -= c * g * rhs;
-                    rhs_idx += 1;
-                    out_idx += 1;
+                    let a_in = unsafe { *a_in.get_unchecked(a_in_idx) };
+                    let weight = unsafe { weights.get_unchecked_mut(weights_idx) };
+                    *weight -= c * g * a_in;
+                    a_in_idx += 1;
+                    weights_idx += 1;
                 }
-                lhs_idx += 1;
-                out_idx -= fan_in;
+                grad_idx += neurons;
+                weights_idx -= fan_in;
             }
             // backwards to bias too since we actually are already traversing over the correct axes while backpropagating weights
             // (accumulated sum over batch to avoid unneeded writes / muls)
             *bias -= c * sum_g;
-
-            rhs_idx = 0;
-            out_idx += fan_in;
+            grad_idx -= neurons * batch;
+            grad_idx += 1;
+            a_in_idx = 0;
+            weights_idx += fan_in;
         }
     }
 
@@ -415,7 +435,7 @@ mod tests {
             biases: b,
             neurons,
             fan_in: fan_in,
-            batch_idx: input_shape.len(),
+            batch_idx: 0,
         }
     }
 
@@ -434,7 +454,7 @@ mod tests {
             .unwrap(),
             neurons,
             fan_in: fan_in,
-            batch_idx: input_shape.len(),
+            batch_idx: 0,
         }
     }
 
@@ -461,11 +481,11 @@ mod tests {
     #[test]
     fn forward_matches_matmul_plus_bias() {
         let ff = ff_with_params(&[0.5, -1.0, 1.5, 0.3], &[0.2, -0.1], vec![2]);
-        let input = tensor_with_data(vec![2, 1], &[0.4, 0.8]);
+        let input = tensor_with_data(vec![1, 2], &[0.4, 0.8]);
 
         let out = ff.forward(input);
 
-        assert_eq!(out.shape, vec![2, 1]);
+        assert_eq!(out.shape, vec![1, 2]);
         let expected = vec![-0.4, 0.74];
         assert_close(out.data.as_slice(), &expected, 1e-12);
     }
@@ -473,12 +493,12 @@ mod tests {
     #[test]
     fn forward_handles_explicit_batch_dim() {
         let ff = ff_with_params(&[1.0, 2.0], &[0.0], vec![2]);
-        // Shape [feature, batch]
-        let input = tensor_with_data(vec![2, 3], &[1.0, 2.0, 3.0, 10.0, 20.0, 30.0]);
+        // Shape [batch, feature]
+        let input = tensor_with_data(vec![3, 2], &[1.0, 10.0, 2.0, 20.0, 3.0, 30.0]);
 
         let out = ff.forward(input);
 
-        assert_eq!(out.shape, vec![1, 3]);
+        assert_eq!(out.shape, vec![3, 1]);
         let expected = vec![21.0, 42.0, 63.0];
         assert_close(out.data.as_slice(), &expected, 1e-12);
     }
@@ -486,13 +506,13 @@ mod tests {
     #[test]
     fn backward_returns_input_grad_and_updates_params() {
         let mut ff = ff_with_params(&[1.0, -1.0, 0.5, 0.5, 1.0, -0.5], &[3.0, 1.0], vec![3]);
-        let input = tensor_with_data(vec![3, 1], &[2.0, 3.0, 4.0]);
-        let grad = tensor_with_data(vec![2, 1], &[0.2, -0.4]);
+        let input = tensor_with_data(vec![1, 3], &[2.0, 3.0, 4.0]);
+        let grad = tensor_with_data(vec![1, 2], &[0.2, -0.4]);
 
         let lr = 0.1;
         let input_grad = ff.backward(lr, input, grad);
 
-        assert_eq!(input_grad.shape, vec![3, 1]);
+        assert_eq!(input_grad.shape, vec![1, 3]);
         let expected_input_grad = vec![0.0, -0.6, 0.3];
         assert_close(input_grad.data.as_slice(), &expected_input_grad, 1e-12);
 
@@ -506,13 +526,13 @@ mod tests {
     #[test]
     fn backward_small_batch_updates_all_neurons() {
         let mut ff = ff_with_params(&[1.0, 2.0, -1.0, 1.0], &[0.0, -3.0], vec![2]);
-        let input = tensor_with_data(vec![2, 1], &[1.0, 2.0]);
-        let grad = tensor_with_data(vec![2, 1], &[0.5, 1.0]);
+        let input = tensor_with_data(vec![1, 2], &[1.0, 2.0]);
+        let grad = tensor_with_data(vec![1, 2], &[0.5, 1.0]);
 
         let lr = 0.1;
         let input_grad = ff.backward(lr, input, grad);
 
-        assert_eq!(input_grad.shape, vec![2, 1]);
+        assert_eq!(input_grad.shape, vec![1, 2]);
         let expected_weights = vec![0.95, 1.9, -1.1, 0.8];
         assert_close(ff.weights.data.as_slice(), &expected_weights, 1e-12);
         let expected_biases = vec![-0.05, -3.1];
@@ -527,43 +547,43 @@ mod tests {
         let mut ff = ff_with_params(&[1.0, 2.0, 0.5, 1.5], &[0.1, -0.2], vec![2]);
 
         let mut input = Tensor::init(Fill {
-            shape: vec![2, batch],
+            shape: vec![batch, 2],
             with: 0.0,
         })
         .unwrap();
         {
             let data = input.data.as_mut_slice();
             for b in 0..batch {
-                data[0 * batch + b] = 1.0;
-                data[1 * batch + b] = 2.0;
+                data[b * 2 + 0] = 1.0;
+                data[b * 2 + 1] = 2.0;
             }
         }
 
         let mut grad = Tensor::init(Fill {
-            shape: vec![2, batch],
+            shape: vec![batch, 2],
             with: 0.0,
         })
         .unwrap();
         {
             let data = grad.data.as_mut_slice();
             for b in 0..batch {
-                data[0 * batch + b] = 0.3;
-                data[1 * batch + b] = -0.7;
+                data[b * 2 + 0] = 0.3;
+                data[b * 2 + 1] = -0.7;
             }
         }
 
         let lr = 0.01;
         let a_grad = ff.backward(lr, input, grad);
 
-        assert_eq!(a_grad.shape, vec![2, batch]);
+        assert_eq!(a_grad.shape, vec![batch, 2]);
         let expected_weights = vec![0.808, 1.616, 0.948, 2.396];
         assert_close(ff.weights.data.as_slice(), &expected_weights, 1e-12);
         let expected_biases = vec![-0.092, 0.248];
         assert_close(ff.biases.data.as_slice(), &expected_biases, 1e-12);
 
         for b in 0..batch {
-            let idx0 = 0 * batch + b;
-            let idx1 = 1 * batch + b;
+            let idx0 = b * 2 + 0;
+            let idx1 = b * 2 + 1;
             assert!(
                 (a_grad.data[idx0] + 0.05).abs() <= 1e-12,
                 "expected dL/dx0=-0.05 at batch {}, got {}",
@@ -582,8 +602,8 @@ mod tests {
     #[test]
     fn backward_repeated_calls_keep_weight_layout_consistent() {
         let mut ff = ff_with_params(&[1.0, 2.0, 0.5, 1.5], &[0.1, -0.2], vec![2]);
-        let input = tensor_with_data(vec![2, 1], &[1.0, 2.0]);
-        let grad = tensor_with_data(vec![2, 1], &[0.3, -0.7]);
+        let input = tensor_with_data(vec![1, 2], &[1.0, 2.0]);
+        let grad = tensor_with_data(vec![1, 2], &[0.3, -0.7]);
         let lr = 0.01;
 
         let first_input_grad = ff.backward(lr, input.clone(), grad.clone());
@@ -622,25 +642,25 @@ mod tests {
         }
 
         let mut input = Tensor::init(Fill {
-            shape: vec![features, batch],
+            shape: vec![batch, features],
             with: 0.0,
         })
         .unwrap();
         {
             let data = input.data.as_mut_slice();
             for b in 0..batch {
-                data[0 * batch + b] = 1.0; // feature 0
-                data[(features - 1) * batch + b] = 2.0; // feature 511
+                data[b * features + 0] = 1.0; // feature 0
+                data[b * features + (features - 1)] = 2.0; // feature 511
             }
         }
 
         let out = ff.forward(input);
-        assert_eq!(out.shape, vec![neurons, batch]);
+        assert_eq!(out.shape, vec![batch, neurons]);
         let out_data = out.data.as_slice();
         for b in 0..batch {
-            let idx0 = 0 * batch + b;
-            let idx1 = 1 * batch + b;
-            let idx_last = (neurons - 1) * batch + b;
+            let idx0 = b * neurons + 0;
+            let idx1 = b * neurons + 1;
+            let idx_last = b * neurons + (neurons - 1);
             assert!(
                 (out_data[idx0] - 2.5).abs() <= 1e-12,
                 "neuron 0 batch {} expected 2.5, got {}",
@@ -678,30 +698,30 @@ mod tests {
 
         // Input: feature 0 is 1.0, feature 511 is 2.0 for every batch.
         let mut input = Tensor::init(Fill {
-            shape: vec![features, batch],
+            shape: vec![batch, features],
             with: 0.0,
         })
         .unwrap();
         {
             let data = input.data.as_mut_slice();
             for b in 0..batch {
-                data[0 * batch + b] = 1.0;
-                data[(features - 1) * batch + b] = 2.0;
+                data[b * features + 0] = 1.0;
+                data[b * features + (features - 1)] = 2.0;
             }
         }
 
         // Gradients: neuron 0 -> +1.0, neuron 1 -> -1.0, last neuron -> +0.5 for every batch.
         let mut grad = Tensor::init(Fill {
-            shape: vec![neurons, batch],
+            shape: vec![batch, neurons],
             with: 0.0,
         })
         .unwrap();
         {
             let data = grad.data.as_mut_slice();
             for b in 0..batch {
-                data[0 * batch + b] = 1.0;
-                data[1 * batch + b] = -1.0;
-                data[(neurons - 1) * batch + b] = 0.5;
+                data[b * neurons + 0] = 1.0;
+                data[b * neurons + 1] = -1.0;
+                data[b * neurons + (neurons - 1)] = 0.5;
             }
         }
 
@@ -709,10 +729,10 @@ mod tests {
         let a_grad = ff.backward(lr, input, grad);
 
         // Input gradient is W^T * grad.
-        assert_eq!(a_grad.shape, vec![features, batch]);
+        assert_eq!(a_grad.shape, vec![batch, features]);
         for b in 0..batch {
-            let idx0 = 0 * batch + b;
-            let idx511 = (features - 1) * batch + b;
+            let idx0 = b * features + 0;
+            let idx511 = b * features + (features - 1);
             assert!(
                 (a_grad.data[idx0] - 1.25).abs() <= 1e-12,
                 "expected dL/dx0=1.25 at batch {}, got {}",
@@ -771,30 +791,30 @@ mod tests {
         let ff = ff_with_params(&weights, &biases, vec![features]);
 
         let mut input = Tensor::init(Fill {
-            shape: vec![features, batch],
+            shape: vec![batch, features],
             with: 0.0,
         })
         .unwrap();
         {
             let data = input.data.as_mut_slice();
-            for f in 0..features {
-                for b in 0..batch {
-                    data[f * batch + b] = 1.0 + f as f64 * 0.2 + b as f64 * 0.1;
+            for b in 0..batch {
+                for f in 0..features {
+                    data[b * features + f] = 1.0 + f as f64 * 0.2 + b as f64 * 0.1;
                 }
             }
         }
 
         let out = ff.forward(input);
 
-        assert_eq!(out.shape, vec![neurons, batch]);
-        let mut expected = vec![0.0; neurons * batch];
-        for n in 0..neurons {
-            for b in 0..batch {
+        assert_eq!(out.shape, vec![batch, neurons]);
+        let mut expected = vec![0.0; batch * neurons];
+        for b in 0..batch {
+            for n in 0..neurons {
                 let mut acc = biases[n];
                 for f in 0..features {
                     acc += weights[n * features + f] * (1.0 + f as f64 * 0.2 + b as f64 * 0.1);
                 }
-                expected[n * batch + b] = acc;
+                expected[b * neurons + n] = acc;
             }
         }
         assert_close(out.data.as_slice(), &expected, 1e-12);
@@ -813,28 +833,28 @@ mod tests {
         let mut ff = ff_with_params(&weights, &biases, vec![features]);
 
         let mut input = Tensor::init(Fill {
-            shape: vec![features, batch],
+            shape: vec![batch, features],
             with: 0.0,
         })
         .unwrap();
         {
             let data = input.data.as_mut_slice();
-            for f in 0..features {
-                for b in 0..batch {
-                    data[f * batch + b] = 1.0 + f as f64 * 0.3 + b as f64 * 0.05;
+            for b in 0..batch {
+                for f in 0..features {
+                    data[b * features + f] = 1.0 + f as f64 * 0.3 + b as f64 * 0.05;
                 }
             }
         }
         let mut grad = Tensor::init(Fill {
-            shape: vec![neurons, batch],
+            shape: vec![batch, neurons],
             with: 0.0,
         })
         .unwrap();
         {
             let data = grad.data.as_mut_slice();
-            for n in 0..neurons {
-                for b in 0..batch {
-                    data[n * batch + b] = 0.1 + n as f64 * 0.02 + b as f64 * 0.01;
+            for b in 0..batch {
+                for n in 0..neurons {
+                    data[b * neurons + n] = 0.1 + n as f64 * 0.02 + b as f64 * 0.01;
                 }
             }
         }
@@ -844,16 +864,16 @@ mod tests {
         let grad_data = grad.data.clone();
         let input_grad = ff.backward(lr, input, grad);
 
-        assert_eq!(input_grad.shape, vec![features, batch]);
+        assert_eq!(input_grad.shape, vec![batch, features]);
 
-        let mut expected_input_grad = vec![0.0; features * batch];
-        for f in 0..features {
-            for b in 0..batch {
+        let mut expected_input_grad = vec![0.0; batch * features];
+        for b in 0..batch {
+            for f in 0..features {
                 let mut sum = 0.0;
                 for n in 0..neurons {
-                    sum += weights[n * features + f] * grad_data[n * batch + b];
+                    sum += weights[n * features + f] * grad_data[b * neurons + n];
                 }
-                expected_input_grad[f * batch + b] = sum;
+                expected_input_grad[b * features + f] = sum;
             }
         }
 
@@ -861,7 +881,7 @@ mod tests {
         for n in 0..neurons {
             let mut delta = 0.0;
             for b in 0..batch {
-                delta += grad_data[n * batch + b];
+                delta += grad_data[b * neurons + n];
             }
             expected_biases[n] -= lr * delta;
         }
@@ -871,7 +891,7 @@ mod tests {
             for f in 0..features {
                 let mut delta = 0.0;
                 for b in 0..batch {
-                    delta += grad_data[n * batch + b] * input_data[f * batch + b];
+                    delta += grad_data[b * neurons + n] * input_data[b * features + f];
                 }
                 expected_weights[n * features + f] -= lr * delta;
             }
@@ -885,11 +905,11 @@ mod tests {
     #[test]
     fn forward_linear_values_case_a() {
         let ff = ff_with_params(&[1.0, 0.5, -0.5, 1.0], &[0.1, -0.1], vec![2]);
-        let input = tensor_with_data(vec![2, 1], &[0.5, 0.8]);
+        let input = tensor_with_data(vec![1, 2], &[0.5, 0.8]);
 
         let out = ff.forward(input);
 
-        assert_eq!(out.shape, vec![2, 1]);
+        assert_eq!(out.shape, vec![1, 2]);
         let expected = vec![1.0, 0.45];
         assert_close(out.data.as_slice(), &expected, 1e-12);
     }
@@ -897,11 +917,11 @@ mod tests {
     #[test]
     fn forward_linear_values_case_b() {
         let ff = ff_with_params(&[2.0, -1.0, 0.5, 1.5], &[0.3, -0.2], vec![2]);
-        let input = tensor_with_data(vec![2, 1], &[1.0, 2.0]);
+        let input = tensor_with_data(vec![1, 2], &[1.0, 2.0]);
 
         let out = ff.forward(input);
 
-        assert_eq!(out.shape, vec![2, 1]);
+        assert_eq!(out.shape, vec![1, 2]);
         let pre0 = 2.0 * 1.0 + -1.0 * 2.0 + 0.3; // 0.3
         let pre1 = 0.5 * 1.0 + 1.5 * 2.0 - 0.2; // 3.3
         let expected = vec![pre0, pre1];
@@ -921,21 +941,22 @@ mod tests {
         let biases: Vec<f64> = (0..neurons).map(|n| n as f64 * 0.05).collect();
         let ff = ff_with_params(&weights, &biases, vec![features]);
 
-        let input = tensor_with_data(vec![features, batch], &[1.0, 2.0, 0.5, 1.5, -0.5, 0.5]);
+        // batch-first: [batch, features] = [2, 3]
+        // batch0=[1.0, 0.5, -0.5], batch1=[2.0, 1.5, 0.5]
+        let input = tensor_with_data(vec![batch, features], &[1.0, 0.5, -0.5, 2.0, 1.5, 0.5]);
 
         let out = ff.forward(input);
 
-        assert_eq!(out.shape, vec![neurons, batch]);
-        // Compute expected values manually
-        let mut expected = vec![0.0; neurons * batch];
-        for n in 0..neurons {
-            for b in 0..batch {
+        assert_eq!(out.shape, vec![batch, neurons]);
+        let input_data = [1.0, 0.5, -0.5, 2.0, 1.5, 0.5];
+        let mut expected = vec![0.0; batch * neurons];
+        for b in 0..batch {
+            for n in 0..neurons {
                 let mut acc = biases[n];
                 for f in 0..features {
-                    acc +=
-                        weights[n * features + f] * [1.0, 2.0, 0.5, 1.5, -0.5, 0.5][f * batch + b];
+                    acc += weights[n * features + f] * input_data[b * features + f];
                 }
-                expected[n * batch + b] = acc;
+                expected[b * neurons + n] = acc;
             }
         }
         assert_close(out.data.as_slice(), &expected, 1e-12);
@@ -944,7 +965,7 @@ mod tests {
     #[test]
     fn forward_single_neuron() {
         let ff = ff_with_params(&[1.0, 2.0, 3.0], &[0.5], vec![3]);
-        let input = tensor_with_data(vec![3, 1], &[0.1, 0.2, 0.3]);
+        let input = tensor_with_data(vec![1, 3], &[0.1, 0.2, 0.3]);
 
         let out = ff.forward(input);
 
@@ -960,7 +981,7 @@ mod tests {
 
         let out = ff.forward(input);
 
-        assert_eq!(out.shape, vec![3, 1]);
+        assert_eq!(out.shape, vec![1, 3]);
         let expected = vec![6.1, -3.5, 1.5];
         assert_close(out.data.as_slice(), &expected, 1e-12);
     }
@@ -968,11 +989,11 @@ mod tests {
     #[test]
     fn forward_single_batch() {
         let ff = ff_with_params(&[1.0, 2.0, 3.0, 4.0], &[0.0, 0.0], vec![2]);
-        let input = tensor_with_data(vec![2, 1], &[1.0, 1.0]);
+        let input = tensor_with_data(vec![1, 2], &[1.0, 1.0]);
 
         let out = ff.forward(input);
 
-        assert_eq!(out.shape, vec![2, 1]);
+        assert_eq!(out.shape, vec![1, 2]);
         let expected = vec![3.0, 7.0];
         assert_close(out.data.as_slice(), &expected, 1e-12);
     }
@@ -991,7 +1012,7 @@ mod tests {
         let ff = ff_with_params(&weights, &biases, vec![features]);
 
         let mut input = Tensor::init(Fill {
-            shape: vec![features, batch],
+            shape: vec![batch, features],
             with: 0.0,
         })
         .unwrap();
@@ -1004,18 +1025,18 @@ mod tests {
 
         let out = ff.forward(input.clone());
 
-        assert_eq!(out.shape, vec![neurons, batch]);
+        assert_eq!(out.shape, vec![batch, neurons]);
 
         // Verify values
         let input_data = input.data.as_slice();
-        for n in 0..neurons {
-            for b in 0..batch {
+        for b in 0..batch {
+            for n in 0..neurons {
                 let mut acc = biases[n];
                 for f in 0..features {
-                    acc += weights[n * features + f] * input_data[f * batch + b];
+                    acc += weights[n * features + f] * input_data[b * features + f];
                 }
                 let expected = acc;
-                let actual = out.data[n * batch + b];
+                let actual = out.data[b * neurons + n];
                 assert!(
                     (actual - expected).abs() <= 1e-12,
                     "mismatch at neuron {} batch {}: expected {}, got {}",
@@ -1034,13 +1055,13 @@ mod tests {
         let original_weights = ff.weights.data.clone();
         let original_biases = ff.biases.data.clone();
 
-        let input = tensor_with_data(vec![2, 1], &[1.0, 1.0]);
-        let grad = tensor_with_data(vec![2, 1], &[0.0, 0.0]);
+        let input = tensor_with_data(vec![1, 2], &[1.0, 1.0]);
+        let grad = tensor_with_data(vec![1, 2], &[0.0, 0.0]);
 
         let lr = 0.1;
         let input_grad = ff.backward(lr, input, grad);
 
-        assert_eq!(input_grad.shape, vec![2, 1]);
+        assert_eq!(input_grad.shape, vec![1, 2]);
         // With zero gradients, weights and biases should remain unchanged
         assert_close(ff.weights.data.as_slice(), &original_weights, 1e-12);
         assert_close(ff.biases.data.as_slice(), &original_biases, 1e-12);
@@ -1054,13 +1075,13 @@ mod tests {
         let mut ff = ff_with_params(&[1.0, 2.0, 3.0, 4.0], &[0.1, 0.2], vec![2]);
         let original_weights = ff.weights.data.clone();
 
-        let input = tensor_with_data(vec![2, 1], &[0.0, 0.0]);
-        let grad = tensor_with_data(vec![2, 1], &[1.0, 1.0]);
+        let input = tensor_with_data(vec![1, 2], &[0.0, 0.0]);
+        let grad = tensor_with_data(vec![1, 2], &[1.0, 1.0]);
 
         let lr = 0.1;
         let input_grad = ff.backward(lr, input, grad);
 
-        assert_eq!(input_grad.shape, vec![2, 1]);
+        assert_eq!(input_grad.shape, vec![1, 2]);
         // With zero input, weights should remain unchanged (gradient * input = gradient * 0 = 0)
         assert_close(ff.weights.data.as_slice(), &original_weights, 1e-12);
 
@@ -1089,11 +1110,14 @@ mod tests {
         let biases: Vec<f64> = (0..neurons).map(|n| 1.0 + n as f64 * 0.05).collect();
         let mut ff = ff_with_params(&weights, &biases, vec![features]);
 
-        // All positive inputs ensure positive pre-activations with positive weights/biases
-        let input = tensor_with_data(vec![features, batch], &[1.0, 2.0, 0.5, 1.5, 0.5, 0.5]);
+        // batch-first: [batch, features] = [2, 3]
+        // batch0=[1.0, 0.5, 0.5], batch1=[2.0, 1.5, 0.5]
+        let input = tensor_with_data(vec![batch, features], &[1.0, 0.5, 0.5, 2.0, 1.5, 0.5]);
+        // batch-first: [batch, neurons] = [2, 5]
+        // batch0=[0.1, 0.3, 0.5, 0.7, 0.9], batch1=[0.2, 0.4, 0.6, 0.8, 1.0]
         let grad = tensor_with_data(
-            vec![neurons, batch],
-            &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+            vec![batch, neurons],
+            &[0.1, 0.3, 0.5, 0.7, 0.9, 0.2, 0.4, 0.6, 0.8, 1.0],
         );
 
         let lr = 0.01;
@@ -1101,14 +1125,13 @@ mod tests {
         let grad_data = grad.data.clone();
         let input_grad = ff.backward(lr, input, grad);
 
-        assert_eq!(input_grad.shape, vec![features, batch]);
-        // With all positive pre-activations, ReLU derivative = 1, so grad passes through unchanged
-        let mut expected_input_grad = vec![0.0; features * batch];
-        for f in 0..features {
-            for b in 0..batch {
+        assert_eq!(input_grad.shape, vec![batch, features]);
+        let mut expected_input_grad = vec![0.0; batch * features];
+        for b in 0..batch {
+            for f in 0..features {
                 for n in 0..neurons {
-                    expected_input_grad[f * batch + b] +=
-                        weights[n * features + f] * grad_data[n * batch + b];
+                    expected_input_grad[b * features + f] +=
+                        weights[n * features + f] * grad_data[b * neurons + n];
                 }
             }
         }
@@ -1116,7 +1139,7 @@ mod tests {
         let mut expected_biases = biases.clone();
         for n in 0..neurons {
             for b in 0..batch {
-                expected_biases[n] -= lr * grad_data[n * batch + b];
+                expected_biases[n] -= lr * grad_data[b * neurons + n];
             }
         }
 
@@ -1125,7 +1148,7 @@ mod tests {
             for f in 0..features {
                 for b in 0..batch {
                     expected_weights[n * features + f] -=
-                        lr * grad_data[n * batch + b] * input_data[f * batch + b];
+                        lr * grad_data[b * neurons + n] * input_data[b * features + f];
                 }
             }
         }
@@ -1137,7 +1160,6 @@ mod tests {
 
     #[test]
     fn backward_single_neuron_single_feature() {
-        // ReLU with positive pre-activation (2.0*3.0 + 0.5 = 6.5 > 0) acts like identity
         let mut ff = ff_with_params(&[2.0], &[0.5], vec![1]);
 
         let input = tensor_with_data(vec![1, 1], &[3.0]);
@@ -1171,7 +1193,7 @@ mod tests {
         let mut ff = ff_with_params(&weights, &biases, vec![features]);
 
         let mut input = Tensor::init(Fill {
-            shape: vec![features, batch],
+            shape: vec![batch, features],
             with: 0.0,
         })
         .unwrap();
@@ -1184,7 +1206,7 @@ mod tests {
         }
 
         let mut grad = Tensor::init(Fill {
-            shape: vec![neurons, batch],
+            shape: vec![batch, neurons],
             with: 0.0,
         })
         .unwrap();
@@ -1201,15 +1223,14 @@ mod tests {
         let input_grad = ff.backward(lr, input, grad);
 
         // Output shape should match input shape
-        assert_eq!(input_grad.shape, vec![features, batch]);
+        assert_eq!(input_grad.shape, vec![batch, features]);
 
-        // With positive pre-activations, ReLU derivative = 1
-        let mut expected_input_grad = vec![0.0; features * batch];
-        for f in 0..features {
-            for b in 0..batch {
+        let mut expected_input_grad = vec![0.0; batch * features];
+        for b in 0..batch {
+            for f in 0..features {
                 for n in 0..neurons {
-                    expected_input_grad[f * batch + b] +=
-                        weights[n * features + f] * grad_data[n * batch + b];
+                    expected_input_grad[b * features + f] +=
+                        weights[n * features + f] * grad_data[b * neurons + n];
                 }
             }
         }
@@ -1219,7 +1240,7 @@ mod tests {
         let mut expected_biases = biases.clone();
         for n in 0..neurons {
             for b in 0..batch {
-                expected_biases[n] -= lr * grad_data[n * batch + b];
+                expected_biases[n] -= lr * grad_data[b * neurons + n];
             }
         }
         assert_close(ff.biases.data.as_slice(), &expected_biases, 1e-12);
@@ -1230,7 +1251,7 @@ mod tests {
             for f in 0..features {
                 for b in 0..batch {
                     expected_weights[n * features + f] -=
-                        lr * grad_data[n * batch + b] * input_data[f * batch + b];
+                        lr * grad_data[b * neurons + n] * input_data[b * features + f];
                 }
             }
         }
@@ -1244,11 +1265,11 @@ mod tests {
             &[-5.0, 0.0],
             vec![2],
         );
-        let input = tensor_with_data(vec![2, 1], &[1.0, 1.0]);
+        let input = tensor_with_data(vec![1, 2], &[1.0, 1.0]);
 
         let out = ff.forward(input);
 
-        assert_eq!(out.shape, vec![2, 1]);
+        assert_eq!(out.shape, vec![1, 2]);
         assert_close(out.data.as_slice(), &[-7.0, 2.0], 1e-12);
     }
 
@@ -1256,13 +1277,13 @@ mod tests {
     fn backward_does_not_gate_gradients_by_preactivation() {
         let mut ff = ff_with_params(&[-1.0, -1.0, 1.0, 1.0], &[-5.0, 0.0], vec![2]);
 
-        let input = tensor_with_data(vec![2, 1], &[1.0, 1.0]);
-        let grad = tensor_with_data(vec![2, 1], &[1.0, 1.0]);
+        let input = tensor_with_data(vec![1, 2], &[1.0, 1.0]);
+        let grad = tensor_with_data(vec![1, 2], &[1.0, 1.0]);
 
         let lr = 0.1;
         let input_grad = ff.backward(lr, input, grad);
 
-        assert_eq!(input_grad.shape, vec![2, 1]);
+        assert_eq!(input_grad.shape, vec![1, 2]);
         assert_close(input_grad.data.as_slice(), &[0.0, 0.0], 1e-12);
 
         assert_close(ff.biases.data.as_slice(), &[-5.1, -0.1], 1e-12);

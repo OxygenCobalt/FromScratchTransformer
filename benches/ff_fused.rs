@@ -5,7 +5,10 @@ use rand::Rng;
 use test::{Bencher, black_box};
 
 use nn::{
-    ml::axons::ff::FeedForward as FusedFeedForward,
+    ml::axons::{
+        act::{Activation, ActivationFn},
+        ff::FeedForward as FusedFeedForward,
+    },
     tensor::cpu2::{Fill as Cpu2Fill, Tensor as Cpu2Tensor},
 };
 
@@ -30,12 +33,13 @@ fn cpu2_tensor_from_data(shape: &[usize], data: &[f64]) -> Cpu2Tensor {
 
 fn bench_fused_forward(b: &mut Bencher, features: usize, neurons: usize, batch: usize) {
     let ff = FusedFeedForward::new(vec![features], neurons);
-    let input = random_cpu2_tensor(vec![features, batch]);
+    let act = Activation::new(vec![neurons], ActivationFn::ReLU, 0.0);
+    let input = random_cpu2_tensor(vec![batch, features]);
     let input_shape = input.shape.clone();
     let input_buf = input.data.clone();
     b.iter(|| {
         let in_t = cpu2_tensor_from_data(&input_shape, input_buf.as_ref());
-        let out = ff.forward(in_t);
+        let out = act.forward(ff.forward(in_t));
         black_box(out);
     });
 }
@@ -463,31 +467,43 @@ fn fused_forward_10000_to_1000_batch100(b: &mut Bencher) {
 
 fn fused_backward_impl(
     ff: &mut FusedFeedForward,
+    act: &mut Activation,
     input_shape: &[usize],
     input_buf: &[f64],
+    ff_out_shape: &[usize],
+    ff_out_buf: &[f64],
     grad_shape: &[usize],
     grad_buf: &[f64],
     lr: f64,
 ) -> Cpu2Tensor {
     let in_t = cpu2_tensor_from_data(input_shape, input_buf.as_ref());
+    let ff_out = cpu2_tensor_from_data(ff_out_shape, ff_out_buf.as_ref());
     let grad_t = cpu2_tensor_from_data(grad_shape, grad_buf.as_ref());
-    ff.backward(lr, in_t, grad_t)
+    let ff_grad = act.backward(lr, ff_out, grad_t);
+    ff.backward(lr, in_t, ff_grad)
 }
 
 fn bench_fused_backward(b: &mut Bencher, features: usize, neurons: usize, batch: usize) {
     let mut ff = FusedFeedForward::new(vec![features], neurons);
-    let input = random_cpu2_tensor(vec![features, batch]);
-    let grad = random_cpu2_tensor(vec![neurons, batch]);
+    let mut act = Activation::new(vec![neurons], ActivationFn::ReLU, 0.0);
+    let input = random_cpu2_tensor(vec![batch, features]);
+    let ff_out = ff.forward(cpu2_tensor_from_data(&input.shape, input.data.as_ref()));
+    let grad = random_cpu2_tensor(vec![batch, neurons]);
     let input_shape = input.shape.clone();
     let input_buf = input.data.clone();
+    let ff_out_shape = ff_out.shape.clone();
+    let ff_out_buf = ff_out.data.clone();
     let grad_shape = grad.shape.clone();
     let grad_buf = grad.data.clone();
     let lr = 1e-3;
     b.iter(|| {
         let out = fused_backward_impl(
             &mut ff,
+            &mut act,
             &input_shape,
             &input_buf,
+            &ff_out_shape,
+            &ff_out_buf,
             &grad_shape,
             &grad_buf,
             lr,

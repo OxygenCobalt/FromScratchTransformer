@@ -141,14 +141,15 @@ mod tests {
                 10.0, 11.0, 12.0, 13.0,
             ],
         );
-        let input = tensor_with_data(vec![3, 1], &[2.0, 0.0, 3.0]);
+        let input = tensor_with_data(vec![1, 3], &[2.0, 0.0, 3.0]);
 
         let out = emb.forward(input);
 
-        assert_eq!(out.shape, vec![2, 3, 1]);
+        assert_eq!(out.shape, vec![1, 3, 2]);
         let expected = vec![
-            2.0, 0.0, 3.0, //
-            12.0, 10.0, 13.0,
+            2.0, 12.0, // c=0: tok2
+            0.0, 10.0, // c=1: tok0
+            3.0, 13.0, // c=2: tok3
         ];
         assert_close(out.data.as_slice(), &expected, 1e-12);
     }
@@ -163,15 +164,16 @@ mod tests {
                 7.0, 8.0, 9.0,
             ],
         );
-        let input = tensor_with_data(vec![4, 1], &[1.0, 1.0, 0.0, 1.0]);
+        let input = tensor_with_data(vec![1, 4], &[1.0, 1.0, 0.0, 1.0]);
 
         let out = emb.forward(input);
 
-        assert_eq!(out.shape, vec![3, 4, 1]);
+        assert_eq!(out.shape, vec![1, 4, 3]);
         let expected = vec![
-            2.0, 2.0, 1.0, 2.0, //
-            5.0, 5.0, 4.0, 5.0, //
-            8.0, 8.0, 7.0, 8.0,
+            2.0, 5.0, 8.0, // c=0: tok1
+            2.0, 5.0, 8.0, // c=1: tok1
+            1.0, 4.0, 7.0, // c=2: tok0
+            2.0, 5.0, 8.0, // c=3: tok1
         ];
         assert_close(out.data.as_slice(), &expected, 1e-12);
     }
@@ -185,12 +187,14 @@ mod tests {
                 5.0, 6.0, 7.0, 8.0,
             ],
         );
-        let input = tensor_with_data(vec![3, 1], &[2.0, 0.0, 3.0]);
+        let input = tensor_with_data(vec![1, 3], &[2.0, 0.0, 3.0]);
+        // grad shape [batch=1, ctx=3, dim=2]
         let grad = tensor_with_data(
-            vec![2, 3, 1],
+            vec![1, 3, 2],
             &[
-                0.5, -0.25, 1.0, //
-                -2.0, 0.75, 0.5,
+                0.5, -2.0,   // c=0: tok2
+                -0.25, 0.75, // c=1: tok0
+                1.0, 0.5,    // c=2: tok3
             ],
         );
 
@@ -222,12 +226,14 @@ mod tests {
                 40.0, 50.0, 60.0,
             ],
         );
-        let input = tensor_with_data(vec![3, 1], &[1.0, 1.0, 1.0]);
+        let input = tensor_with_data(vec![1, 3], &[1.0, 1.0, 1.0]);
+        // grad shape [batch=1, ctx=3, dim=2]
         let grad = tensor_with_data(
-            vec![2, 3, 1],
+            vec![1, 3, 2],
             &[
-                0.1, 0.2, -0.4, //
-                1.0, -3.0, 2.0,
+                0.1, 1.0,   // c=0: tok1
+                0.2, -3.0,  // c=1: tok1
+                -0.4, 2.0,  // c=2: tok1
             ],
         );
 
@@ -254,8 +260,9 @@ mod tests {
                 4.0, 5.0, 6.0,
             ],
         );
-        let input = tensor_with_data(vec![2, 1], &[0.0, 2.0]);
-        let grad = tensor_with_data(vec![2, 2, 1], &[1.0, 2.0, 3.0, 4.0]);
+        let input = tensor_with_data(vec![1, 2], &[0.0, 2.0]);
+        // grad shape [batch=1, ctx=2, dim=2]
+        let grad = tensor_with_data(vec![1, 2, 2], &[1.0, 3.0, 2.0, 4.0]);
         let before = emb.c.data.clone();
 
         emb.backward(0.0, input, grad);
@@ -274,27 +281,26 @@ mod tests {
                 10.0, 11.0, 12.0, 13.0,
             ],
         );
-        // input shape [ctx=3, batch=2]
-        // strides [2, 1], so data is [tok(0,0), tok(0,1), tok(1,0), tok(1,1), tok(2,0), tok(2,1)]
+        // input shape [batch=2, ctx=3]
         // batch 0 tokens: [2, 0, 3]
         // batch 1 tokens: [1, 2, 0]
-        let input = tensor_with_data(vec![3, 2], &[2.0, 1.0, 0.0, 2.0, 3.0, 0.0]);
+        let input = tensor_with_data(vec![2, 3], &[2.0, 0.0, 3.0, 1.0, 2.0, 0.0]);
 
         let out = emb.forward(input);
 
-        // output shape [dim=2, ctx=3, batch=2], strides [6, 2, 1]
-        // out[d, c, b] = emb_table[d, token(c,b)]
+        // output shape [batch=2, ctx=3, dim=2]
+        // out[b, c, d] = emb_table[d, token(b,c)]
         assert_eq!(out.shape, vec![2, 3, 2]);
         #[rustfmt::skip]
         let expected = vec![
-            // d=0
-            2.0, 1.0,   // c=0: tok2 for b0, tok1 for b1
-            0.0, 2.0,   // c=1: tok0 for b0, tok2 for b1
-            3.0, 0.0,   // c=2: tok3 for b0, tok0 for b1
-            // d=1
-            12.0, 11.0, // c=0
-            10.0, 12.0, // c=1
-            13.0, 10.0, // c=2
+            // b=0
+            2.0, 12.0,   // c=0: tok2
+            0.0, 10.0,   // c=1: tok0
+            3.0, 13.0,   // c=2: tok3
+            // b=1
+            1.0, 11.0,   // c=0: tok1
+            2.0, 12.0,   // c=1: tok2
+            0.0, 10.0,   // c=2: tok0
         ];
         assert_close(out.data.as_slice(), &expected, 1e-12);
     }
@@ -310,21 +316,24 @@ mod tests {
                 4.0, 5.0, 6.0,
             ],
         );
-        // input shape [ctx=2, batch=3]
+        // input shape [batch=3, ctx=2]
         // batch 0: [0, 1], batch 1: [1, 0], batch 2: [2, 2]
-        let input = tensor_with_data(vec![2, 3], &[0.0, 1.0, 2.0, 1.0, 0.0, 2.0]);
+        let input = tensor_with_data(vec![3, 2], &[0.0, 1.0, 1.0, 0.0, 2.0, 2.0]);
 
         let out = emb.forward(input);
 
-        assert_eq!(out.shape, vec![2, 2, 3]);
+        assert_eq!(out.shape, vec![3, 2, 2]);
         #[rustfmt::skip]
         let expected = vec![
-            // d=0
-            1.0, 2.0, 3.0, // c=0: tok0, tok1, tok2
-            2.0, 1.0, 3.0, // c=1: tok1, tok0, tok2
-            // d=1
-            4.0, 5.0, 6.0, // c=0
-            5.0, 4.0, 6.0, // c=1
+            // b=0: tokens [0, 1]
+            1.0, 4.0, // c=0: tok0
+            2.0, 5.0, // c=1: tok1
+            // b=1: tokens [1, 0]
+            2.0, 5.0, // c=0: tok1
+            1.0, 4.0, // c=1: tok0
+            // b=2: tokens [2, 2]
+            3.0, 6.0, // c=0: tok2
+            3.0, 6.0, // c=1: tok2
         ];
         assert_close(out.data.as_slice(), &expected, 1e-12);
     }
@@ -339,15 +348,17 @@ mod tests {
                 4.0, 5.0, 6.0,
             ],
         );
-        // input shape [ctx=2, batch=2]
+        // input shape [batch=2, ctx=2]
         // batch 0: [0, 2], batch 1: [1, 0]
-        let input = tensor_with_data(vec![2, 2], &[0.0, 1.0, 2.0, 0.0]);
-        // grad shape [dim=2, ctx=2, batch=2], strides [4, 2, 1]
+        let input = tensor_with_data(vec![2, 2], &[0.0, 2.0, 1.0, 0.0]);
+        // grad shape [batch=2, ctx=2, dim=2]
         let grad = tensor_with_data(
             vec![2, 2, 2],
             &[
-                0.1, 0.2, 0.3, 0.4, // d=0
-                0.5, 0.6, 0.7, 0.8, // d=1
+                0.1, 0.5, // b=0, c=0: tok0
+                0.3, 0.7, // b=0, c=1: tok2
+                0.2, 0.6, // b=1, c=0: tok1
+                0.4, 0.8, // b=1, c=1: tok0
             ],
         );
 
@@ -359,16 +370,16 @@ mod tests {
         assert_close(input_back.data.as_slice(), input.data.as_slice(), 1e-12);
 
         // Token usage:
-        //   tok0: (c=0,b=0) and (c=1,b=1) → accumulated
-        //   tok1: (c=0,b=1)
-        //   tok2: (c=1,b=0)
+        //   tok0: (b=0,c=0) and (b=1,c=1) → accumulated
+        //   tok1: (b=1,c=0)
+        //   tok2: (b=0,c=1)
         //
-        // emb[0,0] -= lr * (g[0,0,0] + g[0,1,1]) = 1.0 * (0.1 + 0.4)
-        // emb[0,1] -= lr * g[0,0,1]               = 1.0 * 0.2
-        // emb[0,2] -= lr * g[0,1,0]               = 1.0 * 0.3
-        // emb[1,0] -= lr * (g[1,0,0] + g[1,1,1]) = 1.0 * (0.5 + 0.8)
-        // emb[1,1] -= lr * g[1,0,1]               = 1.0 * 0.6
-        // emb[1,2] -= lr * g[1,1,0]               = 1.0 * 0.7
+        // emb[0,0] -= lr * (g[b0,c0,d0] + g[b1,c1,d0]) = 1.0 * (0.1 + 0.4)
+        // emb[0,1] -= lr * g[b1,c0,d0]                  = 1.0 * 0.2
+        // emb[0,2] -= lr * g[b0,c1,d0]                  = 1.0 * 0.3
+        // emb[1,0] -= lr * (g[b0,c0,d1] + g[b1,c1,d1]) = 1.0 * (0.5 + 0.8)
+        // emb[1,1] -= lr * g[b1,c0,d1]                  = 1.0 * 0.6
+        // emb[1,2] -= lr * g[b0,c1,d1]                  = 1.0 * 0.7
         let expected = vec![
             1.0 - 0.5,
             2.0 - 0.2,
@@ -390,14 +401,16 @@ mod tests {
                 30.0, 40.0,
             ],
         );
-        // input shape [ctx=2, batch=2], every position uses token 0
+        // input shape [batch=2, ctx=2], every position uses token 0
         let input = tensor_with_data(vec![2, 2], &[0.0, 0.0, 0.0, 0.0]);
-        // grad shape [dim=2, ctx=2, batch=2]
+        // grad shape [batch=2, ctx=2, dim=2]
         let grad = tensor_with_data(
             vec![2, 2, 2],
             &[
-                1.0, 2.0, 3.0, 4.0, // d=0
-                5.0, 6.0, 7.0, 8.0, // d=1
+                1.0, 5.0, // b=0, c=0
+                3.0, 7.0, // b=0, c=1
+                2.0, 6.0, // b=1, c=0
+                4.0, 8.0, // b=1, c=1
             ],
         );
 
@@ -405,8 +418,8 @@ mod tests {
         emb.backward(lr, input, grad);
 
         // tok0 used at all 4 positions → sum all grads per dim
-        // emb[0,0] -= 0.1 * (1+2+3+4) = 0.1 * 10 = 1.0
-        // emb[1,0] -= 0.1 * (5+6+7+8) = 0.1 * 26 = 2.6
+        // emb[0,0] -= 0.1 * (1+3+2+4) = 0.1 * 10 = 1.0
+        // emb[1,0] -= 0.1 * (5+7+6+8) = 0.1 * 26 = 2.6
         // tok1 never used → unchanged
         let expected = vec![
             10.0 - 1.0,
