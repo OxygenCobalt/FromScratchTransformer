@@ -18,6 +18,8 @@ const FORWARD_MIN_FLOPS_PER_CORE: usize = 512_000 / 24; // measured on bench sui
 // Backward total crossover ~1.18e7 FLOPs; split across two passes ~= 5.9e6 FLOPs.
 const BACKWARD_PASS1_MIN_FLOPS_PER_CORE: usize = 6_000_000 / 24;
 const BACKWARD_PASS2_MIN_FLOPS_PER_CORE: usize = 6_000_000 / 24;
+const FORWARD_TILE_N: usize = 8;
+const FORWARD_TILE_B: usize = 4;
 
 pub struct FeedForward {
     weights: Tensor,
@@ -62,7 +64,7 @@ impl FeedForward {
         let parallelism = rayon::current_num_threads();
         let flops_per_core = (self.neurons * self.fan_in * batch) / parallelism;
         if flops_per_core >= FORWARD_MIN_FLOPS_PER_CORE {
-            let neurons_per_chunk = (self.neurons as f64 / parallelism as f64).ceil() as usize;
+            let neurons_per_chunk = ((self.neurons as f64 / parallelism as f64).ceil() as usize);
             let a_out_flat_addy = a_out_flat_data.as_mut_ptr() as usize;
             (0..self.neurons)
                 .step_by(neurons_per_chunk)
@@ -91,53 +93,71 @@ impl FeedForward {
         start_neuron: usize,
         neuron_count: usize,
         batch: usize,
-        a_in: &TensorView<'_>,
-        a_out: *mut f64,
+        a_in: &TensorView<'_>, // shape = [batch, fan_in], stride = [fan_in, 1]
+        a_out: *mut f64,       // shape = [batch, neuron], stride = [neurons, 1]
     ) {
-        let mut weights_idx = self.fan_in * start_neuron; // shape = [neurons, fan_in], stride = [fan_in, 1]
-        let mut a_in_idx = 0; // shape = [batch, fan_in], stride = [fan_in, 1]
-        let mut bias_idx = start_neuron; // shape = [neurons], stride = [1]
-        let mut a_out_idx = start_neuron; // shape = [batch, neuron], stride = [neurons, 1]
         let chunks = self.fan_in / LANES;
         let remainder = self.fan_in % LANES;
-        for _ in 0..batch {
-            for _ in 0..neuron_count {
-                let bias = unsafe { *self.biases.data.get_unchecked(bias_idx) };
-                let mut weights_ptr = unsafe { self.weights.data.as_ptr().add(weights_idx) };
-                let mut a_in_ptr = unsafe { a_in.tensor.data.as_ptr().add(a_in_idx) };
-                let mut sum_simd: Simd<f64, LANES> = Simd::splat(0.0);
-                for _ in 0..chunks {
-                    let weights_simd =
-                        unsafe { std::ptr::read_unaligned(weights_ptr as *const Simd<f64, LANES>) };
-                    let a_in_simd =
-                        unsafe { std::ptr::read_unaligned(a_in_ptr as *const Simd<f64, LANES>) };
-                    sum_simd += weights_simd * a_in_simd;
-                    weights_ptr = unsafe { weights_ptr.add(LANES) };
-                    a_in_ptr = unsafe { a_in_ptr.add(LANES) };
+        for tile_start_neuron in (0..neuron_count).step_by(FORWARD_TILE_N) {
+            for tile_start_batch in (0..batch).step_by(FORWARD_TILE_B) {
+                let mut weights_idx = self.fan_in * (start_neuron + tile_start_neuron); // shape = [neurons, fan_in], stride = [fan_in, 1]
+                let mut a_in_idx = tile_start_batch * self.fan_in;
+                let mut bias_idx = start_neuron + tile_start_neuron; // shape = [neurons], stride = [1]
+                let mut a_out_idx =
+                    tile_start_batch * self.neurons + (start_neuron + tile_start_neuron);
+                let tile_n = FORWARD_TILE_N.min(neuron_count - tile_start_neuron);
+                let tile_b = FORWARD_TILE_B.min(batch - tile_start_batch);
+                for _ in 0..tile_n {
+                    for _ in 0..tile_b {
+                        let bias = unsafe { *self.biases.data.get_unchecked(bias_idx) };
+                        let mut weights_ptr =
+                            unsafe { self.weights.data.as_ptr().add(weights_idx) };
+                        let mut a_in_ptr = unsafe { a_in.tensor.data.as_ptr().add(a_in_idx) };
+                        let mut sum_simd: Simd<f64, LANES> = Simd::splat(0.0);
+                        for _ in 0..chunks {
+                            let weights_simd = unsafe {
+                                std::ptr::read_unaligned(weights_ptr as *const Simd<f64, LANES>)
+                            };
+                            let a_in_simd = unsafe {
+                                std::ptr::read_unaligned(a_in_ptr as *const Simd<f64, LANES>)
+                            };
+                            sum_simd += weights_simd * a_in_simd;
+                            weights_ptr = unsafe { weights_ptr.add(LANES) };
+                            a_in_ptr = unsafe { a_in_ptr.add(LANES) };
+                        }
+                        let mut sum: f64 = sum_simd.reduce_sum();
+                        weights_idx += LANES * chunks;
+                        a_in_idx += LANES * chunks;
+                        for _ in 0..remainder {
+                            unsafe {
+                                sum += *self.weights.data.get_unchecked(weights_idx)
+                                    * *a_in.tensor.data.get_unchecked(a_in_idx)
+                            };
+                            weights_idx += 1;
+                            a_in_idx += 1;
+                        }
+                        unsafe {
+                            *a_out.add(a_out_idx) = sum + bias;
+                        }
+                        // rewind weights idx back to start so we dont accidentally advance across neurons
+                        weights_idx -= self.fan_in;
+                        // advance a_out across batch
+                        a_out_idx += self.neurons;
+                        // a_in_idx already advanced to the next batch
+                        // bias_idx was never advancing across batch
+                    }
+                    // advance weights to next neuron
+                    weights_idx += self.fan_in;
+                    // advance bias to next neuron
+                    bias_idx += 1;
+                    // rewind a_in_idx across batch
+                    a_in_idx -= tile_b * self.fan_in;
+                    // rewind a_out_idx across batch
+                    a_out_idx -= self.neurons * tile_b;
+                    // advance a_out_idx across neurons
+                    a_out_idx += 1;
                 }
-                let mut sum: f64 = sum_simd.reduce_sum();
-                weights_idx += LANES * chunks;
-                a_in_idx += LANES * chunks;
-                for _ in 0..remainder {
-                    unsafe {
-                        sum += *self.weights.data.get_unchecked(weights_idx)
-                            * *a_in.tensor.data.get_unchecked(a_in_idx)
-                    };
-                    weights_idx += 1;
-                    a_in_idx += 1;
-                }
-                unsafe {
-                    *a_out.add(a_out_idx) = sum + bias;
-                }
-                a_in_idx -= self.fan_in;
-                a_out_idx += 1;
-                bias_idx += 1;
             }
-            a_in_idx += self.fan_in;
-            weights_idx = self.fan_in * start_neuron;
-            bias_idx = start_neuron;
-            a_out_idx -= neuron_count;
-            a_out_idx += self.neurons;
         }
     }
 
